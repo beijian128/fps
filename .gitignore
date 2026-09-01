@@ -1,0 +1,22 @@
+# IDE
+.idea/
+
+# Jolt Physics — third-party dependency, clone separately:
+#   git clone https://github.com/jrouwe/JoltPhysics.git
+JoltPhysics/
+
+# Build outputs
+joltgo/build/
+joltgo/joltgo.exe
+joltgo/joltgo.exe~
+joltgo/libjolt_c.dll
+joltgo/*.log
+
+# Binaries and build artifacts
+*.exe
+*.dll
+*.a
+*.o
+*.obj
+*.gch
+*.log

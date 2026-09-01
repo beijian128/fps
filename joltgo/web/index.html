@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+	<meta charset="utf-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<title>Jolt FPS Demo</title>
+	<style>
+		:root { color-scheme: dark; }
+		* { box-sizing: border-box; }
+		html, body { margin: 0; height: 100%; font-family: system-ui, -apple-system, Segoe UI, sans-serif; overflow: hidden; }
+		body { background: #0d1117; color: #e6edf3; }
+		#viewport { position: fixed; inset: 0; }
+		canvas { display: block; }
+
+		#hud {
+			position: fixed; left: 16px; top: 14px; z-index: 10;
+			display: flex; gap: 18px; font-size: 14px; pointer-events: none;
+			text-shadow: 0 1px 3px rgba(0,0,0,0.8);
+		}
+		#hud .stat b { color: #58a6ff; font-variant-numeric: tabular-nums; }
+
+		#healthwrap {
+			position: fixed; left: 16px; bottom: 18px; z-index: 10; width: 220px;
+			pointer-events: none; text-shadow: 0 1px 3px rgba(0,0,0,0.8);
+		}
+		#healthbar {
+			height: 8px; background: #1b2027; border: 1px solid #30363d; border-radius: 4px; overflow: hidden;
+		}
+		#healthfill { height: 100%; width: 100%; background: #3fb950; transition: width 0.12s linear; }
+
+		#crosshair {
+			position: fixed; left: 50%; top: 50%; z-index: 10;
+			width: 6px; height: 6px; margin: -3px 0 0 -3px;
+			border-radius: 50%; background: rgba(255,255,255,0.9);
+			box-shadow: 0 0 0 1px rgba(0,0,0,0.6); pointer-events: none;
+		}
+
+		#hint {
+			position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%);
+			z-index: 10; font-size: 12px; color: #9da7b3; pointer-events: none;
+			text-shadow: 0 1px 3px rgba(0,0,0,0.8);
+		}
+
+		#reset {
+			position: fixed; right: 14px; top: 14px; z-index: 20;
+			background: #21262d; color: #e6edf3; border: 1px solid #30363d;
+			border-radius: 6px; padding: 6px 12px; cursor: pointer; font-size: 13px;
+		}
+		#reset:hover { background: #30363d; }
+
+		#overlay {
+			position: fixed; inset: 0; z-index: 30; display: flex;
+			flex-direction: column; align-items: center; justify-content: center;
+			background: rgba(13,17,23,0.82); text-align: center; cursor: pointer;
+		}
+		#overlay h1 { margin: 0 0 8px; font-size: 32px; letter-spacing: 0.5px; }
+		#overlay p { margin: 4px 0; color: #9da7b3; }
+		#overlay .keys { color: #e6edf3; background: #161b22; border: 1px solid #30363d;
+			border-radius: 4px; padding: 1px 6px; font-size: 12px; }
+	</style>
+	<script type="importmap">
+		{
+			"imports": {
+				"three": "/vendor/three.module.js",
+				"three/addons/": "/vendor/"
+			}
+		}
+	</script>
+</head>
+<body>
+	<div id="viewport"></div>
+
+	<div id="hud">
+		<div class="stat">score <b id="score">0</b></div>
+		<div class="stat">targets <b id="targets">0</b></div>
+		<div class="stat">enemies <b id="enemies">0</b></div>
+		<div class="stat">fps <b id="fps">0</b></div>
+	</div>
+	<div id="healthwrap"><div id="healthbar"><div id="healthfill"></div></div></div>
+	<div id="crosshair"></div>
+	<div id="hint">WASD 移动 · 鼠标瞄准 · 左键射击 · 空格跳跃 · Shift 奔跑</div>
+	<button id="reset">Reset</button>
+
+	<div id="overlay">
+		<h1>Jolt FPS Demo</h1>
+		<p>点击进入游戏并锁定鼠标</p>
+		<p>射击红色靶球与追击你的敌人，命中箱子会把它击飞</p>
+		<p><span class="keys">W A S D</span> 移动 &nbsp; <span class="keys">Space</span> 跳跃 &nbsp; <span class="keys">Shift</span> 奔跑</p>
+	</div>
+
+	<script type="module" src="/app.js"></script>
+</body>
+</html>
