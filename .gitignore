@@ -5,6 +5,9 @@
 #   git clone https://github.com/jrouwe/JoltPhysics.git
 JoltPhysics/
 
+# Godot editor cache
+godot_client/.godot/
+
 # Build outputs
 joltgo/build/
 joltgo/joltgo.exe

@@ -72,7 +72,8 @@ cd joltgo
 .\joltgo.exe
 ```
 
-服务监听 <http://localhost:8080>（端口在 `main.go` 中硬编码为 `:8080`）。
+服务端监听 <ws://localhost:8080/>（端口在 `main.go` 中硬编码为 `:8080`），
+用 Godot 客户端连接游玩（见根目录 README）。
 
 ## 常见问题
 
@@ -83,7 +84,7 @@ cd joltgo
 | 重建时 `Copy-Item` 报「文件被另一进程占用」 | `joltgo.exe` 还在运行、锁住了 DLL。先结束该进程再构建 |
 | `gcc/g++` 找不到 Jolt 头文件 | 包装层只应通过 CMake 编译；`go build` 时 cgo 只需 `-I wrapper`，不要手动引 Jolt 头 |
 | 运行时缺 `libstdc++-6.dll` 等 | 说明 DLL 没静态链接运行库，检查 CMake 里 MINGW 分支的 `-static` 是否被改动 |
-| 启动后游戏不动、开始界面敌人不追 | 正常：物理只在鼠标锁定后才推进，防止开始前被打 |
+| 启动后服务端世界在动（步数增长） | 正常：20 Hz 模拟 tick 无条件运行，无论有没有客户端连接 |
 
 ## 手动构建（不使用 build.ps1）
 

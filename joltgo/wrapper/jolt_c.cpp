@@ -45,6 +45,13 @@ namespace
 	constexpr uint NUM_BROAD_PHASE_LAYERS = 2;
 
 	constexpr uint64 PROJECTILE_USER_DATA = 0x0BADBEEF;
+
+	// Tuned for snappier FPS jump feel. Real-world gravity is 9.81 m/s^2, but
+	// the default jump speed (8 m/s) produces a very tall, floaty arc. Using a
+	// higher gravity shortens both the rise and the fall so the player lands
+	// noticeably faster without making the jump feel weak.
+	constexpr float GRAVITY_Y = -20.0f;
+	constexpr float JUMP_SPEED = 8.5f;
 }
 
 struct BodyRecord
@@ -88,6 +95,26 @@ public:
 	std::vector<HitPair> hits;
 };
 
+// 角色不能被推动/挤开：与动态刚体（敌人、箱子）接触时禁止对方推动角色。
+// 约束速度会被清零，角色位置完全由输入决定；动态刚体仍会在接触冲量下被弹开
+// （mCanReceiveImpulses 保持默认 true，FPS 里角色照常能推开箱子）。
+// 静态几何保持默认：贴地/上台阶依赖静态穿透恢复。
+class CharacterImmovableListener : public CharacterContactListener
+{
+public:
+	virtual void OnContactAdded(const CharacterVirtual *inCharacter, const CharacterContact &inContact, CharacterContactSettings &ioSettings) override
+	{
+		if (inContact.mMotionTypeB == EMotionType::Dynamic)
+			ioSettings.mCanPushCharacter = false;
+	}
+
+	virtual void OnContactPersisted(const CharacterVirtual *inCharacter, const CharacterContact &inContact, CharacterContactSettings &ioSettings) override
+	{
+		if (inContact.mMotionTypeB == EMotionType::Dynamic)
+			ioSettings.mCanPushCharacter = false;
+	}
+};
+
 struct JoltWorld
 {
 	TempAllocatorImpl *temp_allocator = nullptr;
@@ -98,6 +125,7 @@ struct JoltWorld
 	PhysicsSystem *physics_system = nullptr;
 	CharacterVirtual *character = nullptr;
 	ProjectileContactListener contact_listener;
+	CharacterImmovableListener character_listener;
 	std::vector<BodyRecord> bodies;
 	uint32_t next_id = 1;
 };
@@ -170,6 +198,7 @@ extern "C" JoltWorld *jolt_create(void)
 		65536, 0, 65536, 10240,
 		*w->bp_layer_interface, *w->object_vs_bp_filter, *w->object_pair_filter);
 
+	w->physics_system->SetGravity(Vec3(0.0f, GRAVITY_Y, 0.0f));
 	w->physics_system->SetContactListener(&w->contact_listener);
 
 	// Player capsule: total height 1.8 m (half height 0.5 + 2 * radius 0.4),
@@ -180,7 +209,8 @@ extern "C" JoltWorld *jolt_create(void)
 	CharacterVirtualSettings character_settings;
 	character_settings.mShape = standing_shape;
 	character_settings.mMaxSlopeAngle = DegreesToRadians(50.0f);
-	w->character = new CharacterVirtual(&character_settings, RVec3(0.0f, 0.2f, 12.0f), Quat::sIdentity(), w->physics_system);
+	w->character = new CharacterVirtual(&character_settings, RVec3(0.0f, 0.0f, 12.0f), Quat::sIdentity(), w->physics_system);
+	w->character->SetListener(&w->character_listener);
 
 	return w;
 }
@@ -481,7 +511,7 @@ extern "C" void jolt_update_character(JoltWorld *w, float wish_x, float wish_z, 
 	{
 		vy = 0.0f;
 		if (jump)
-			vy = 8.0f;
+			vy = JUMP_SPEED;
 	}
 
 	vy += w->physics_system->GetGravity().GetY() * dt;
