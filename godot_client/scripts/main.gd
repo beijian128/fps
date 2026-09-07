@@ -424,8 +424,8 @@ func _pop(point: Vector3, color: Color, size: float, ttl: float) -> void:
 	var mi := MeshInstance3D.new()
 	mi.mesh = m
 	mi.material_override = mat
-	mi.global_position = point
 	add_child(mi)
+	mi.global_position = point
 	var tw := mi.create_tween()
 	tw.set_parallel(true)
 	tw.tween_property(mi, "scale", Vector3.ONE * 4.0, ttl)

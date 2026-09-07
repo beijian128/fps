@@ -1,17 +1,18 @@
 package main
 
-// 入口：创建游戏与 WebSocket hub，启动 20 Hz 模拟 tick。
+// 入口：组装 Jolt 物理桥 + ECS 模拟 + WebSocket hub，启动 20 Hz 模拟 tick。
 
 import (
+	"joltgo/sim"
 	"log"
 	"net/http"
 )
 
 func main() {
-	game := newGame()
-	game.Init()
+	simulation := sim.New(newJoltPhysics())
+	simulation.Init()
 
-	hub := newWsHub(game)
+	hub := newWsHub(simulation)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", hub.handle)
 

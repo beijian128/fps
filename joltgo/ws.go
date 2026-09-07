@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"joltgo/sim"
 	"log"
 	"net"
 	"net/http"
@@ -43,10 +44,10 @@ type wsClient struct {
 type wsHub struct {
 	mu      sync.Mutex
 	clients map[*wsClient]struct{}
-	game    *Game
+	game    *sim.Simulation
 }
 
-func newWsHub(game *Game) *wsHub {
+func newWsHub(game *sim.Simulation) *wsHub {
 	return &wsHub{clients: map[*wsClient]struct{}{}, game: game}
 }
 

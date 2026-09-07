@@ -12,20 +12,70 @@
                        │ WebSocket（JSON 文本帧）
 ┌──────────────────────▼───────────────────────┐
 │  Go 服务（joltgo/）                           │
-│  main.go     入口 + 20 Hz 模拟 tick           │
-│  game.go     游戏状态/玩法逻辑（自带锁）      │
+│  main.go     入口：组装各层 + 20 Hz 模拟 tick │
 │  ws.go       WebSocket hub（广播/上行分发）   │
+│  physics.go  cgo 物理桥（sim.Physics 实现，   │
+│              实体 id ↔ Jolt BodyID 翻译）     │
+│  sim/        ECS 模拟层（组件/系统/快照）     │
+│  ecs/        ECS 核心（实体/组件存储/查询）   │
 └──────────────────────┬───────────────────────┘
                        │ cgo
 ┌──────────────────────▼───────────────────────┐
 │  C 包装层（wrapper/jolt_c.{h,cpp}）           │
-│  extern "C"，只暴露 POD 类型                  │
+│  纯物理桥：只暴露 Jolt 原生 API，无任何业务   │
 └──────────────────────┬───────────────────────┘
                        │ C++ API
 ┌──────────────────────▼───────────────────────┐
 │  Jolt Physics（libJolt.a → libjolt_c.dll）    │
 └──────────────────────────────────────────────┘
 ```
+
+## 服务端 ECS 架构
+
+服务端游戏逻辑用「实体-组件-系统」（ECS）组织，核心在 `ecs/`（零依赖、可单测），
+玩法层在 `sim/`：
+
+- **实体（Entity）**：只是 `uint32` ID，由 Go 桥（`physics.go`）从 1 递增发放，
+  桥层维护实体 id ↔ Jolt BodyID 的双向映射（Jolt 原生 BodyID 会与 ECS 的
+  InvalidEntity 约定冲突，不能直接透传）；纯逻辑实体（玩家）由 ECS 世界
+  从 `1<<24` 起分配，两个 ID 空间不重叠
+- **组件（Component）**：纯数据，稀疏集存储（dense 数组 + sparse 索引），
+  增删 O(1)、遍历走连续数组：
+  `Position` / `Rotation` / `Body`（形状/尺寸/静态/活跃，快照渲染元数据）、
+  `Player` / `Input` / `Health`、`Enemy` / `Target` / `Projectile` / `Resource`
+- **系统（System）**：每 tick 按固定顺序运行，只通过组件和 `Physics` 接口交互：
+  输入 → 物理步进 → 变换同步 → 弹丸命中 → 接触伤害 → 弹丸过期 →
+  金币拾取 → 波次推进。碰撞判定全部走物理层（弹丸用刚体接触事件、
+  伤害/拾取用角色接触事件），不做距离计算
+- **物理抽象**：`sim.Physics` 接口隔离 Jolt cgo 调用；`package main` 的
+  `physics.go` 是唯一允许 cgo 的文件。因此 `sim` 层用 fake 物理即可单元测试，
+  系统行为不依赖真实物理引擎。包装层本身不含任何业务（见下），
+  所有游戏调参（重力/跳跃/胶囊尺寸/弹丸配置/敌人参数）都在 `sim/` 常量区
+
+### 每 tick 只同步一次变换
+
+旧实现里每个系统各自枚举 C++ 刚体（快照、敌人 AI、伤害判定、计数、命中查找，
+每 tick 多达 4~5 遍全量扫描）。重构后 `syncSystem` 每 tick 只枚举一次，
+把位置/旋转/活跃状态写回组件，其余系统全部读写 Go 侧组件。顺序语义与旧实现
+完全一致：
+
+- AI 读的是**上个 tick** 同步的位置（等价于旧实现「步进前枚举」拿到的值）；
+  伤害与快照读的是**本 tick 步进后**同步的位置（等价于旧实现「步进后枚举」）
+- 两次 tick 之间创建的实体（如 WebSocket 线程里的射击）在创建时就写入已知的
+  初始位置，立即出现在快照里，不会闪现在原点
+
+### 命中结算与物理桥的职责边界
+
+- 包装层是**纯物理桥**：只暴露 Jolt 原生能力（世界/刚体/角色控制器/接触事件/
+  射线），不携带任何游戏业务概念——没有敌人/弹丸/靶球/血量，没有角色移动
+  策略与调参，接触事件原样上报所有刚体对
+- 血量是 Go 侧 `Health` 组件，归零后直接 `jolt_remove_body` 并销毁实体；
+  弹丸命中由弹丸系统从通用接触流中筛选（至少一侧带 `Projectile` 组件）
+- Go 桥（`physics.go`）负责 id 翻译：Jolt 原生 BodyID 透传会与 ECS 的
+  InvalidEntity（0）约定冲突，桥层维护双向映射，向 sim 发放从 1 递增的实体 id
+- 快照的 `bodyInfo` 各字段由组件重建（`type` ← `Body.Kind`，`enemy/target/
+  projectile` ← 标记组件，`health` ← `Health`），并**按 id 升序排序**输出，
+  与存储的 swap-remove 顺序无关；协议字段与旧实现逐字一致，客户端零改动
 
 ## 为什么用 cgo + C ABI
 
@@ -37,6 +87,12 @@ cgo 只能直接调用 C ABI，不能调用 C++ 类/重载/模板。因此所有
 - 不透明指针（`JoltWorld *`）
 
 禁止跨边界传递 `std::string`、`std::vector`、C++ 对象、引用或异常。
+
+包装层是**纯物理桥**：函数只对应 Jolt 原生能力（`jolt_add_sphere` /
+`jolt_set_body_velocity` / `jolt_poll_contacts` / `jolt_character_update` 等），
+不带任何游戏语义。敌人/弹丸/靶球/血量、角色移动策略、所有数值调参都属于
+Go 侧（sim）；包装层内部只保留两个物理层自身的状态：刚体 id 登记表（供枚举）
+与接触事件队列（线程安全转发）。
 
 ## 数据流
 
@@ -64,41 +120,57 @@ cgo 只能直接调用 C ABI，不能调用 C++ 类/重载/模板。因此所有
 - 使用 Jolt `CharacterVirtual`，形状是「胶囊 + 向上平移」：
   - 胶囊半径 0.4 m，圆柱半高 0.5 m，总高 1.8 m
   - 用 `RotatedTranslatedShape` 上移 0.9 m，使形状底部位于脚底（`GetPosition()` 即脚底位置）
-- 每 tick 由服务端调用 `jolt_update_character`：
+  - 形状、出生点、重力、跳跃速度全部是 Go 侧（sim）的调参，通过 `jolt_character_create`
+    与 `jolt_set_gravity` 传入；包装层不携带任何角色参数
+- 每 tick 由输入系统（`sim/inputSystem`）实现移动策略后交给物理层执行：
   - 水平速度直接来自客户端输入（走 8 m/s，跑 14 m/s）
-  - 垂直速度：着地时归零、跳跃设 8 m/s、再叠加重力积分
-  - `ExtendedUpdate` 负责碰撞、贴地、上台阶
-- 角色不可被推动/挤开：`CharacterImmovableListener`（包装层）对动态刚体接触
-  禁用 `mCanPushCharacter`，约束速度清零后角色位置完全由输入决定；
-  动态刚体通过接触冲量（`mCanReceiveImpulses`）被挡开，玩家照常能推箱子；
+  - 垂直速度：着地时归零、跳跃设 8.5 m/s、再叠加重力（-20 m/s²，比真实重力大，
+    跳起/落地更快、手感更利落）
+  - `ExtendedUpdate`（`jolt_character_update`）负责碰撞、贴地、上台阶
+- 角色不可被推动/挤开：这是游戏规则，由 sim 通过 `SetCharacterDynamicPush(false)`
+  配置——包装层只暴露「动态刚体能否推动角色」这个物理级开关
+  （对应 Jolt `CharacterContactSettings::mCanPushCharacter`）。
+  禁用后动态刚体通过接触冲量（`mCanReceiveImpulses`）被挡开，玩家照常能推箱子；
   静态几何保持默认，不影响贴地与上台阶
+- 同一个角色接触监听器还把**角色接触到的刚体 id**记录进队列（接触建立时 +
+  每步接触求解时），Go 侧每 tick 轮询——贴身伤害（敌人）与金币拾取（传感器球）
+  都从这里判定，不写任何距离计算
 - 客户端只保留偏航/俯仰（鼠标视角），相机位置 = 服务端返回的脚底位置 + 1.6 m 眼高
 
 ### 弹丸
 
-- 客户端下发 `shoot` 消息 → 服务端生成一枚小球：
+- 客户端下发 `shoot` 消息 → 服务端生成一枚小球（物理配置全部由 sim 设置）：
   - 半径 0.08 m，初速 60 m/s
-  - `EMotionQuality::LinearCast`，高速下不会穿透薄墙
-  - `SetUserData` 标记为弹丸
+  - `EMotionQuality::LinearCast`（`jolt_set_body_motion_quality`），高速下不会穿透薄墙
+  - 摩擦/弹性置 0；「这是弹丸」是 Go 侧 `Projectile` 组件，物理层不区分
 - 命中判定依赖 `PhysicsSystem` 的 `ContactListener`：
-  - `OnContactAdded` 在碰撞发生时（工作线程内）把「弹丸 BodyID + 目标 BodyID」写入受互斥锁保护的队列
-  - 每 tick 结束后服务端 `jolt_poll_projectile_hits` 排空队列
-- 命中后处理：命中靶球 → 销毁并加分；命中敌人 → 扣血，血尽销毁并重生；命中其他 → 移除弹丸
+  - 包装层把**所有**刚体接触对原样写入受互斥锁保护的队列（纯物理事实，
+    不区分弹丸/敌人/箱子）
+  - 每 tick 结束后服务端 `jolt_poll_contacts` 排空队列，弹丸系统挑出至少一侧
+    带 `Projectile` 组件的接触对进行结算，其余（箱子落地等）忽略
+- 命中后处理：命中靶球 → 销毁并加分；命中敌人 → 扣血，血尽销毁并掉落金币；命中其他 → 移除弹丸
 - 弹丸最多存活 60 tick（20 Hz 下 3 秒），超时自动移除
 
-### 敌人 AI（PVE 波次）
+### 敌人（PVE 波次）
 
-- 敌人是动态胶囊刚体（半径 0.35 m，半高 0.5 m，初始 3 点血），视觉上是卡通圆滚滚怪物
-- 每 tick `updateEnemies` 把敌人的水平速度设为「指向玩家的单位向量 × 2.2 m/s」，
-  低难度：怪物贴身（1.4 m 内）每 tick 扣 0.4 点血（即 8/s），不会推动玩家
+- 敌人是**静态**胶囊刚体（半径 0.35 m，半高 0.5 m，初始 3 点血），视觉上是卡通圆滚滚怪物
+- **怪物不移动**：没有追击 AI，也不可被推动/击退——出生后原地待机，是固定「地雷」
+- **伤害是物理接触判定**：角色的 CharacterContactListener 接触事件（接触求解每步触发）
+  里出现敌人刚体即扣血，低难度每 tick 每只 0.4 点（即贴着怪物 8/s），
+  不做任何距离计算
 - 波次规则：第 1 波 3 只，之后每波 +1，最多 6 只；场上清空 2 秒后刷下一波
-- 敌人死亡即被移除（不再立即重生），并在死亡位置掉落一枚金币
+- 敌人血量是 Go 侧 `Health` 组件（3 点，被命中 3 次死亡）；死亡即被移除
+  （不再立即重生），并在死亡位置掉落一枚金币
 
 ### 资源（金币）
 
-- 金币是纯逻辑对象：不进物理世界、不参与碰撞，只在快照的 `resources` 中下发
+- 金币是**Jolt 传感器球**（`mIsSensor = true`，半径 0.6 m，悬浮在 0.8 m 高）：
+  不参与刚体碰撞响应（弹丸/箱子直接穿过），但角色控制器的碰撞查询会检测到它，
+  角色接触到即拾取（拾取半径 = 角色半径 0.4 + 传感器半径 0.6 ≈ 水平 1 m，
+  与旧距离判定手感一致）
 - 初始 6 枚随机撒在地图（离出生点 4 m 外）；击杀掉落，场上上限 10 枚
-- 每 tick 做距离判定（0.8 m），玩家走近即移除并 `gold++`
+- 传感器球不出现在快照 `bodies` 里（客户端只渲染 `resources` 列表），拾取即
+  移除刚体并 `gold++`
 - 客户端渲染为金色双盘（自转 + 浮动动画），消失时播放拾取音效
 
 ## 关键设计决策与坑
@@ -128,9 +200,10 @@ Jolt 的 Release 构建定义 `NDEBUG`、`JPH_DEBUG_RENDERER`、`JPH_PROFILE_ENA
 
 ### 服务端锁与广播
 
-- `game.go`：全局 `sync.Mutex` 保护物理世界与游戏状态；公开方法
+- `sim.Simulation`：全局 `sync.Mutex` 保护 ECS 世界与物理世界；公开方法
   （`ApplyInput` / `Shoot` / `Reset` / `Step` / `Snapshot`）内部加锁，
   内部 `xLocked` 方法要求调用方已持有锁，tick 循环与 WebSocket 读线程可安全并发
+- `ecs.World` 自身不加锁，由 `Simulation` 负责串行化
 - `ws.go`：hub 用独立互斥锁保护客户端集合；广播发送不出去的慢客户端直接断开，
   不能拖慢 20 Hz 模拟
 - WebSocket 实现是纯标准库手写的 RFC 6455：单帧读写、无掩码出站/掩码入站、

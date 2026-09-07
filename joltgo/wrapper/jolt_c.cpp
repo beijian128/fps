@@ -1,4 +1,9 @@
-// C wrapper around the Jolt Physics C++ API for consumption from Go via cgo.
+// 纯物理桥：把 Jolt C++ API 封装为 extern "C" 的普通函数，供 Go 侧通过 cgo 调用。
+//
+// 本层不含任何游戏业务：没有敌人/弹丸/靶球/血量概念，没有角色移动策略
+// （跳跃速度、重力、胶囊尺寸全部由 Go 传入），接触事件原样上报刚体对，
+// 「谁是弹丸、打中谁算什么」这类判定由 Go 侧 ECS 系统负责。
+// 唯一保留的内部状态是刚体 id 登记表（枚举用）与接触事件队列（线程安全转发）。
 
 #include <Jolt/Jolt.h>
 
@@ -44,76 +49,71 @@ namespace
 
 	constexpr uint NUM_BROAD_PHASE_LAYERS = 2;
 
-	constexpr uint64 PROJECTILE_USER_DATA = 0x0BADBEEF;
+	// 接触监听器把「所有」刚体接触对原样记录到线程安全队列，
+	// 由 Go 侧每 tick 排空并自行判定弹丸命中。
+	class ContactRecorder : public ContactListener
+	{
+	public:
+		virtual void OnContactAdded(const Body &inBody1, const Body &inBody2, const ContactManifold &inManifold, ContactSettings &ioSettings) override
+		{
+			ContactPair pair;
+			pair.a = inBody1.GetID().GetIndexAndSequenceNumber();
+			pair.b = inBody2.GetID().GetIndexAndSequenceNumber();
 
-	// Tuned for snappier FPS jump feel. Real-world gravity is 9.81 m/s^2, but
-	// the default jump speed (8 m/s) produces a very tall, floaty arc. Using a
-	// higher gravity shortens both the rise and the fall so the player lands
-	// noticeably faster without making the jump feel weak.
-	constexpr float GRAVITY_Y = -20.0f;
-	constexpr float JUMP_SPEED = 8.5f;
+			std::lock_guard<std::mutex> lock(mtx);
+			pairs.push_back(pair);
+		}
+
+		struct ContactPair
+		{
+			uint32_t a;
+			uint32_t b;
+		};
+
+		std::mutex mtx;
+		std::vector<ContactPair> pairs;
+	};
+
+	// 角色接触监听器：做两件纯物理层的事——
+	//   1. 「动态刚体能否推动角色」开关（对应 Jolt mCanPushCharacter），由 Go 配置；
+	//   2. 把角色接触到的刚体 id 记录进队列，由 Go 每 tick 轮询。
+	// 「碰到谁算伤害/拾取」等业务判定全部在 Go 侧。
+	// 注意：Jolt 对同一接触只回调一次 Added（传感器接触也只走 Added），
+	// 持续接触的每步信号走 OnContactSolve（约束求解每步触发），两者都记录。
+	class CharacterContactBridge : public CharacterContactListener
+	{
+	public:
+		bool dynamic_can_push = true;
+		std::vector<uint32_t> touches;
+
+		void Apply(CharacterContactSettings &ioSettings, const CharacterContact &inContact)
+		{
+			if (inContact.mMotionTypeB == EMotionType::Dynamic)
+				ioSettings.mCanPushCharacter = dynamic_can_push;
+		}
+
+		void Record(const CharacterContact &inContact)
+		{
+			touches.push_back(inContact.mBodyB.GetIndexAndSequenceNumber());
+		}
+
+		virtual void OnContactAdded(const CharacterVirtual *inCharacter, const CharacterContact &inContact, CharacterContactSettings &ioSettings) override
+		{
+			Apply(ioSettings, inContact);
+			Record(inContact);
+		}
+
+		virtual void OnContactPersisted(const CharacterVirtual *inCharacter, const CharacterContact &inContact, CharacterContactSettings &ioSettings) override
+		{
+			Apply(ioSettings, inContact);
+		}
+
+		virtual void OnContactSolve(const CharacterVirtual *inCharacter, const BodyID &inBodyID2, const SubShapeID &inSubShapeID2, RVec3Arg inContactPosition, Vec3Arg inContactNormal, Vec3Arg inContactVelocity, const PhysicsMaterial *inContactMaterial, Vec3Arg inCharacterVelocity, Vec3 &ioNewCharacterVelocity) override
+		{
+			touches.push_back(inBodyID2.GetIndexAndSequenceNumber());
+		}
+	};
 }
-
-struct BodyRecord
-{
-	uint32_t id;
-	int type;       // 0 = box, 1 = sphere, 2 = enemy capsule
-	int is_static;
-	int is_target;
-	int is_enemy;
-	int is_projectile;
-	float health;
-	Vec3 size;
-	BodyID body_id;
-};
-
-struct HitPair
-{
-	BodyID projectile;
-	BodyID other;
-};
-
-class ProjectileContactListener : public ContactListener
-{
-public:
-	virtual void OnContactAdded(const Body &inBody1, const Body &inBody2, const ContactManifold &inManifold, ContactSettings &ioSettings) override
-	{
-		const uint64 u1 = inBody1.GetUserData();
-		const uint64 u2 = inBody2.GetUserData();
-		if (u1 != PROJECTILE_USER_DATA && u2 != PROJECTILE_USER_DATA)
-			return;
-
-		HitPair pair;
-		pair.projectile = (u1 == PROJECTILE_USER_DATA) ? inBody1.GetID() : inBody2.GetID();
-		pair.other = (u1 == PROJECTILE_USER_DATA) ? inBody2.GetID() : inBody1.GetID();
-
-		std::lock_guard<std::mutex> lock(mtx);
-		hits.push_back(pair);
-	}
-
-	std::mutex mtx;
-	std::vector<HitPair> hits;
-};
-
-// 角色不能被推动/挤开：与动态刚体（敌人、箱子）接触时禁止对方推动角色。
-// 约束速度会被清零，角色位置完全由输入决定；动态刚体仍会在接触冲量下被弹开
-// （mCanReceiveImpulses 保持默认 true，FPS 里角色照常能推开箱子）。
-// 静态几何保持默认：贴地/上台阶依赖静态穿透恢复。
-class CharacterImmovableListener : public CharacterContactListener
-{
-public:
-	virtual void OnContactAdded(const CharacterVirtual *inCharacter, const CharacterContact &inContact, CharacterContactSettings &ioSettings) override
-	{
-		if (inContact.mMotionTypeB == EMotionType::Dynamic)
-			ioSettings.mCanPushCharacter = false;
-	}
-
-	virtual void OnContactPersisted(const CharacterVirtual *inCharacter, const CharacterContact &inContact, CharacterContactSettings &ioSettings) override
-	{
-		if (inContact.mMotionTypeB == EMotionType::Dynamic)
-			ioSettings.mCanPushCharacter = false;
-	}
-};
 
 struct JoltWorld
 {
@@ -124,10 +124,9 @@ struct JoltWorld
 	ObjectVsBroadPhaseLayerFilterTable *object_vs_bp_filter = nullptr;
 	PhysicsSystem *physics_system = nullptr;
 	CharacterVirtual *character = nullptr;
-	ProjectileContactListener contact_listener;
-	CharacterImmovableListener character_listener;
-	std::vector<BodyRecord> bodies;
-	uint32_t next_id = 1;
+	ContactRecorder contact_listener;
+	CharacterContactBridge character_listener;
+	std::vector<BodyID> body_ids; // 刚体 id 登记表（仅身份，不含任何元数据）
 };
 
 static void EnsureJoltInitialized()
@@ -140,33 +139,6 @@ static void EnsureJoltInitialized()
 	Factory::sInstance = new Factory();
 	RegisterTypes();
 	initialized = true;
-}
-
-static uint32_t AddBody(JoltWorld *w, BodyID inBodyID, int inType, int inIsStatic, int inIsTarget, int inIsEnemy, int inIsProjectile, float inHealth, Vec3Arg inSize)
-{
-	uint32_t id = w->next_id++;
-
-	BodyRecord rec;
-	rec.id = id;
-	rec.type = inType;
-	rec.is_static = inIsStatic;
-	rec.is_target = inIsTarget;
-	rec.is_enemy = inIsEnemy;
-	rec.is_projectile = inIsProjectile;
-	rec.health = inHealth;
-	rec.size = inSize;
-	rec.body_id = inBodyID;
-	w->bodies.push_back(rec);
-
-	return id;
-}
-
-static uint32_t FindId(const JoltWorld *w, BodyID inBodyID)
-{
-	for (const BodyRecord &rec : w->bodies)
-		if (rec.body_id == inBodyID)
-			return rec.id;
-	return 0;
 }
 
 extern "C" JoltWorld *jolt_create(void)
@@ -197,20 +169,7 @@ extern "C" JoltWorld *jolt_create(void)
 	w->physics_system->Init(
 		65536, 0, 65536, 10240,
 		*w->bp_layer_interface, *w->object_vs_bp_filter, *w->object_pair_filter);
-
-	w->physics_system->SetGravity(Vec3(0.0f, GRAVITY_Y, 0.0f));
 	w->physics_system->SetContactListener(&w->contact_listener);
-
-	// Player capsule: total height 1.8 m (half height 0.5 + 2 * radius 0.4),
-	// shifted up so the bottom of the shape sits at the character's position (feet).
-	Ref<Shape> standing_shape = RotatedTranslatedShapeSettings(
-		Vec3(0.0f, 0.9f, 0.0f), Quat::sIdentity(), new CapsuleShape(0.5f, 0.4f)).Create().Get();
-
-	CharacterVirtualSettings character_settings;
-	character_settings.mShape = standing_shape;
-	character_settings.mMaxSlopeAngle = DegreesToRadians(50.0f);
-	w->character = new CharacterVirtual(&character_settings, RVec3(0.0f, 0.0f, 12.0f), Quat::sIdentity(), w->physics_system);
-	w->character->SetListener(&w->character_listener);
 
 	return w;
 }
@@ -230,7 +189,50 @@ extern "C" void jolt_destroy(JoltWorld *w)
 	delete w;
 }
 
-extern "C" uint32_t jolt_add_static_box(JoltWorld *w, float hx, float hy, float hz, float x, float y, float z)
+extern "C" void jolt_step(JoltWorld *w, float dt, int collision_steps)
+{
+	if (w != nullptr && w->physics_system != nullptr)
+		w->physics_system->Update(dt, collision_steps, w->temp_allocator, w->job_system);
+}
+
+extern "C" void jolt_set_gravity(JoltWorld *w, float gx, float gy, float gz)
+{
+	if (w != nullptr && w->physics_system != nullptr)
+		w->physics_system->SetGravity(Vec3(gx, gy, gz));
+}
+
+// ---- 刚体 ----
+
+static ObjectLayer LayerForMotionType(EMotionType inMotionType)
+{
+	return inMotionType == EMotionType::Static ? LAYER_NON_MOVING : LAYER_MOVING;
+}
+
+// 把新刚体加入世界（静态体不激活）并登记 id。
+static BodyID AddBodyToWorld(JoltWorld *w, const BodyCreationSettings &inSettings)
+{
+	BodyInterface &body_interface = w->physics_system->GetBodyInterface();
+
+	BodyID body_id;
+	if (inSettings.mMotionType == EMotionType::Static)
+	{
+		Body *body = body_interface.CreateBody(inSettings);
+		if (body == nullptr)
+			return BodyID();
+		body_id = body->GetID();
+		body_interface.AddBody(body_id, EActivation::DontActivate);
+	}
+	else
+	{
+		body_id = body_interface.CreateAndAddBody(inSettings, EActivation::Activate);
+	}
+
+	if (!body_id.IsInvalid())
+		w->body_ids.push_back(body_id);
+	return body_id;
+}
+
+extern "C" uint32_t jolt_add_box(JoltWorld *w, float hx, float hy, float hz, float x, float y, float z, int motion_type)
 {
 	if (w == nullptr || w->physics_system == nullptr)
 		return 0;
@@ -239,132 +241,159 @@ extern "C" uint32_t jolt_add_static_box(JoltWorld *w, float hx, float hy, float 
 	shape_settings.SetEmbedded();
 	ShapeRefC shape = shape_settings.Create().Get();
 
-	BodyCreationSettings body_settings(shape, RVec3(x, y, z), Quat::sIdentity(), EMotionType::Static, LAYER_NON_MOVING);
-	BodyInterface &body_interface = w->physics_system->GetBodyInterface();
-	Body *body = body_interface.CreateBody(body_settings);
-	if (body == nullptr)
-		return 0;
-
-	body_interface.AddBody(body->GetID(), EActivation::DontActivate);
-	return AddBody(w, body->GetID(), 0, 1, 0, 0, 0, 0.0f, Vec3(hx, hy, hz));
+	EMotionType mt = static_cast<EMotionType>(motion_type);
+	BodyCreationSettings body_settings(shape, RVec3(x, y, z), Quat::sIdentity(), mt, LayerForMotionType(mt));
+	return AddBodyToWorld(w, body_settings).GetIndexAndSequenceNumber();
 }
 
-extern "C" uint32_t jolt_add_dynamic_box(JoltWorld *w, float hx, float hy, float hz, float x, float y, float z, float vx, float vy, float vz)
+extern "C" uint32_t jolt_add_sphere(JoltWorld *w, float x, float y, float z, float radius, int motion_type)
 {
 	if (w == nullptr || w->physics_system == nullptr)
 		return 0;
 
-	BoxShapeSettings shape_settings(Vec3(hx, hy, hz));
-	shape_settings.SetEmbedded();
-	ShapeRefC shape = shape_settings.Create().Get();
-
-	BodyCreationSettings body_settings(shape, RVec3(x, y, z), Quat::sIdentity(), EMotionType::Dynamic, LAYER_MOVING);
-	BodyInterface &body_interface = w->physics_system->GetBodyInterface();
-	BodyID body_id = body_interface.CreateAndAddBody(body_settings, EActivation::Activate);
-	body_interface.SetLinearVelocity(body_id, Vec3(vx, vy, vz));
-
-	return AddBody(w, body_id, 0, 0, 0, 0, 0, 0.0f, Vec3(hx, hy, hz));
+	EMotionType mt = static_cast<EMotionType>(motion_type);
+	BodyCreationSettings body_settings(new SphereShape(radius), RVec3(x, y, z), Quat::sIdentity(), mt, LayerForMotionType(mt));
+	return AddBodyToWorld(w, body_settings).GetIndexAndSequenceNumber();
 }
 
-extern "C" uint32_t jolt_add_dynamic_sphere(JoltWorld *w, float x, float y, float z, float radius, float vx, float vy, float vz)
+extern "C" uint32_t jolt_add_capsule(JoltWorld *w, float x, float y, float z, float half_height, float radius, int motion_type)
 {
 	if (w == nullptr || w->physics_system == nullptr)
 		return 0;
 
-	BodyCreationSettings body_settings(new SphereShape(radius), RVec3(x, y, z), Quat::sIdentity(), EMotionType::Dynamic, LAYER_MOVING);
-	BodyInterface &body_interface = w->physics_system->GetBodyInterface();
-	BodyID body_id = body_interface.CreateAndAddBody(body_settings, EActivation::Activate);
-	body_interface.SetLinearVelocity(body_id, Vec3(vx, vy, vz));
-
-	return AddBody(w, body_id, 1, 0, 0, 0, 0, 0.0f, Vec3(radius, 0.0f, 0.0f));
+	EMotionType mt = static_cast<EMotionType>(motion_type);
+	BodyCreationSettings body_settings(new CapsuleShape(half_height, radius), RVec3(x, y, z), Quat::sIdentity(), mt, LayerForMotionType(mt));
+	return AddBodyToWorld(w, body_settings).GetIndexAndSequenceNumber();
 }
 
-extern "C" uint32_t jolt_add_target_sphere(JoltWorld *w, float x, float y, float z, float radius)
+extern "C" uint32_t jolt_add_sensor_sphere(JoltWorld *w, float x, float y, float z, float radius)
 {
 	if (w == nullptr || w->physics_system == nullptr)
 		return 0;
 
+	// Jolt 原生 sensor：不参与刚体碰撞响应，但角色控制器的碰撞查询会检测到它
+	// （以 mIsSensorB 上报），是「触发器/拾取物」的标准实现方式。
 	BodyCreationSettings body_settings(new SphereShape(radius), RVec3(x, y, z), Quat::sIdentity(), EMotionType::Static, LAYER_NON_MOVING);
-	BodyInterface &body_interface = w->physics_system->GetBodyInterface();
-	Body *body = body_interface.CreateBody(body_settings);
-	if (body == nullptr)
-		return 0;
-
-	body_interface.AddBody(body->GetID(), EActivation::DontActivate);
-	return AddBody(w, body->GetID(), 1, 1, 1, 0, 0, 0.0f, Vec3(radius, 0.0f, 0.0f));
+	body_settings.mIsSensor = true;
+	return AddBodyToWorld(w, body_settings).GetIndexAndSequenceNumber();
 }
 
-extern "C" uint32_t jolt_add_enemy(JoltWorld *w, float x, float y, float z, float radius, float half_height)
+extern "C" void jolt_remove_body(JoltWorld *w, uint32_t body_id)
 {
 	if (w == nullptr || w->physics_system == nullptr)
-		return 0;
+		return;
 
-	BodyCreationSettings body_settings(new CapsuleShape(half_height, radius), RVec3(x, y, z), Quat::sIdentity(), EMotionType::Dynamic, LAYER_MOVING);
+	BodyID id(body_id);
 	BodyInterface &body_interface = w->physics_system->GetBodyInterface();
-	BodyID body_id = body_interface.CreateAndAddBody(body_settings, EActivation::Activate);
+	body_interface.RemoveBody(id);
+	body_interface.DestroyBody(id);
 
-	return AddBody(w, body_id, 2, 0, 0, 1, 0, 3.0f, Vec3(radius, half_height, 0.0f));
+	for (size_t i = 0; i < w->body_ids.size(); ++i)
+	{
+		if (w->body_ids[i] == id)
+		{
+			w->body_ids.erase(w->body_ids.begin() + i);
+			return;
+		}
+	}
 }
 
-extern "C" uint32_t jolt_fire_projectile(JoltWorld *w, float ox, float oy, float oz, float dx, float dy, float dz, float speed)
+extern "C" uint32_t jolt_get_body_ids(JoltWorld *w, uint32_t *out_ids, uint32_t max_ids)
 {
-	if (w == nullptr || w->physics_system == nullptr)
+	if (w == nullptr || out_ids == nullptr)
 		return 0;
 
-	BodyCreationSettings body_settings(new SphereShape(0.08f), RVec3(ox, oy, oz), Quat::sIdentity(), EMotionType::Dynamic, LAYER_MOVING);
-	body_settings.mMotionQuality = EMotionQuality::LinearCast;
-	body_settings.mFriction = 0.0f;
-	body_settings.mRestitution = 0.0f;
-
-	BodyInterface &body_interface = w->physics_system->GetBodyInterface();
-	BodyID body_id = body_interface.CreateAndAddBody(body_settings, EActivation::Activate);
-	body_interface.SetLinearVelocity(body_id, Vec3(dx, dy, dz) * speed);
-	body_interface.SetUserData(body_id, PROJECTILE_USER_DATA);
-
-	return AddBody(w, body_id, 1, 0, 0, 0, 1, 0.0f, Vec3(0.08f, 0.0f, 0.0f));
+	uint32_t n = std::min<uint32_t>((uint32_t)w->body_ids.size(), max_ids);
+	for (uint32_t i = 0; i < n; ++i)
+		out_ids[i] = w->body_ids[i].GetIndexAndSequenceNumber();
+	return n;
 }
 
-extern "C" uint32_t jolt_body_count(JoltWorld *w)
+extern "C" int jolt_get_body_transform(JoltWorld *w, uint32_t body_id, float *out_pos, float *out_quat)
 {
-	if (w == nullptr)
-		return 0;
-	return (uint32_t)w->bodies.size();
-}
-
-extern "C" int jolt_get_body_info(JoltWorld *w, uint32_t index, JoltBodyInfo *out)
-{
-	if (w == nullptr || w->physics_system == nullptr || out == nullptr)
-		return 0;
-	if (index >= w->bodies.size())
+	if (w == nullptr || w->physics_system == nullptr || out_pos == nullptr || out_quat == nullptr)
 		return 0;
 
-	const BodyRecord &rec = w->bodies[index];
 	BodyInterface &body_interface = w->physics_system->GetBodyInterface();
+	BodyID id(body_id);
 
-	out->id = rec.id;
-	out->type = rec.type;
-	out->is_static = rec.is_static;
-	out->is_target = rec.is_target;
-	out->is_enemy = rec.is_enemy;
-	out->is_projectile = rec.is_projectile;
-	out->health = rec.health;
-	out->active = body_interface.IsActive(rec.body_id) ? 1 : 0;
-
-	RVec3 p = body_interface.GetCenterOfMassPosition(rec.body_id);
-	Quat q = body_interface.GetRotation(rec.body_id);
-	out->pos[0] = p.GetX();
-	out->pos[1] = p.GetY();
-	out->pos[2] = p.GetZ();
-	out->quat[0] = q.GetX();
-	out->quat[1] = q.GetY();
-	out->quat[2] = q.GetZ();
-	out->quat[3] = q.GetW();
-	out->size[0] = rec.size.GetX();
-	out->size[1] = rec.size.GetY();
-	out->size[2] = rec.size.GetZ();
-
+	RVec3 p = body_interface.GetCenterOfMassPosition(id);
+	Quat q = body_interface.GetRotation(id);
+	out_pos[0] = p.GetX();
+	out_pos[1] = p.GetY();
+	out_pos[2] = p.GetZ();
+	out_quat[0] = q.GetX();
+	out_quat[1] = q.GetY();
+	out_quat[2] = q.GetZ();
+	out_quat[3] = q.GetW();
 	return 1;
 }
+
+extern "C" int jolt_is_body_active(JoltWorld *w, uint32_t body_id)
+{
+	if (w == nullptr || w->physics_system == nullptr)
+		return 0;
+	return w->physics_system->GetBodyInterface().IsActive(BodyID(body_id)) ? 1 : 0;
+}
+
+extern "C" void jolt_set_body_velocity(JoltWorld *w, uint32_t body_id, float vx, float vy, float vz)
+{
+	if (w == nullptr || w->physics_system == nullptr)
+		return;
+	w->physics_system->GetBodyInterface().SetLinearVelocity(BodyID(body_id), Vec3(vx, vy, vz));
+}
+
+extern "C" void jolt_set_body_friction(JoltWorld *w, uint32_t body_id, float friction)
+{
+	if (w == nullptr || w->physics_system == nullptr)
+		return;
+	w->physics_system->GetBodyInterface().SetFriction(BodyID(body_id), friction);
+}
+
+extern "C" void jolt_set_body_restitution(JoltWorld *w, uint32_t body_id, float restitution)
+{
+	if (w == nullptr || w->physics_system == nullptr)
+		return;
+	w->physics_system->GetBodyInterface().SetRestitution(BodyID(body_id), restitution);
+}
+
+extern "C" void jolt_set_body_motion_quality(JoltWorld *w, uint32_t body_id, int quality)
+{
+	if (w == nullptr || w->physics_system == nullptr)
+		return;
+	w->physics_system->GetBodyInterface().SetMotionQuality(BodyID(body_id), static_cast<EMotionQuality>(quality));
+}
+
+extern "C" void jolt_apply_impulse(JoltWorld *w, uint32_t body_id, float ix, float iy, float iz)
+{
+	if (w == nullptr || w->physics_system == nullptr)
+		return;
+	w->physics_system->GetBodyInterface().AddImpulse(BodyID(body_id), Vec3(ix, iy, iz));
+}
+
+// ---- 接触事件 ----
+
+extern "C" uint32_t jolt_poll_contacts(JoltWorld *w, JoltContactPair *out, uint32_t max_count)
+{
+	if (w == nullptr || out == nullptr)
+		return 0;
+
+	std::vector<ContactRecorder::ContactPair> local;
+	{
+		std::lock_guard<std::mutex> lock(w->contact_listener.mtx);
+		local.swap(w->contact_listener.pairs);
+	}
+
+	uint32_t n = std::min<uint32_t>((uint32_t)local.size(), max_count);
+	for (uint32_t i = 0; i < n; ++i)
+	{
+		out[i].body_a = local[i].a;
+		out[i].body_b = local[i].b;
+	}
+	return n;
+}
+
+// ---- 射线 ----
 
 extern "C" int jolt_ray_cast(JoltWorld *w, const float *origin, const float *dir, float max_dist, JoltRayResult *out)
 {
@@ -392,137 +421,37 @@ extern "C" int jolt_ray_cast(JoltWorld *w, const float *origin, const float *dir
 	out->point[0] = point.GetX();
 	out->point[1] = point.GetY();
 	out->point[2] = point.GetZ();
-	out->body_id = FindId(w, hit.mBodyID);
+	out->body_id = hit.mBodyID.GetIndexAndSequenceNumber();
 	return 1;
 }
 
-extern "C" void jolt_apply_impulse(JoltWorld *w, uint32_t body_id, float ix, float iy, float iz)
+// ---- 角色控制器 ----
+
+extern "C" int jolt_character_create(JoltWorld *w, float half_height, float radius, float offset_y, float x, float y, float z)
 {
-	if (w == nullptr || w->physics_system == nullptr)
-		return;
-
-	for (const BodyRecord &rec : w->bodies)
-	{
-		if (rec.id == body_id)
-		{
-			w->physics_system->GetBodyInterface().AddImpulse(rec.body_id, Vec3(ix, iy, iz));
-			return;
-		}
-	}
-}
-
-extern "C" void jolt_remove_body(JoltWorld *w, uint32_t body_id)
-{
-	if (w == nullptr || w->physics_system == nullptr)
-		return;
-
-	for (size_t i = 0; i < w->bodies.size(); ++i)
-	{
-		if (w->bodies[i].id == body_id)
-		{
-			BodyInterface &body_interface = w->physics_system->GetBodyInterface();
-			body_interface.RemoveBody(w->bodies[i].body_id);
-			body_interface.DestroyBody(w->bodies[i].body_id);
-			w->bodies.erase(w->bodies.begin() + i);
-			return;
-		}
-	}
-}
-
-extern "C" void jolt_set_body_velocity(JoltWorld *w, uint32_t body_id, float vx, float vy, float vz)
-{
-	if (w == nullptr || w->physics_system == nullptr)
-		return;
-
-	for (const BodyRecord &rec : w->bodies)
-	{
-		if (rec.id == body_id)
-		{
-			w->physics_system->GetBodyInterface().SetLinearVelocity(rec.body_id, Vec3(vx, vy, vz));
-			return;
-		}
-	}
-}
-
-extern "C" int jolt_damage_enemy(JoltWorld *w, uint32_t body_id, float amount)
-{
-	if (w == nullptr || w->physics_system == nullptr)
+	if (w == nullptr || w->physics_system == nullptr || w->character != nullptr)
 		return 0;
 
-	for (size_t i = 0; i < w->bodies.size(); ++i)
-	{
-		BodyRecord &rec = w->bodies[i];
-		if (rec.id == body_id && rec.is_enemy)
-		{
-			rec.health -= amount;
-			if (rec.health <= 0.0f)
-			{
-				BodyInterface &body_interface = w->physics_system->GetBodyInterface();
-				body_interface.RemoveBody(rec.body_id);
-				body_interface.DestroyBody(rec.body_id);
-				w->bodies.erase(w->bodies.begin() + i);
-				return 1;
-			}
-			return 0;
-		}
-	}
-	return 0;
+	// 胶囊向上平移 offset_y，使形状底部位于角色位置（脚底）。
+	Ref<Shape> shape = RotatedTranslatedShapeSettings(
+		Vec3(0.0f, offset_y, 0.0f), Quat::sIdentity(), new CapsuleShape(half_height, radius)).Create().Get();
+
+	CharacterVirtualSettings settings;
+	settings.mShape = shape;
+
+	w->character = new CharacterVirtual(&settings, RVec3(x, y, z), Quat::sIdentity(), w->physics_system);
+	w->character->SetListener(&w->character_listener);
+	return 1;
 }
 
-extern "C" uint32_t jolt_poll_projectile_hits(JoltWorld *w, JoltProjectileHit *out, uint32_t max_count)
+extern "C" void jolt_character_set_dynamic_push(JoltWorld *w, int allow)
 {
-	if (w == nullptr || out == nullptr)
-		return 0;
-
-	std::vector<HitPair> local;
-	{
-		std::lock_guard<std::mutex> lock(w->contact_listener.mtx);
-		local.swap(w->contact_listener.hits);
-	}
-
-	uint32_t n = 0;
-	for (const HitPair &pair : local)
-	{
-		if (n >= max_count)
-			break;
-
-		uint32_t projectile_id = FindId(w, pair.projectile);
-		uint32_t other_id = FindId(w, pair.other);
-		if (projectile_id == 0 || other_id == 0)
-			continue;
-
-		out[n].projectile_id = projectile_id;
-		out[n].body_id = other_id;
-		++n;
-	}
-	return n;
-}
-
-extern "C" void jolt_update_character(JoltWorld *w, float wish_x, float wish_z, int jump, float dt)
-{
-	if (w == nullptr || w->character == nullptr)
+	if (w == nullptr)
 		return;
-
-	CharacterVirtual *c = w->character;
-	Vec3 velocity = c->GetLinearVelocity();
-	float vy = velocity.GetY();
-
-	if (c->GetGroundState() == CharacterVirtual::EGroundState::OnGround)
-	{
-		vy = 0.0f;
-		if (jump)
-			vy = JUMP_SPEED;
-	}
-
-	vy += w->physics_system->GetGravity().GetY() * dt;
-	c->SetLinearVelocity(Vec3(wish_x, vy, wish_z));
-
-	CharacterVirtual::ExtendedUpdateSettings settings;
-	c->ExtendedUpdate(dt, w->physics_system->GetGravity(), settings,
-		BroadPhaseLayerFilter(), ObjectLayerFilter(), BodyFilter(), ShapeFilter(), *w->temp_allocator);
+	w->character_listener.dynamic_can_push = (allow != 0);
 }
 
-extern "C" void jolt_get_character_position(JoltWorld *w, float *out_xyz)
+extern "C" void jolt_character_get_position(JoltWorld *w, float *out_xyz)
 {
 	if (w == nullptr || w->character == nullptr || out_xyz == nullptr)
 		return;
@@ -533,21 +462,59 @@ extern "C" void jolt_get_character_position(JoltWorld *w, float *out_xyz)
 	out_xyz[2] = p.GetZ();
 }
 
-extern "C" void jolt_set_character_position(JoltWorld *w, float x, float y, float z)
+extern "C" void jolt_character_set_position(JoltWorld *w, float x, float y, float z)
 {
 	if (w == nullptr || w->character == nullptr)
 		return;
 	w->character->SetPosition(RVec3(x, y, z));
 }
 
-extern "C" void jolt_set_gravity(JoltWorld *w, float gx, float gy, float gz)
+extern "C" void jolt_character_get_velocity(JoltWorld *w, float *out_xyz)
 {
-	if (w != nullptr && w->physics_system != nullptr)
-		w->physics_system->SetGravity(Vec3(gx, gy, gz));
+	if (w == nullptr || w->character == nullptr || out_xyz == nullptr)
+		return;
+
+	Vec3 v = w->character->GetLinearVelocity();
+	out_xyz[0] = v.GetX();
+	out_xyz[1] = v.GetY();
+	out_xyz[2] = v.GetZ();
 }
 
-extern "C" void jolt_step(JoltWorld *w, float dt, int collision_steps)
+extern "C" void jolt_character_set_velocity(JoltWorld *w, float vx, float vy, float vz)
 {
-	if (w != nullptr && w->physics_system != nullptr)
-		w->physics_system->Update(dt, collision_steps, w->temp_allocator, w->job_system);
+	if (w == nullptr || w->character == nullptr)
+		return;
+	w->character->SetLinearVelocity(Vec3(vx, vy, vz));
+}
+
+extern "C" int jolt_character_get_ground_state(JoltWorld *w)
+{
+	if (w == nullptr || w->character == nullptr)
+		return 3; // InAir
+	return (int)w->character->GetGroundState();
+}
+
+extern "C" void jolt_character_update(JoltWorld *w, float dt)
+{
+	if (w == nullptr || w->character == nullptr)
+		return;
+
+	CharacterVirtual::ExtendedUpdateSettings settings;
+	w->character->ExtendedUpdate(dt, w->physics_system->GetGravity(), settings,
+		BroadPhaseLayerFilter(), ObjectLayerFilter(), BodyFilter(), ShapeFilter(), *w->temp_allocator);
+}
+
+extern "C" uint32_t jolt_character_poll_contacts(JoltWorld *w, uint32_t *out_ids, uint32_t max_ids)
+{
+	if (w == nullptr || out_ids == nullptr)
+		return 0;
+
+	// 角色更新在单线程（Go tick goroutine）内完成，无需加锁；swap 保持空队列。
+	std::vector<uint32_t> local;
+	local.swap(w->character_listener.touches);
+
+	uint32_t n = std::min<uint32_t>((uint32_t)local.size(), max_ids);
+	for (uint32_t i = 0; i < n; ++i)
+		out_ids[i] = local[i];
+	return n;
 }
