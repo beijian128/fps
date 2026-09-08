@@ -120,6 +120,10 @@ type Simulation struct {
 	physics Physics
 	world   *ecs.World
 	player  ecs.Entity
+	// bodyQuery 是快照刚体循环的缓存查询（有 Body/Position/Rotation 且无
+	// Resource）：排除过滤在 archetype 粒度完成、传感器球整表跳过，三列
+	// 行内直取（registerBodyLocked 保证每个 Body 实体都有 Position/Rotation）。
+	bodyQuery ecs.Query
 
 	step          int
 	score         int
@@ -130,7 +134,11 @@ type Simulation struct {
 
 // New 创建一个空模拟。物理世界在 Init 时由 physics.Create 创建。
 func New(p Physics) *Simulation {
-	return &Simulation{physics: p, world: ecs.New()}
+	return &Simulation{
+		physics:   p,
+		world:     ecs.New(),
+		bodyQuery: ecs.Without[Resource](ecs.NewQuery3[Body, Position, Rotation]()),
+	}
 }
 
 // Init 创建物理世界与初始场景。只在启动时调用一次，之后重建请用 Reset。
@@ -194,10 +202,7 @@ func (s *Simulation) initLocked() {
 
 	// 玩家实体：纯逻辑（角色控制器不是刚体），初始站在出生点。
 	s.player = s.world.NewEntity()
-	ecs.Add(s.world, s.player, Player{})
-	ecs.Add(s.world, s.player, Health(100))
-	ecs.Add(s.world, s.player, Position{0, playerSpawnY, 12})
-	ecs.Add(s.world, s.player, Input{})
+	ecs.Add4(s.world, s.player, Player{}, Health(100), Position{0, playerSpawnY, 12}, Input{})
 
 	// 地板 + 竞技场四墙。
 	s.registerBodyLocked(s.physics.AddBox(100, 1, 100, 0, -1, 0, MotionStatic), BodyBox, [3]float32{100, 1, 100}, true, [3]float32{0, -1, 0})
@@ -290,9 +295,11 @@ func (s *Simulation) shootLocked(origin, dir [3]float32) uint32 {
 // 让两次 tick 之间创建的实体（如弹丸）也能立即出现在快照里。
 func (s *Simulation) registerBodyLocked(id uint32, kind BodyKind, size [3]float32, static bool, pos [3]float32) ecs.Entity {
 	e := ecs.Entity(id)
-	ecs.Add(s.world, e, Body{Kind: kind, Size: size, Static: static, Active: !static})
-	ecs.Add(s.world, e, Position(pos))
-	ecs.Add(s.world, e, Rotation{0, 0, 0, 1})
+	// Bundle 式挂载：一次搬家进入 {Body,Position,Rotation} archetype。
+	ecs.Add3(s.world, e,
+		Body{Kind: kind, Size: size, Static: static, Active: !static},
+		Position(pos),
+		Rotation{0, 0, 0, 1})
 	return e
 }
 
@@ -340,7 +347,10 @@ func (s *Simulation) dropResourceLocked(at [3]float32) {
 }
 
 // snapshotLocked 从组件构建完整状态快照。刚体与资源按 id 排序，输出稳定
-// （swap-remove 会让存储遍历顺序变化，客户端按 id 匹配、与顺序无关）。
+// （swap-remove 会让 archetype 行序变化，客户端按 id 匹配、与顺序无关）。
+// 刚体循环用缓存查询（有 Body/Position/Rotation 且无 Resource）：排除过滤
+// 在 archetype 粒度完成、传感器球整表跳过；三列行内直取，Position/Rotation
+// 无需逐行查找，只有 Health 与标记组件走行视图。
 func (s *Simulation) snapshotLocked() State {
 	st := State{
 		Bodies:    []BodyInfo{},
@@ -358,27 +368,20 @@ func (s *Simulation) snapshotLocked() State {
 		st.Player.Health = float32(*h)
 	}
 
-	ecs.Each(s.world, func(e ecs.Entity, b *Body) {
-		if ecs.Has[Resource](s.world, e) {
-			return // 传感器球不上屏：客户端只渲染 resources 列表里的金币
-		}
+	ecs.QueryEach3(s.world, &s.bodyQuery, func(e ecs.Entity, b *Body, p *Position, rot *Rotation, row ecs.Row) {
 		bi := BodyInfo{
 			ID:         uint32(e),
 			Type:       int(b.Kind),
 			Static:     b.Static,
-			Target:     ecs.Has[Target](s.world, e),
-			Enemy:      ecs.Has[Enemy](s.world, e),
-			Projectile: ecs.Has[Projectile](s.world, e),
+			Target:     ecs.RowHas[Target](row),
+			Enemy:      ecs.RowHas[Enemy](row),
+			Projectile: ecs.RowHas[Projectile](row),
+			Pos:        *p,
+			Quat:       *rot,
 			Size:       b.Size,
 			Active:     b.Active,
 		}
-		if p, ok := ecs.Get[Position](s.world, e); ok {
-			bi.Pos = *p
-		}
-		if q, ok := ecs.Get[Rotation](s.world, e); ok {
-			bi.Quat = *q
-		}
-		if h, ok := ecs.Get[Health](s.world, e); ok {
+		if h, ok := ecs.RowGet[Health](row); ok {
 			bi.Health = float32(*h)
 		}
 		st.Bodies = append(st.Bodies, bi)

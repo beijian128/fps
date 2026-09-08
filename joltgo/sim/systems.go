@@ -187,8 +187,7 @@ func (s *Simulation) spawnEnemyLocked() {
 	spawn := func(x, z float32) {
 		id := s.physics.AddCapsule(x, enemySpawnY, z, enemyHalfHeight, enemyRadius, MotionStatic)
 		e := s.registerBodyLocked(id, BodyCapsule, [3]float32{enemyRadius, enemyHalfHeight, 0}, true, [3]float32{x, enemySpawnY, z})
-		ecs.Add(s.world, e, Enemy{})
-		ecs.Add(s.world, e, Health(enemyHealth))
+		ecs.Add2(s.world, e, Enemy{}, Health(enemyHealth))
 	}
 	for attempt := 0; attempt < 24; attempt++ {
 		x := randRange(-14, 14)
