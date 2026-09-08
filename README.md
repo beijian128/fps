@@ -96,7 +96,8 @@ fps/
 │   ├── ws.go                # WebSocket 实现（纯标准库 RFC 6455）+ 广播 hub
 │   ├── sim/                 # ECS 模拟层：组件（components.go）、系统（systems.go）、
 │   │                        #   场景/快照（simulation.go / state.go）+ 单元测试
-│   ├── ecs/                 # ECS 核心：实体 + 稀疏集组件存储/查询（零依赖、可单测）
+│   ├── ecs/                 # ECS 核心：实体 + archetype 存储/查询 + Bundle 挂载
+│   │                        #   组件 ID 注册制 + 缓存查询（零依赖、可单测）
 │   ├── CMakeLists.txt       # 将 Jolt 作为子项目，编译 libjolt_c.dll
 │   └── build.ps1            # 一键构建脚本
 ├── godot_client/            # Godot 4 客户端

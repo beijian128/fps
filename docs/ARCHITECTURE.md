@@ -38,9 +38,19 @@
 - **实体（Entity）**：只是 `uint32` ID，由 Go 桥（`physics.go`）从 1 递增发放，
   桥层维护实体 id ↔ Jolt BodyID 的双向映射（Jolt 原生 BodyID 会与 ECS 的
   InvalidEntity 约定冲突，不能直接透传）；纯逻辑实体（玩家）由 ECS 世界
-  从 `1<<24` 起分配，两个 ID 空间不重叠
-- **组件（Component）**：纯数据，稀疏集存储（dense 数组 + sparse 索引），
-  增删 O(1)、遍历走连续数组：
+  从 `1<<24` 起分配，两个 ID 空间不重叠。销毁的逻辑实体 id 进入回收池供
+  `NewEntity` 复用，销毁行不在空 archetype 里累积
+- **组件（Component）**：纯数据，按 archetype（原型）存储——组件集合（类型集）
+  相同的实体归入同一 archetype，组件数据按列（SoA）连续存放、行号即实体下标；
+  组件类型注册为整数 ComponentID，列按下标索引（热路径无 reflect.Type 哈希
+  查找），archetype 按组件 ID 序列键 O(1) 查找。
+  Add/Remove 组件时实体整体搬到目标 archetype（公共列复制、目标列补零、源行
+  swap-remove，代价 O(组件数)）；`Add2/Add3/Add4` 批量挂载只搬一次家、不产生
+  中间 archetype（spawn 路径用）。查询匹配在 archetype 粒度完成：快照用
+  `Without[Resource]` 排除过滤整表跳过传感器球，`QueryEach3` 三列行内直取
+  Body/Position/Rotation（每 archetype 只绑定一次列指针，无逐行查找），
+  查询缓存匹配结果、新 archetype 出现时自动失效重建。规模模拟（`ecs/scale_test.go`）
+  验证到 100+ archetype、10000 实体：
   `Position` / `Rotation` / `Body`（形状/尺寸/静态/活跃，快照渲染元数据）、
   `Player` / `Input` / `Health`、`Enemy` / `Target` / `Projectile` / `Resource`
 - **系统（System）**：每 tick 按固定顺序运行，只通过组件和 `Physics` 接口交互：
@@ -75,7 +85,8 @@
   InvalidEntity（0）约定冲突，桥层维护双向映射，向 sim 发放从 1 递增的实体 id
 - 快照的 `bodyInfo` 各字段由组件重建（`type` ← `Body.Kind`，`enemy/target/
   projectile` ← 标记组件，`health` ← `Health`），并**按 id 升序排序**输出，
-  与存储的 swap-remove 顺序无关；协议字段与旧实现逐字一致，客户端零改动
+  与 archetype 行序（swap-remove 会变化）无关；协议字段与旧实现逐字一致，
+  客户端零改动
 
 ## 为什么用 cgo + C ABI
 
