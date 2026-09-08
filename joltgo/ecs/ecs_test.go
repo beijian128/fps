@@ -442,3 +442,76 @@ func TestNewEntitySkipsResurrectedIDs(t *testing.T) {
 		t.Fatalf("复活实体的数据不应被破坏，得到 %v", *p)
 	}
 }
+
+// ---- 本轮加固新增测试 ----
+
+type spin struct{ w float32 }
+
+func TestDestroyExternalEntityFullyUnregisters(t *testing.T) {
+	// 物理（外部）id 由桥单调发放、会话内不复用：Destroy 后应彻底注销，
+	// 空 archetype 不残留行、rec 不残留条目（长会话里弹丸/敌人销毁不累积）。
+	w := New()
+	Add3(w, Entity(1), pos{1, 2}, vel{3, 4}, tag{})
+	if !Has[pos](w, Entity(1)) {
+		t.Fatal("外部 id Add 后应有组件")
+	}
+	w.Destroy(Entity(1))
+	if Has[pos](w, Entity(1)) {
+		t.Fatal("Destroy 后不应再有任何组件")
+	}
+	if _, ok := w.rec[Entity(1)]; ok {
+		t.Fatal("Destroy 应彻底注销外部实体的 rec 条目")
+	}
+	if got := len(w.empty.rows); got != 0 {
+		t.Fatalf("Destroy 外部实体不应在空 archetype 累积行，得到 %d", got)
+	}
+	// 之后 Add 同一 id 视为全新外部实体。
+	Add(w, Entity(1), pos{9, 9})
+	p, ok := Get[pos](w, Entity(1))
+	if !ok || *p != (pos{9, 9}) {
+		t.Fatalf("销毁后重新 Add 应正常工作，得到 %v (ok=%v)", p, ok)
+	}
+}
+
+func TestAdd2Add4AndQueryEach34(t *testing.T) {
+	type hp struct{ v float32 }
+
+	// Add2：一次挂两个组件（Bundle 单次搬家）。
+	w := New()
+	e := w.NewEntity()
+	Add2(w, e, pos{1, 2}, vel{3, 4})
+	if !Has[pos](w, e) || !Has[vel](w, e) {
+		t.Fatal("Add2 后两个组件都应存在")
+	}
+	if p, _ := Get[pos](w, e); *p != (pos{1, 2}) {
+		t.Fatalf("Add2 组件值错误: %v", *p)
+	}
+
+	// Add4：一次挂 4 个组件，随后 4 列查询命中、Remove 后 3 列查询仍命中。
+	w2 := New()
+	e2 := w2.NewEntity()
+	Add4(w2, e2, pos{1, 2}, vel{3, 4}, spin{5}, hp{6})
+	q4 := NewQuery4[pos, vel, spin, hp]()
+	n := 0
+	QueryEach4(w2, &q4, func(_ Entity, p *pos, _ *vel, s *spin, h *hp, _ Row) {
+		n++
+		if *s != (spin{5}) || *h != (hp{6}) {
+			t.Fatalf("4 列直取值错误: spin=%v hp=%v", *s, *h)
+		}
+	})
+	if n != 1 {
+		t.Fatalf("QueryEach4 应命中 1 个实体，得到 %d", n)
+	}
+	Remove[spin](w2, e2)
+	n = 0
+	QueryEach4(w2, &q4, func(_ Entity, _ *pos, _ *vel, _ *spin, _ *hp, _ Row) { n++ })
+	if n != 0 {
+		t.Fatalf("Remove 后 4 列查询不应命中，得到 %d", n)
+	}
+	q3 := NewQuery3[pos, vel, hp]()
+	n = 0
+	QueryEach3(w2, &q3, func(_ Entity, _ *pos, _ *vel, _ *hp, _ Row) { n++ })
+	if n != 1 {
+		t.Fatalf("Remove 后 3 列查询应命中 1 个实体，得到 %d", n)
+	}
+}

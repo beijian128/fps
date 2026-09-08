@@ -36,19 +36,29 @@ const (
 	maxFrame   = 1 << 20 // 1 MiB，防止异常大帧
 )
 
+// outFrame 是下行通道里的一帧：op 是 WebSocket opcode（文本/关闭/ping/pong）。
+// 所有下行帧（含 readLoop 的 close/pong 回复）都经 c.send 由唯一的 writeLoop
+// 写出，保证同一连接上不会出现两个并发写者、帧序可控。
+type outFrame struct {
+	op   byte
+	data []byte
+}
+
 type wsClient struct {
 	conn net.Conn
-	send chan []byte
+	send chan outFrame
 }
 
 type wsHub struct {
 	mu      sync.Mutex
 	clients map[*wsClient]struct{}
 	game    *sim.Simulation
+	stop    chan struct{}
+	wg      sync.WaitGroup
 }
 
 func newWsHub(game *sim.Simulation) *wsHub {
-	return &wsHub{clients: map[*wsClient]struct{}{}, game: game}
+	return &wsHub{clients: map[*wsClient]struct{}{}, game: game, stop: make(chan struct{})}
 }
 
 // clientMessage 是客户端上行消息（type 缺省视为 input）。
@@ -60,14 +70,30 @@ type clientMessage struct {
 	Dir    [3]float32 `json:"dir"`
 }
 
-// runTicker 以 20 Hz 固定节奏推进模拟，并广播状态给所有客户端。
+// startTicker 启动 20 Hz 模拟 tick goroutine；stopTicker 停止它并等待退出。
 // 服务器权威：模拟快慢与客户端数量、客户端帧率无关。
+func (h *wsHub) startTicker() {
+	h.wg.Add(1)
+	go h.runTicker()
+}
+
+func (h *wsHub) stopTicker() {
+	close(h.stop)
+	h.wg.Wait()
+}
+
 func (h *wsHub) runTicker() {
+	defer h.wg.Done()
 	ticker := time.NewTicker(time.Second / 20)
 	defer ticker.Stop()
-	for range ticker.C {
-		h.game.Step()
-		h.broadcast(encodeState(h.game.Snapshot()))
+	for {
+		select {
+		case <-ticker.C:
+			h.game.Step()
+			h.broadcast(encodeState(h.game.Snapshot()))
+		case <-h.stop:
+			return
+		}
 	}
 }
 
@@ -81,6 +107,11 @@ func (h *wsHub) handle(w http.ResponseWriter, r *http.Request) {
 	key := r.Header.Get("Sec-WebSocket-Key")
 	if key == "" {
 		http.Error(w, "missing Sec-WebSocket-Key", http.StatusBadRequest)
+		return
+	}
+	// 只接受 RFC 6455 第 13 版握手（浏览器 / Godot WebSocketPeer 都发 13）。
+	if r.Header.Get("Sec-WebSocket-Version") != "13" {
+		http.Error(w, "unsupported websocket version", http.StatusBadRequest)
 		return
 	}
 	hj, ok := w.(http.Hijacker)
@@ -107,15 +138,22 @@ func (h *wsHub) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	c := &wsClient{conn: conn, send: make(chan []byte, wsSendCap)}
-	h.mu.Lock()
-	h.clients[c] = struct{}{}
-	h.mu.Unlock()
-	go c.writeLoop()
-	go c.readLoop(h)
+	c := &wsClient{conn: conn, send: make(chan outFrame, wsSendCap)}
 
 	// 连接后立即推送一帧当前状态，客户端无需再拉取初始快照。
-	c.send <- encodeState(h.game.Snapshot())
+	// 快照在注册前编码（encodeState→Snapshot 自带 sim 锁），随后在 h.mu 内投递：
+	// remove()/broadcast 只在持锁时 close(c.send)，因此注册与投递之间不会发生
+	// send-on-closed-channel 竞争；若缓冲已满则放弃首帧（等下个 tick 广播）。
+	initial := outFrame{op: opText, data: encodeState(h.game.Snapshot())}
+	h.mu.Lock()
+	h.clients[c] = struct{}{}
+	select {
+	case c.send <- initial:
+	default:
+	}
+	h.mu.Unlock()
+	go c.writeLoop(h)
+	go c.readLoop(h, rw.Reader) // 复用 Hijack 的缓冲 Reader：紧随手握手的首帧不会丢
 }
 
 // broadcast 向所有客户端推送。发送不出去的慢客户端直接断开重连，
@@ -125,7 +163,7 @@ func (h *wsHub) broadcast(msg []byte) {
 	defer h.mu.Unlock()
 	for c := range h.clients {
 		select {
-		case c.send <- msg:
+		case c.send <- outFrame{op: opText, data: msg}:
 		default:
 			delete(h.clients, c)
 			c.conn.Close()
@@ -134,7 +172,22 @@ func (h *wsHub) broadcast(msg []byte) {
 	}
 }
 
-// remove 需要与 broadcast 持同一把锁，避免向已关闭的 channel 写入。
+// enqueue 向单个客户端的发送通道投递一帧（close/pong 等控制帧用）。
+// 在 h.mu 下检查客户端仍存活并投递：客户端一旦被 remove()/broadcast 剔除，
+// 通道即被关闭，绝不能对其发送；发送不出去（缓冲满）则直接放弃。
+func (h *wsHub) enqueue(c *wsClient, m outFrame) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if _, ok := h.clients[c]; !ok {
+		return
+	}
+	select {
+	case c.send <- m:
+	default:
+	}
+}
+
+// remove 需要与 broadcast / enqueue 持同一把锁，避免向已关闭的 channel 写入。
 func (h *wsHub) remove(c *wsClient) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -146,20 +199,22 @@ func (h *wsHub) remove(c *wsClient) {
 	close(c.send)
 }
 
-func (c *wsClient) writeLoop() {
-	for data := range c.send {
+// writeLoop 是每连接唯一的写者：所有下行（文本/关闭/ping 回复）都从 c.send
+// 取出后整帧写出，杜绝并发写者导致帧序乱序；写出错时主动注销自己。
+func (c *wsClient) writeLoop(h *wsHub) {
+	for m := range c.send {
 		_ = c.conn.SetWriteDeadline(time.Now().Add(wsWriteSec))
-		if err := writeWSFrame(c.conn, opText, data); err != nil {
-			c.conn.Close()
+		if err := writeWSFrame(c.conn, m.op, m.data); err != nil {
+			h.remove(c)
 			return
 		}
 	}
 }
 
 // readLoop 解析客户端帧并分发消息；出错或对端关闭即退出。
-func (c *wsClient) readLoop(h *wsHub) {
+// br 复用握手 Hijack 时带回的缓冲 Reader（可能已缓存紧随手握手的首帧）。
+func (c *wsClient) readLoop(h *wsHub, br *bufio.Reader) {
 	defer h.remove(c)
-	br := bufio.NewReader(c.conn)
 	for {
 		op, payload, err := readWSFrame(br)
 		if err != nil {
@@ -168,13 +223,13 @@ func (c *wsClient) readLoop(h *wsHub) {
 		switch op {
 		case opText:
 			h.handleMessage(payload)
-		case opClose: // 回一个 close 帧后关闭
-			_ = writeWSFrame(c.conn, opClose, []byte{})
+		case opClose: // 回一个 close 帧后关闭（经 send 通道由 writeLoop 单写者发出）
+			h.enqueue(c, outFrame{op: opClose, data: nil})
 			return
 		case opPing:
-			if writeWSFrame(c.conn, opPong, payload) != nil {
-				return
-			}
+			h.enqueue(c, outFrame{op: opPong, data: payload})
+		case opPong:
+			// 客户端 pong：忽略（本地 demo 未做服务端心跳统计）
 		}
 	}
 }
@@ -226,8 +281,20 @@ func readWSFrame(br *bufio.Reader) (opcode byte, payload []byte, err error) {
 	if hdr[0]&0x80 == 0 {
 		return 0, nil, fmt.Errorf("fragmented frames unsupported")
 	}
+	if hdr[0]&0x70 != 0 {
+		return 0, nil, fmt.Errorf("reserved bits set in frame header")
+	}
 	opcode = hdr[0] & 0x0F
+	switch opcode {
+	case opText, opClose, opPing, opPong:
+	default:
+		return 0, nil, fmt.Errorf("unsupported opcode 0x%x", opcode)
+	}
 	masked := hdr[1]&0x80 != 0
+	// RFC 6455 §5.1：客户端 → 服务器帧必须掩码，未掩码即协议错误。
+	if !masked {
+		return 0, nil, fmt.Errorf("client frames must be masked")
+	}
 	n := uint64(hdr[1] & 0x7F)
 	switch n {
 	case 126:
@@ -246,20 +313,20 @@ func readWSFrame(br *bufio.Reader) (opcode byte, payload []byte, err error) {
 	if n > maxFrame {
 		return 0, nil, fmt.Errorf("frame too large: %d", n)
 	}
+	// 控制帧（close/ping/pong）长度上限 125（FIN 已在上方强制）。
+	if opcode >= opClose && n > 125 {
+		return 0, nil, fmt.Errorf("control frame too large: %d", n)
+	}
 	var mask [4]byte
-	if masked {
-		if _, err = io.ReadFull(br, mask[:]); err != nil {
-			return 0, nil, err
-		}
+	if _, err = io.ReadFull(br, mask[:]); err != nil {
+		return 0, nil, err
 	}
 	payload = make([]byte, n)
 	if _, err = io.ReadFull(br, payload); err != nil {
 		return 0, nil, err
 	}
-	if masked {
-		for i := range payload {
-			payload[i] ^= mask[i&3]
-		}
+	for i := range payload {
+		payload[i] ^= mask[i&3]
 	}
 	return opcode, payload, nil
 }

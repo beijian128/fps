@@ -568,7 +568,7 @@ func TestWaveAdvance(t *testing.T) {
 		t.Fatalf("3 次掉落后金币应为 %d，得到 %d", initialResource+3, len(st.Resources))
 	}
 
-	// 清空 2 秒后刷第 2 波（1+2=3 只）。
+	// 清空 2 秒后刷第 2 波（数量规则：第 1 波 3 只、之后每波 +1 → 第 2 波 4 只）。
 	for i := 0; i < waveDelayTicks+5; i++ {
 		s.Step()
 	}
@@ -576,8 +576,8 @@ func TestWaveAdvance(t *testing.T) {
 	if st.Wave != 2 {
 		t.Fatalf("波次应推进到 2，得到 %d", st.Wave)
 	}
-	if got := len(enemiesOf(st)); got != 3 {
-		t.Fatalf("第 2 波应有 3 只，得到 %d", got)
+	if got := len(enemiesOf(st)); got != initialEnemies+1 {
+		t.Fatalf("第 2 波应有 %d 只，得到 %d", initialEnemies+1, got)
 	}
 }
 
@@ -670,5 +670,75 @@ func TestSnapshotStableAfterRemovals(t *testing.T) {
 		if st.Bodies[i].ID <= st.Bodies[i-1].ID {
 			t.Fatalf("删除实体后快照仍应按 id 升序，%d 排在 %d 后", st.Bodies[i].ID, st.Bodies[i-1].ID)
 		}
+	}
+}
+
+// ---- 本轮加固新增测试 ----
+
+func TestInputClampedToMaxSpeed(t *testing.T) {
+	s, p := newTestSim(t)
+	// 客户端上报远超限幅的速度（60,80 → 模长 100）：服务端应封顶到
+	// maxPlayerSpeed 且保持方向，而不是照单全收造成超速/穿墙。
+	s.ApplyInput([2]float32{60, 80}, false)
+	s.Step()
+	dx := p.character[0]
+	dz := p.character[2] - 12
+	d := float32(math.Sqrt(float64(dx*dx + dz*dz)))
+	if !near(d, maxPlayerSpeed*TickDT, 1e-3) {
+		t.Fatalf("水平位移应按 maxPlayerSpeed=%v 限幅，实测 %v", maxPlayerSpeed, d)
+	}
+	if !near(dx*4, dz*3, 1e-2) {
+		t.Fatalf("限幅不应改变方向，实测位移 (%v, %v)", dx, dz)
+	}
+}
+
+func TestRespawnSameTickConsistent(t *testing.T) {
+	s, p := newTestSim(t)
+	enemy := enemiesOf(s.Snapshot())[0]
+	p.moveBody(enemy, [3]float32{0, 0, 12}) // 贴身 → 每 tick 持续伤害
+	for i := 0; i < 500 && p.respawns == 0; i++ {
+		s.Step()
+	}
+	if p.respawns == 0 {
+		t.Fatal("贴身持续伤害应在 500 tick 内触发复活")
+	}
+	st := s.Snapshot()
+	if st.Player.Health != 100 {
+		t.Fatalf("复活当 tick 血量应为 100，得到 %v", st.Player.Health)
+	}
+	if st.Player.Pos != (Position{0, playerSpawnY, 12}) {
+		t.Fatalf("复活当 tick 快照位置应已是出生点（不再留在死亡点），得到 %v", st.Player.Pos)
+	}
+	if p.character != ([3]float32{0, playerSpawnY, 12}) {
+		t.Fatalf("物理角色位置应立即回到出生点，得到 %v", p.character)
+	}
+	if p.charVel != ([3]float32{}) {
+		t.Fatalf("复活应清零角色速度，得到 %v", p.charVel)
+	}
+}
+
+func TestInitIsIdempotent(t *testing.T) {
+	s, p := newTestSim(t)
+	before := p.bodyCount()
+	// 造点"噪音"：发弹、推进几 tick。
+	s.Shoot([3]float32{0, 1, 12}, [3]float32{1, 0, 0})
+	for i := 0; i < 3; i++ {
+		s.Step()
+	}
+
+	// 重复 Init 应等同 Reset：重建场景而不是叠加/残留。
+	s.Init()
+	if p.createCalls != 2 {
+		t.Fatalf("重复 Init 应重建物理世界（Create 共 2 次），得到 %d", p.createCalls)
+	}
+	if got := p.bodyCount(); got != before {
+		t.Fatalf("重复 Init 不应叠加场景：刚体 %d → %d", before, got)
+	}
+	st := s.Snapshot()
+	if st.Step != 0 || st.Score != 0 || st.Wave != 1 || st.Player.Health != 100 {
+		t.Fatalf("重复 Init 后状态应回到初始，得到 %+v", st)
+	}
+	if len(projectilesOf(st)) != 0 {
+		t.Fatalf("重复 Init 后应无残留弹丸，得到 %d", len(projectilesOf(st)))
 	}
 }

@@ -21,8 +21,8 @@
 //   - 实体只是 uint32 ID。物理实体使用外部（物理桥）发放的 id（从 1 递增，
 //     桥内与 Jolt BodyID 互译），纯逻辑实体（金币等）由 NewEntity 从
 //     logicEntityBase 起分配，两个 ID 空间不会重叠。Destroy 回收逻辑实体 id
-//     （free list）供 NewEntity 复用，销毁行不累积；外部 id 若被物理层复用，
-//     Add 会自动清掉空 archetype 里的旧行
+//     （free list）供 NewEntity 复用，销毁行不累积；物理（外部）id 销毁时
+//     彻底注销 empty 行与 rec 条目（会话内不复用，下次 Add 视为全新实体）
 //   - Get 返回指向存储内部元素的指针，可用于原地修改组件；但任何导致所在
 //     archetype 列扩容的写入（同 archetype Add 新实体）或实体搬家（Add/Remove
 //     组件、Destroy）都可能使旧指针失效，指针只在本次调用内使用
@@ -485,8 +485,10 @@ func Count[T any](w *World) int {
 }
 
 // Destroy 移除实体的所有组件（搬回空 archetype），使实体不再被任何查询看到。
-// 逻辑实体（NewEntity 发放的 id）进入回收池供 NewEntity 复用；物理实体的 id
-// 由物理桥管理，若被复用则 Add 会自动清掉空 archetype 里的旧行。
+// 逻辑实体（NewEntity 发放的 id）进入回收池供 NewEntity 复用（empty 里的旧行在
+// 复用时由 NewEntity 的 removeRowAt 清掉）；物理实体的 id 由物理桥单调递增发放、
+// 会话内不复用，因此销毁后把 empty 行与 rec 条目一并删除，避免空行随弹丸/敌人/
+// 金币的销毁在长会话里无界累积（下次 Add 同一 id 时按全新外部实体直接落位）。
 func (w *World) Destroy(e Entity) {
 	r, ok := w.rec[e]
 	if !ok || r.arch == w.empty {
@@ -495,7 +497,11 @@ func (w *World) Destroy(e Entity) {
 	w.move(e, r.arch, w.empty)
 	if e >= logicEntityBase {
 		w.free = append(w.free, e)
+		return
 	}
+	row := w.rec[e].row
+	w.removeRowAt(e, w.empty, row)
+	delete(w.rec, e)
 }
 
 // Row 是 EachWith / QueryEach 回调里的行视图：指向实体所在 archetype 的某

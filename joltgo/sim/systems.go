@@ -13,7 +13,10 @@ package sim
 // 变换同步（syncSystem）每 tick 只做一次，放在物理步进之后：弹丸掉落位置、
 // 刷怪位置、快照读取的都是本 tick 步进后的位置。
 
-import "joltgo/ecs"
+import (
+	"joltgo/ecs"
+	"math"
+)
 
 // inputSystem 消费玩家输入并实现角色移动策略（走/跑速度 + 跳跃 + 重力积分），
 // 然后让物理层推进角色一步。移动规则是游戏逻辑，物理层只负责执行。
@@ -35,7 +38,14 @@ func (s *Simulation) inputSystem() {
 		}
 	}
 	v[1] += gravityY * TickDT
-	v[0], v[2] = in.Move[0], in.Move[1] // 水平速度直接来自客户端输入
+	// 服务端限幅：客户端上报的水平速度只当作"期望方向+期望速率"，封顶到
+	// maxPlayerSpeed（走/跑的 8/14 只是客户端约定），防恶意客户端任意超速穿墙。
+	mx, mz := in.Move[0], in.Move[1]
+	if l := mx*mx + mz*mz; l > maxPlayerSpeed*maxPlayerSpeed {
+		k := maxPlayerSpeed / float32(math.Sqrt(float64(l)))
+		mx, mz = mx*k, mz*k
+	}
+	v[0], v[2] = mx, mz // 水平速度来自客户端输入（已限幅）
 	s.physics.SetCharacterVelocity(v)
 	s.physics.UpdateCharacter(TickDT)
 }
@@ -122,7 +132,12 @@ func (s *Simulation) enemyDamageSystem(contacts []uint32) {
 	}
 	if *hp <= 0 {
 		*hp = 100
+		// 立即复活到出生点并清零速度；同时把 Position 组件同步为出生点，
+		// 避免当 tick 快照出现"满血却还站在死亡点"的不一致（syncSystem 要到
+		// 下个 tick 才会回写角色位置）。
 		s.physics.SetCharacterPosition(0, playerSpawnY, 12)
+		s.physics.SetCharacterVelocity([3]float32{0, 0, 0})
+		ecs.Add(s.world, s.player, Position{0, playerSpawnY, 12})
 	}
 }
 
@@ -153,7 +168,9 @@ func (s *Simulation) resourceSystem(contacts []uint32) {
 	}
 }
 
-// waveSystem 波次推进：场上清空 2 秒后刷下一波（第 n 波 1+n 只，上限 6 只）。
+// waveSystem 波次推进：场上清空 2 秒后刷下一波。
+// 数量规则与文档一致：第 1 波 initialEnemies 只（3），之后每波 +1，封顶
+// maxEnemiesPerWave（即 3,4,5,6,6,…）。
 func (s *Simulation) waveSystem() {
 	if ecs.Count[Enemy](s.world) > 0 {
 		s.waveClearStep = 0
@@ -167,7 +184,7 @@ func (s *Simulation) waveSystem() {
 		return
 	}
 	s.wave++
-	n := 1 + s.wave
+	n := initialEnemies + (s.wave - 1)
 	if n > maxEnemiesPerWave {
 		n = maxEnemiesPerWave
 	}

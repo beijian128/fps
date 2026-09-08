@@ -74,7 +74,11 @@ void jolt_set_body_restitution(JoltWorld *w, uint32_t body_id, float restitution
 void jolt_set_body_motion_quality(JoltWorld *w, uint32_t body_id, int quality);
 void jolt_apply_impulse(JoltWorld *w, uint32_t body_id, float ix, float iy, float iz);
 
-/* ---- 接触事件：排空接触监听器记录的刚体对（不区分业务角色，命中判定由 Go 侧做） ---- */
+/* ---- 接触事件：取出接触监听器记录的刚体对（不区分业务角色，命中判定由 Go 侧做）。
+
+   jolt_poll_contacts / jolt_character_poll_contacts 每次从队列头部取出最多
+   max_count/max_ids 条，剩余留在队列供下一次调用；调用方循环调用直至返回 0
+   即视为排空（Go 侧按 1024 / 256 分块循环读取）。 ---- */
 
 uint32_t jolt_poll_contacts(JoltWorld *w, JoltContactPair *out, uint32_t max_count);
 
@@ -105,8 +109,9 @@ int jolt_character_get_ground_state(JoltWorld *w);
    jolt_character_set_velocity 设置）。 */
 void jolt_character_update(JoltWorld *w, float dt);
 
-/* 排空本 tick 角色接触到的刚体 id（接触建立时 + 每步接触求解时都会记录，
-   同一刚体可能出现多次；单线程调用，Go 侧自行去重）。 */
+/* 取走本 tick 角色接触到的刚体 id（接触建立时 + 每步接触求解时都会记录，
+   同一刚体可能出现多次；单线程调用）。每次取最多 max_ids 条，剩余留待下次，
+   Go 侧循环取到 0 即排空并自行去重。 */
 uint32_t jolt_character_poll_contacts(JoltWorld *w, uint32_t *out_ids, uint32_t max_ids);
 
 #ifdef __cplusplus

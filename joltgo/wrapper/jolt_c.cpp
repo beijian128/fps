@@ -72,6 +72,10 @@ namespace
 
 		std::mutex mtx;
 		std::vector<ContactPair> pairs;
+		// 读取游标（在 mtx 保护下访问）：jolt_poll_contacts 每次只取队头最多
+		// max 条并推进游标，取完才清空——与 Go 侧"分块循环取到空为止"的
+		// 排空契约一致（一次性 swap 排空会丢弃超过单次缓冲的尾部事件）。
+		size_t read_pos = 0;
 	};
 
 	// 角色接触监听器：做两件纯物理层的事——
@@ -131,14 +135,14 @@ struct JoltWorld
 
 static void EnsureJoltInitialized()
 {
-	static bool initialized = false;
-	if (initialized)
-		return;
-
-	RegisterDefaultAllocator();
-	Factory::sInstance = new Factory();
-	RegisterTypes();
-	initialized = true;
+	// std::call_once：即使未来从多线程并发创建 JoltWorld，Factory / 类型注册
+	// 也只执行一次（旧实现是裸 static bool，存在数据竞争）。
+	static std::once_flag flag;
+	std::call_once(flag, [] {
+		RegisterDefaultAllocator();
+		Factory::sInstance = new Factory();
+		RegisterTypes();
+	});
 }
 
 extern "C" JoltWorld *jolt_create(void)
@@ -232,6 +236,14 @@ static BodyID AddBodyToWorld(JoltWorld *w, const BodyCreationSettings &inSetting
 	return body_id;
 }
 
+// 把 BodyID 转为跨边界透传值：无效 BodyID（创建/分配失败）统一映射为 0，
+// 与 jolt_c.h 的 "0 = 失败" 约定一致。不能直接透传 invalid 值 0xffffffff——
+// 合法 BodyID 因带序号位（BodyID.h: mID = sequence << 23 | index）而不会为 0。
+static uint32_t RawBodyID(BodyID inID)
+{
+	return inID.IsInvalid() ? 0 : inID.GetIndexAndSequenceNumber();
+}
+
 extern "C" uint32_t jolt_add_box(JoltWorld *w, float hx, float hy, float hz, float x, float y, float z, int motion_type)
 {
 	if (w == nullptr || w->physics_system == nullptr)
@@ -243,7 +255,7 @@ extern "C" uint32_t jolt_add_box(JoltWorld *w, float hx, float hy, float hz, flo
 
 	EMotionType mt = static_cast<EMotionType>(motion_type);
 	BodyCreationSettings body_settings(shape, RVec3(x, y, z), Quat::sIdentity(), mt, LayerForMotionType(mt));
-	return AddBodyToWorld(w, body_settings).GetIndexAndSequenceNumber();
+	return RawBodyID(AddBodyToWorld(w, body_settings));
 }
 
 extern "C" uint32_t jolt_add_sphere(JoltWorld *w, float x, float y, float z, float radius, int motion_type)
@@ -253,7 +265,7 @@ extern "C" uint32_t jolt_add_sphere(JoltWorld *w, float x, float y, float z, flo
 
 	EMotionType mt = static_cast<EMotionType>(motion_type);
 	BodyCreationSettings body_settings(new SphereShape(radius), RVec3(x, y, z), Quat::sIdentity(), mt, LayerForMotionType(mt));
-	return AddBodyToWorld(w, body_settings).GetIndexAndSequenceNumber();
+	return RawBodyID(AddBodyToWorld(w, body_settings));
 }
 
 extern "C" uint32_t jolt_add_capsule(JoltWorld *w, float x, float y, float z, float half_height, float radius, int motion_type)
@@ -263,7 +275,7 @@ extern "C" uint32_t jolt_add_capsule(JoltWorld *w, float x, float y, float z, fl
 
 	EMotionType mt = static_cast<EMotionType>(motion_type);
 	BodyCreationSettings body_settings(new CapsuleShape(half_height, radius), RVec3(x, y, z), Quat::sIdentity(), mt, LayerForMotionType(mt));
-	return AddBodyToWorld(w, body_settings).GetIndexAndSequenceNumber();
+	return RawBodyID(AddBodyToWorld(w, body_settings));
 }
 
 extern "C" uint32_t jolt_add_sensor_sphere(JoltWorld *w, float x, float y, float z, float radius)
@@ -275,7 +287,7 @@ extern "C" uint32_t jolt_add_sensor_sphere(JoltWorld *w, float x, float y, float
 	// （以 mIsSensorB 上报），是「触发器/拾取物」的标准实现方式。
 	BodyCreationSettings body_settings(new SphereShape(radius), RVec3(x, y, z), Quat::sIdentity(), EMotionType::Static, LAYER_NON_MOVING);
 	body_settings.mIsSensor = true;
-	return AddBodyToWorld(w, body_settings).GetIndexAndSequenceNumber();
+	return RawBodyID(AddBodyToWorld(w, body_settings));
 }
 
 extern "C" void jolt_remove_body(JoltWorld *w, uint32_t body_id)
@@ -378,19 +390,31 @@ extern "C" uint32_t jolt_poll_contacts(JoltWorld *w, JoltContactPair *out, uint3
 	if (w == nullptr || out == nullptr)
 		return 0;
 
-	std::vector<ContactRecorder::ContactPair> local;
+	// 从队列头部取最多 max_count 条，剩余留在队列供下一次轮询——与 Go 侧
+	// "分块循环取到空为止"的排空契约一致。旧实现每次 swap 排空整个队列，超过
+	// 单次缓冲（Go 侧 1024）的尾部事件会被静默丢弃。
+	std::lock_guard<std::mutex> lock(w->contact_listener.mtx);
+	auto &pairs = w->contact_listener.pairs;
+	size_t &pos = w->contact_listener.read_pos;
+	if (pos >= pairs.size())
 	{
-		std::lock_guard<std::mutex> lock(w->contact_listener.mtx);
-		local.swap(w->contact_listener.pairs);
+		pairs.clear();
+		pos = 0;
+		return 0;
 	}
-
-	uint32_t n = std::min<uint32_t>((uint32_t)local.size(), max_count);
-	for (uint32_t i = 0; i < n; ++i)
+	size_t n = std::min(pairs.size() - pos, (size_t)max_count);
+	for (size_t i = 0; i < n; ++i)
 	{
-		out[i].body_a = local[i].a;
-		out[i].body_b = local[i].b;
+		out[i].body_a = pairs[pos + i].a;
+		out[i].body_b = pairs[pos + i].b;
 	}
-	return n;
+	pos += n;
+	if (pos >= pairs.size())
+	{
+		pairs.clear();
+		pos = 0;
+	}
+	return (uint32_t)n;
 }
 
 // ---- 射线 ----
@@ -509,12 +533,12 @@ extern "C" uint32_t jolt_character_poll_contacts(JoltWorld *w, uint32_t *out_ids
 	if (w == nullptr || out_ids == nullptr)
 		return 0;
 
-	// 角色更新在单线程（Go tick goroutine）内完成，无需加锁；swap 保持空队列。
-	std::vector<uint32_t> local;
-	local.swap(w->character_listener.touches);
-
-	uint32_t n = std::min<uint32_t>((uint32_t)local.size(), max_ids);
-	for (uint32_t i = 0; i < n; ++i)
-		out_ids[i] = local[i];
-	return n;
+	// 角色更新在单线程（Go tick goroutine）内完成，无需加锁。从队头取最多
+	// max_ids 条、剩余留待下次（配合 Go 侧分块循环排空），避免超过缓冲被丢弃。
+	auto &touches = w->character_listener.touches;
+	size_t n = std::min(touches.size(), (size_t)max_ids);
+	for (size_t i = 0; i < n; ++i)
+		out_ids[i] = touches[i];
+	touches.erase(touches.begin(), touches.begin() + n);
+	return (uint32_t)n;
 }

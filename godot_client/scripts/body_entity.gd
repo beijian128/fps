@@ -51,11 +51,21 @@ func _build_simple(body: Dictionary) -> void:
 	_simple_mesh = mi
 
 func _build_monster(body: Dictionary) -> void:
-	var r := maxf(0.25, float((body.get("size", [0.35, 0.5, 0.0]) as Array)[0]))
+	var size_a: Array = body.get("size", [0.35, 0.5, 0.0])
+	var r := maxf(0.25, float(size_a[0]))
+	var half := maxf(0.0, float(size_a[1]))
+
+	# 服务端敌人胶囊的 pos 是胶囊中心（底部 = 中心 - (半高 + 半径)），而卡通模型的
+	# 最低点是腿部（局部约 -0.96*r）。把整个视觉组下移 (半高 + 半径) - 0.96*r，
+	# 让怪物脚底贴地、与物理胶囊一致，而不是悬浮在半空。
+	var ground := Node3D.new()
+	ground.name = "GroundAnchor"
+	ground.position.y = -(half + r) + r * 0.96
+	add_child(ground)
 
 	_bob = Node3D.new()
 	_bob.name = "Bob"
-	add_child(_bob)
+	ground.add_child(_bob)
 
 	# 身体：大扁球，肚皮更浅色的小球叠在前下方。
 	var body_mesh := SphereMesh.new()
@@ -117,7 +127,7 @@ func _add_part(parent: Node3D, mesh: Mesh, color: Color, pos: Vector3) -> MeshIn
 	var mat := StandardMaterial3D.new()
 	mat.albedo_color = color
 	mat.roughness = 0.55
-	mat.metalness = 0.0
+	mat.metallic = 0.0
 	mi.material_override = mat
 	parent.add_child(mi)
 	return mi
@@ -164,19 +174,19 @@ func _make_material(b: Dictionary) -> StandardMaterial3D:
 		mat.emission_enabled = true
 		mat.emission = Color("550000")
 		mat.roughness = 0.35
-		mat.metalness = 0.1
+		mat.metallic = 0.1
 	elif b.get("static", false):
 		mat.albedo_color = Color("6e7681")
 		mat.roughness = 0.9
 	else:
 		mat.albedo_color = Color("d08a4e")
 		mat.roughness = 0.65
-		mat.metalness = 0.05
+		mat.metallic = 0.05
 	return mat
 
 func _signature(b: Dictionary) -> String:
 	var size: Array = b.get("size", [0.0, 0.0, 0.0])
-	return "%d|%s|%s|%s|%s|%.5f" % [
+	return "%d|%s|%s|%s|%s|%.5f|%.5f" % [
 		int(b.get("type", 0)), b.get("static", false), b.get("target", false),
-		b.get("enemy", false), b.get("projectile", false), float(size[0]),
+		b.get("enemy", false), b.get("projectile", false), float(size[0]), float(size[1]),
 	]

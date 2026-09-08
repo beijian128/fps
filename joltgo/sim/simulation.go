@@ -23,6 +23,8 @@ const (
 	gravityY  = -20.0 // 重力加速度（比真实 9.81 大，跳起/落地更快、手感更利落）
 	jumpSpeed = 8.5   // 起跳垂直速度（m/s）
 
+	maxPlayerSpeed = 14.0 // 服务端对客户端上报水平速度的限幅（与客户端 RUN_SPEED 一致）
+
 	characterHalfHeight = 0.5 // 玩家胶囊圆柱半高
 	characterRadius     = 0.4 // 玩家胶囊半径
 	characterOffsetY    = 0.9 // 胶囊形状上移量（使位置指向脚底）
@@ -141,11 +143,23 @@ func New(p Physics) *Simulation {
 	}
 }
 
-// Init 创建物理世界与初始场景。只在启动时调用一次，之后重建请用 Reset。
+// Init 创建物理世界与初始场景。只在启动时调用一次；重复调用等同 Reset（幂等，
+// 不会叠加场景或残留旧实体）。
 func (s *Simulation) Init() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.player != ecs.InvalidEntity {
+		s.resetLocked()
+		return
+	}
 	s.initLocked()
+}
+
+// Shutdown 释放物理世界资源（进程退出前调用一次；调用后不应再 Step/Shoot/Snapshot）。
+func (s *Simulation) Shutdown() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.physics.Destroy()
 }
 
 // ApplyInput 记录客户端最新输入（跳跃为边沿触发：服务端在下一个 tick 消费）。
@@ -248,9 +262,8 @@ func (s *Simulation) resetLocked() {
 	s.step = 0
 	s.score = 0
 	s.gold = 0
-	s.wave = 1
 	s.waveClearStep = 0
-	s.initLocked()
+	s.initLocked() // initLocked 里统一重置 wave = 1 并搭建场景
 }
 
 func (s *Simulation) stepLocked() {

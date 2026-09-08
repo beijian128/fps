@@ -63,6 +63,7 @@ var _hud_enemies := 0
 var _last_score := 0
 var _last_health := 100.0
 var _prev_projectiles := {}  # id -> Vector3
+var _snap_sig := ""  # 最近一次已接受快照的内容摘要（step 无关），同 step 帧去重用
 var _hit_flash: ColorRect
 # 自动化测试钩子：无头环境无法真正捕获鼠标，设置该环境变量后视作已捕获。
 var _capture_override := OS.get_environment("JOLT_FORCE_CAPTURE") != ""
@@ -80,20 +81,33 @@ func _on_connection(connected: bool) -> void:
 	if not connected:
 		_prev_snap = {}
 		_next_snap = {}
+		_snap_sig = ""
 		for id in _res_nodes:
 			_res_nodes[id]["node"].queue_free()
 		_res_nodes = {}
+		# 刚体渲染节点与"上一帧弹丸"一并清空：避免旧刚体以冻结姿势残留到被新
+		# 快照 diff 移除，也避免重连后旧弹丸的消失被误判成"命中"爆闪。
+		for id in _entities:
+			_entities[id].queue_free()
+		_entities = {}
+		_prev_projectiles = {}
 
 func _process(delta: float) -> void:
 	if delta > 0.0:
 		_fps_ema += (1.0 / delta - _fps_ema) * 0.08
 
-	# 跳跃在按下瞬间排队，随下一帧输入上报给服务端。
+	# 仅锁定时上报移动输入（每渲染帧一次 ≈ 60 Hz）；释放时补一条静止输入，
+	# 避免服务端沿用上次的速度继续移动。
+	var captured := _capture_override or Input.mouse_mode == Input.MOUSE_MODE_CAPTURED
+
+	# 跳跃在按下瞬间排队，随下一帧输入上报给服务端。未锁定时（标题遮罩/鼠标
+	# 已释放）不排队也不播音效，避免把过期的跳跃误发出去或空播音效。
 	var space := Input.is_key_pressed(KEY_SPACE)
 	if space and not _jump_held:
-		_jump_queued = true
 		_jump_held = true
-		sfx.play("jump")
+		if captured:
+			_jump_queued = true
+			sfx.play("jump")
 	if not space:
 		_jump_held = false
 
@@ -104,9 +118,6 @@ func _process(delta: float) -> void:
 		_hud_score, _hud_wave, _hud_gold, _hud_targets, _hud_enemies, roundi(_fps_ema),
 	]
 
-	# 仅锁定时上报移动输入（每渲染帧一次 ≈ 60 Hz）；释放时补一条静止输入，
-	# 避免服务端沿用上次的速度继续移动。
-	var captured := _capture_override or Input.mouse_mode == Input.MOUSE_MODE_CAPTURED
 	overlay.visible = not captured
 	if captured:
 		fps_client.send_input(_wish_velocity(), _jump_queued)
@@ -125,6 +136,9 @@ func _input(event: InputEvent) -> void:
 	elif event is InputEventKey and event.pressed and event.keycode == KEY_V:
 		_third_person = not _third_person
 		_apply_camera_mode()
+	elif event is InputEventKey and event.pressed and event.keycode == KEY_ESCAPE:
+		# 显式释放鼠标（不依赖引擎对 ESC 的默认行为）。
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 
 func _unhandled_input(event: InputEvent) -> void:
 	if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
@@ -186,20 +200,36 @@ func _on_state(s: Dictionary) -> void:
 	_store_snapshot(s)
 
 ## 推流时序维护：tick 连续则滚动双缓冲；跳号（重置/重连）清空插值缓冲。
+##
+## 服务端在 shoot/reset 后会"立即补推"一帧：它与上一帧同 step，但内容可能已变
+## （例如刚发射的弹丸）。因此同 step 帧按「内容」而非逐字去重：
+##   - 内容未变（tick 广播与补推的重复帧）→ 忽略；
+##   - 内容新增/更新（且未删除当前帧已有的刚体）→ 原地刷新下一帧。保留原
+##     到达时间 t，避免高速刚体在插值中回跳；补推只增删弹丸，刚体位置不变。
+##   - 含删除的同 step 帧视为迟到的旧内容（补推帧只会新增），跳过以防回退。
 func _store_snapshot(s: Dictionary) -> void:
 	if _next_snap.is_empty():
 		_next_snap = _parse_snapshot(s, Time.get_ticks_msec() / 1000.0)
+		_snap_sig = _frame_sig(s)
 		_render_resources(_next_snap["resources"])
 		return
 	var last_step := int(_next_snap["step"])
 	var step := int(s.get("step", 0))
 	if step == last_step:
+		if _frame_sig(s) == _snap_sig or not _frame_keeps_bodies(s, _next_snap):
+			return
+		_next_snap = _parse_snapshot(s, float(_next_snap["t"]))
+		_snap_sig = _frame_sig(s)
+		_update_hud(s)
+		_detect_impacts(_next_snap["bodies"])
+		_render_resources(_next_snap["resources"])
 		return
 	if step == last_step + 1:
 		_prev_snap = _next_snap
 	else:
 		_prev_snap = {}
 	_next_snap = _parse_snapshot(s, Time.get_ticks_msec() / 1000.0)
+	_snap_sig = _frame_sig(s)
 	_update_hud(s)
 	_detect_impacts(_next_snap["bodies"])
 	_render_resources(_next_snap["resources"])
@@ -230,6 +260,35 @@ func _parse_snapshot(s: Dictionary, t: float) -> Dictionary:
 		"step": int(s.get("step", 0)), "t": t,
 		"bodies": bodies, "player": feet, "resources": resources,
 	}
+
+## 内容摘要（与 step 无关）：刚体/金币按服务端的 id 升序取位置，附玩家位置。
+## 用于同 step 重复推送的快速比较；位置保留 3 位小数以容忍 JSON 往返浮点噪声。
+func _frame_sig(s: Dictionary) -> String:
+	var parts := PackedStringArray()
+	for b: Variant in s.get("bodies", []):
+		var bd: Dictionary = b
+		var p: Array = bd.get("pos", [0.0, 0.0, 0.0])
+		parts.append("%d@%.3f,%.3f,%.3f" % [int(bd.get("id", 0)), float(p[0]), float(p[1]), float(p[2])])
+	parts.append("|")
+	for r: Variant in s.get("resources", []):
+		var rd: Dictionary = r
+		var rp: Array = rd.get("pos", [0.0, 0.0, 0.0])
+		parts.append("%d@%.3f,%.3f,%.3f" % [int(rd.get("id", 0)), float(rp[0]), float(rp[1]), float(rp[2])])
+	var pp: Array = s.get("player", {}).get("pos", [0.0, 0.0, 0.0])
+	parts.append("P%.3f,%.3f,%.3f" % [float(pp[0]), float(pp[1]), float(pp[2])])
+	return "\n".join(parts)
+
+## 新帧是否未删除当前帧里已有的刚体：同 step 的补推帧只会新增（弹丸）/更新位置
+## （Reset），删除只发生在 step 递增的 tick 广播里；含删除的同 step 帧当作迟到的
+## 旧内容跳过，避免把刚出现的新弹丸"冲掉"。
+func _frame_keeps_bodies(s: Dictionary, snap: Dictionary) -> bool:
+	var next_ids := {}
+	for b: Variant in s.get("bodies", []):
+		next_ids[int((b as Dictionary).get("id", 0))] = true
+	for id in (snap["bodies"] as Dictionary).keys():
+		if not next_ids.has(int(id)):
+			return false
+	return true
 
 ## 影子跟随：alpha = 距新快照到达的时间 / TICK，在 prev/next 之间插值。
 func _render_interpolated() -> void:
@@ -309,7 +368,7 @@ func _spawn_coin(base: Vector3) -> Dictionary:
 	gold_mat.emission = Color("ff9c3f")
 	gold_mat.emission_energy_multiplier = 0.35
 	gold_mat.roughness = 0.35
-	gold_mat.metalness = 0.5
+	gold_mat.metallic = 0.5
 	coin.material_override = gold_mat
 	root.add_child(coin)
 
@@ -442,7 +501,7 @@ func _add_part(parent: Node3D, mesh: Mesh, color: Color, pos: Vector3, shadow :=
 	var mat := StandardMaterial3D.new()
 	mat.albedo_color = color
 	mat.roughness = 0.6
-	mat.metalness = 0.0
+	mat.metallic = 0.0
 	mi.material_override = mat
 	parent.add_child(mi)
 	return mi
