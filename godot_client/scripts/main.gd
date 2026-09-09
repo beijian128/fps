@@ -36,6 +36,8 @@ var _vm_base_pos: Vector3
 var _muzzle_flash: MeshInstance3D
 # 第三人称玩家人形 Avatar。
 var _avatar: Node3D
+# 远端玩家 Avatar（局内另一名玩家，始终可见）。
+var _remote_avatar: Node3D
 var _third_person := false
 
 # 最近两帧快照（影子跟随）。每帧存 step、到达时间 t、{ id -> {info,pos,quat} }、
@@ -48,6 +50,10 @@ var _entities := {}
 var _res_nodes := {}
 
 var _player_pos := Vector3(0, 0.2, 12)
+var _remote_pos := Vector3(3, 0.2, 12)
+var _remote_yaw := 0.0
+var _my_player_idx := 0
+var _matched := false
 var _yaw := 0.0
 var _pitch := 0.0
 var _jump_held := false
@@ -71,14 +77,26 @@ var _capture_override := OS.get_environment("JOLT_FORCE_CAPTURE") != ""
 func _ready() -> void:
 	_build_world()
 	_build_avatar()
+	_build_remote_avatar()
 	_build_viewmodel()
 	_build_hud()
 	fps_client.state_received.connect(_on_state)
+	fps_client.matched_received.connect(_on_matched)
 	fps_client.connection_changed.connect(_on_connection)
 
+func _on_matched(result: Dictionary) -> void:
+	_my_player_idx = int(result.get("player_idx", 0))
+	_matched = true
+	conn_label.visible = false
+
 func _on_connection(connected: bool) -> void:
-	conn_label.visible = not connected
-	if not connected:
+	if connected:
+		conn_label.text = "正在匹配…"
+		conn_label.visible = true
+	else:
+		conn_label.text = "正在连接服务器…"
+		conn_label.visible = true
+		_matched = false
 		_prev_snap = {}
 		_next_snap = {}
 		_snap_sig = ""
@@ -120,10 +138,11 @@ func _process(delta: float) -> void:
 
 	overlay.visible = not captured
 	if captured:
-		fps_client.send_input(_wish_velocity(), _jump_queued)
+		if _matched:
+			fps_client.send_input(_wish_velocity(), _yaw, _jump_queued)
 		_jump_queued = false
-	elif _was_captured:
-		fps_client.send_input(Vector2.ZERO, false)
+	elif _was_captured and _matched:
+		fps_client.send_input(Vector2.ZERO, _yaw, false)
 	_was_captured = captured
 
 func _input(event: InputEvent) -> void:
@@ -165,6 +184,8 @@ func _update_camera() -> void:
 		camera.global_position = head + back * 2.6
 		_avatar.rotation.y = _yaw
 	_avatar.global_position = _player_pos
+	_remote_avatar.global_position = _remote_pos
+	_remote_avatar.rotation.y = _remote_yaw
 	camera.rotation = Vector3(_pitch, _yaw, 0.0)
 	if not _third_person:
 		camera.global_position = _player_pos + Vector3(0, EYE_HEIGHT, 0)
@@ -253,12 +274,24 @@ func _parse_snapshot(s: Dictionary, t: float) -> Dictionary:
 			"pos": Vector3(float(rp[0]), float(rp[1]), float(rp[2])),
 			"kind": int(rd.get("kind", 0)),
 		}
-	var player: Dictionary = s.get("player", {})
-	var pos: Array = player.get("pos", [0.0, 0.2, 12.0])
-	var feet := Vector3(float(pos[0]), float(pos[1]), float(pos[2]))
+	var players: Array = s.get("players", [])
+	var my_feet := Vector3(0, 0.2, 12)
+	var remote_feet := Vector3(3, 0.2, 12)
+	var remote_yaw := 0.0
+	if players.size() > _my_player_idx:
+		var mp: Dictionary = players[_my_player_idx]
+		var mpos: Array = mp.get("pos", [0.0, 0.2, 12.0])
+		my_feet = Vector3(float(mpos[0]), float(mpos[1]), float(mpos[2]))
+	var other_idx := 1 - _my_player_idx
+	if players.size() > other_idx:
+		var rp: Dictionary = players[other_idx]
+		var rpos: Array = rp.get("pos", [3.0, 0.2, 12.0])
+		remote_feet = Vector3(float(rpos[0]), float(rpos[1]), float(rpos[2]))
+		remote_yaw = float(rp.get("yaw", 0.0))
 	return {
 		"step": int(s.get("step", 0)), "t": t,
-		"bodies": bodies, "player": feet, "resources": resources,
+		"bodies": bodies, "player": my_feet, "remote": remote_feet,
+		"remote_yaw": remote_yaw, "resources": resources,
 	}
 
 ## 内容摘要（与 step 无关）：刚体/金币按服务端的 id 升序取位置，附玩家位置。
@@ -274,8 +307,11 @@ func _frame_sig(s: Dictionary) -> String:
 		var rd: Dictionary = r
 		var rp: Array = rd.get("pos", [0.0, 0.0, 0.0])
 		parts.append("%d@%.3f,%.3f,%.3f" % [int(rd.get("id", 0)), float(rp[0]), float(rp[1]), float(rp[2])])
-	var pp: Array = s.get("player", {}).get("pos", [0.0, 0.0, 0.0])
-	parts.append("P%.3f,%.3f,%.3f" % [float(pp[0]), float(pp[1]), float(pp[2])])
+	var players: Array = s.get("players", [])
+	for pl: Variant in players:
+		var pd: Dictionary = pl
+		var pp: Array = pd.get("pos", [0.0, 0.0, 0.0])
+		parts.append("P%.3f,%.3f,%.3f" % [float(pp[0]), float(pp[1]), float(pp[2])])
 	return "\n".join(parts)
 
 ## 新帧是否未删除当前帧里已有的刚体：同 step 的补推帧只会新增（弹丸）/更新位置
@@ -297,10 +333,15 @@ func _render_interpolated() -> void:
 	if _prev_snap.is_empty():
 		_draw_bodies(_next_snap, _next_snap, 0.0)
 		_player_pos = _next_snap["player"]
+		_remote_pos = _next_snap["remote"]
+		_remote_yaw = _next_snap["remote_yaw"]
 		return
 	var alpha := clampf((Time.get_ticks_msec() / 1000.0 - float(_next_snap["t"])) / TICK, 0.0, 1.0)
 	_draw_bodies(_prev_snap, _next_snap, alpha)
 	_player_pos = (_prev_snap["player"] as Vector3).lerp(_next_snap["player"] as Vector3, alpha)
+	_remote_pos = (_prev_snap["remote"] as Vector3).lerp(_next_snap["remote"] as Vector3, alpha)
+	# yaw 是角度，用最短角插值避免 180° 附近跳变。
+	_remote_yaw = lerp_angle(float(_prev_snap["remote_yaw"]), float(_next_snap["remote_yaw"]), alpha)
 
 func _draw_bodies(from_snap: Dictionary, to_snap: Dictionary, alpha: float) -> void:
 	var from_bodies: Dictionary = from_snap["bodies"]
@@ -412,8 +453,10 @@ func _update_hud(s: Dictionary) -> void:
 			_hud_targets += 1
 		if bd.get("enemy", false):
 			_hud_enemies += 1
-	var player: Dictionary = s.get("player", {})
-	var hp := float(player.get("health", 100.0))
+	var players: Array = s.get("players", [])
+	var hp := 100.0
+	if players.size() > _my_player_idx:
+		hp = float((players[_my_player_idx] as Dictionary).get("health", 100.0))
 	health_bar.value = hp
 	if hp < _last_health - 0.001:
 		sfx.play("damage")
@@ -571,11 +614,18 @@ func _build_avatar() -> void:
 	_avatar.name = "Avatar"
 	_avatar.visible = false
 	add_child(_avatar)
+	_build_humanoid(_avatar, Color("6fb3ff"), Color("e0708f"))
 
+## 远端玩家 Avatar：复用同一套人形，换颜色区分，始终可见。
+func _build_remote_avatar() -> void:
+	_remote_avatar = Node3D.new()
+	_remote_avatar.name = "RemoteAvatar"
+	add_child(_remote_avatar)
+	_build_humanoid(_remote_avatar, Color("ff9f43"), Color("4caf50"))
+
+func _build_humanoid(parent: Node3D, shirt: Color, cap: Color) -> void:
 	var skin := Color("ffd9b3")
-	var shirt := Color("6fb3ff")
 	var pants := Color("35548c")
-	var cap := Color("e0708f")
 
 	# 头 + 帽 + 脸。
 	var head := SphereMesh.new()
@@ -583,31 +633,31 @@ func _build_avatar() -> void:
 	head.height = 0.48
 	head.radial_segments = 20
 	head.rings = 12
-	_add_part(_avatar, head, skin, Vector3(0, 1.08, 0))
+	_add_part(parent, head, skin, Vector3(0, 1.08, 0))
 
 	var cap_top := CylinderMesh.new()
 	cap_top.top_radius = 0.235
 	cap_top.bottom_radius = 0.27
 	cap_top.height = 0.1
-	_add_part(_avatar, cap_top, cap, Vector3(0, 1.24, 0))
+	_add_part(parent, cap_top, cap, Vector3(0, 1.24, 0))
 
 	var brim := CylinderMesh.new()
 	brim.top_radius = 0.34
 	brim.bottom_radius = 0.34
 	brim.height = 0.025
-	var brim_mi := _add_part(_avatar, brim, cap, Vector3(0, 1.2, -0.16))
+	var brim_mi := _add_part(parent, brim, cap, Vector3(0, 1.2, -0.16))
 	brim_mi.scale = Vector3(1.0, 1.0, 1.45)
 
 	for sx in [-1.0, 1.0]:
 		var eye := SphereMesh.new()
 		eye.radius = 0.032
 		eye.height = 0.064
-		_add_part(_avatar, eye, Color("2a2433"), Vector3(sx * 0.09, 1.11, -0.215))
+		_add_part(parent, eye, Color("2a2433"), Vector3(sx * 0.09, 1.11, -0.215))
 
 	var mouth := SphereMesh.new()
 	mouth.radius = 0.035
 	mouth.height = 0.07
-	var mmi := _add_part(_avatar, mouth, Color("2a2433"), Vector3(0, 1.0, -0.22))
+	var mmi := _add_part(parent, mouth, Color("2a2433"), Vector3(0, 1.0, -0.22))
 	mmi.scale = Vector3(1.5, 0.6, 0.5)
 
 	# 身体 + 手 + 腿 + 背包。
@@ -616,24 +666,24 @@ func _build_avatar() -> void:
 	torso.height = 0.6
 	torso.radial_segments = 20
 	torso.rings = 12
-	var tmi := _add_part(_avatar, torso, shirt, Vector3(0, 0.42, 0))
+	var tmi := _add_part(parent, torso, shirt, Vector3(0, 0.42, 0))
 	tmi.scale = Vector3(1.0, 1.3, 0.92)
 
 	for sx in [-1.0, 1.0]:
 		var arm := SphereMesh.new()
 		arm.radius = 0.07
 		arm.height = 0.14
-		_add_part(_avatar, arm, skin, Vector3(sx * 0.32, 0.52, 0))
+		_add_part(parent, arm, skin, Vector3(sx * 0.32, 0.52, 0))
 		var leg := CapsuleMesh.new()
 		leg.radius = 0.07
 		leg.height = 0.32
 		leg.radial_segments = 12
 		leg.rings = 5
-		_add_part(_avatar, leg, pants, Vector3(sx * 0.12, 0.16, 0))
+		_add_part(parent, leg, pants, Vector3(sx * 0.12, 0.16, 0))
 
 	var pack := BoxMesh.new()
 	pack.size = Vector3(0.34, 0.4, 0.18)
-	_add_part(_avatar, pack, Color("7ec850"), Vector3(0, 0.56, 0.28))
+	_add_part(parent, pack, Color("7ec850"), Vector3(0, 0.56, 0.28))
 
 ## 第一人称持枪 viewmodel（相机子节点）：卡通小手枪 + 双手手套。
 func _build_viewmodel() -> void:
@@ -809,7 +859,7 @@ func _build_hud() -> void:
 	conn_label.visible = false
 	vbox.add_child(conn_label)
 
-	for t in ["点击进入游戏并锁定鼠标", "PVE 打怪：清空怪物自动刷下一波，击杀掉落金币，靠近自动拾取", "W A S D 移动 · Space 跳跃 · Shift 奔跑 · V 切换第一/第三人称 · Reset 重开"]:
+	for t in ["点击进入游戏并锁定鼠标", "PVE 打怪：清空怪物自动刷下一波，击杀掉落金币，靠近自动拾取", "W A S D 移动 · Space 跳跃 · Shift 奔跑 · V 切换第一/第三人称 · Reset 重开", "匹配机制：凑齐 2 名玩家开局，10 秒无人加入则单人开局"]:
 		var l := Label.new()
 		l.text = t
 		l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER

@@ -27,7 +27,10 @@ func _run() -> void:
 	var base := {
 		"bodies": [],
 		"resources": [],
-		"player": {"pos": [0.0, 0.2, 12.0], "health": 100.0},
+		"players": [
+			{"pos": [0.0, 0.2, 12.0], "health": 100.0},
+			{"pos": [3.0, 0.2, 12.0], "health": 100.0},
+		],
 		"step": 50, "score": 0, "wave": 1, "gold": 0,
 	}
 	var proj := {"id": 3, "type": 1, "static": false, "target": false, "enemy": false,
@@ -59,7 +62,10 @@ func _run() -> void:
 	# 5. 下一 tick（step 51）→ 正常滚动双缓冲。
 	var f4 := base.duplicate(true)
 	f4["step"] = 51
-	f4["player"] = {"pos": [0.5, 0.2, 12.0], "health": 100.0}
+	f4["players"] = [
+		{"pos": [0.5, 0.2, 12.0], "health": 100.0},
+		{"pos": [3.0, 0.2, 12.0], "health": 100.0},
+	]
 	game._store_snapshot(f4)
 	if not _check(int(game._next_snap["step"]) == 51, "step+1 scroll failed"): return
 	if not _check((game._next_snap["bodies"] as Dictionary).is_empty(), "step+1 bodies mismatch"): return

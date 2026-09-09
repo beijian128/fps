@@ -18,36 +18,38 @@ import (
 	"math"
 )
 
-// inputSystem 消费玩家输入并实现角色移动策略（走/跑速度 + 跳跃 + 重力积分），
-// 然后让物理层推进角色一步。移动规则是游戏逻辑，物理层只负责执行。
+// inputSystem 消费每个玩家的输入并实现角色移动策略（走/跑速度 + 跳跃 + 重力
+// 积分），然后让物理层推进每个角色一步。移动规则是游戏逻辑，物理层只负责执行。
 func (s *Simulation) inputSystem() {
-	in, ok := ecs.Get[Input](s.world, s.player)
-	if !ok {
-		return
-	}
-	jump := in.Jump
-	if jump {
-		in.Jump = false // 跳跃边沿：只消费一次
-	}
-
-	v := s.physics.CharacterVelocity()
-	if s.physics.CharacterOnGround() {
-		v[1] = 0
-		if jump {
-			v[1] = jumpSpeed
+	for i := 0; i < MaxPlayers; i++ {
+		in, ok := ecs.Get[Input](s.world, s.players[i])
+		if !ok {
+			continue
 		}
+		jump := in.Jump
+		if jump {
+			in.Jump = false // 跳跃边沿：只消费一次
+		}
+
+		v := s.physics.CharacterVelocity(i)
+		if s.physics.CharacterOnGround(i) {
+			v[1] = 0
+			if jump {
+				v[1] = jumpSpeed
+			}
+		}
+		v[1] += gravityY * TickDT
+		// 服务端限幅：客户端上报的水平速度只当作"期望方向+期望速率"，封顶到
+		// maxPlayerSpeed（走/跑的 8/14 只是客户端约定），防恶意客户端任意超速穿墙。
+		mx, mz := in.Move[0], in.Move[1]
+		if l := mx*mx + mz*mz; l > maxPlayerSpeed*maxPlayerSpeed {
+			k := maxPlayerSpeed / float32(math.Sqrt(float64(l)))
+			mx, mz = mx*k, mz*k
+		}
+		v[0], v[2] = mx, mz // 水平速度来自客户端输入（已限幅）
+		s.physics.SetCharacterVelocity(i, v)
+		s.physics.UpdateCharacter(i, TickDT)
 	}
-	v[1] += gravityY * TickDT
-	// 服务端限幅：客户端上报的水平速度只当作"期望方向+期望速率"，封顶到
-	// maxPlayerSpeed（走/跑的 8/14 只是客户端约定），防恶意客户端任意超速穿墙。
-	mx, mz := in.Move[0], in.Move[1]
-	if l := mx*mx + mz*mz; l > maxPlayerSpeed*maxPlayerSpeed {
-		k := maxPlayerSpeed / float32(math.Sqrt(float64(l)))
-		mx, mz = mx*k, mz*k
-	}
-	v[0], v[2] = mx, mz // 水平速度来自客户端输入（已限幅）
-	s.physics.SetCharacterVelocity(v)
-	s.physics.UpdateCharacter(TickDT)
 }
 
 // syncSystem 把物理世界的最新变换写回组件，是 Go 侧与 Jolt 之间唯一的
@@ -61,8 +63,10 @@ func (s *Simulation) syncSystem() {
 			b.Active = active
 		}
 	})
-	pos := s.physics.CharacterPosition()
-	ecs.Add(s.world, s.player, Position(pos))
+	for i := 0; i < MaxPlayers; i++ {
+		pos := s.physics.CharacterPosition(i)
+		ecs.Add(s.world, s.players[i], Position(pos))
+	}
 }
 
 // projectileSystem 从物理层拿到的「全部接触事件」里挑出与弹丸有关的进行结算：
@@ -89,13 +93,13 @@ func (s *Simulation) projectileSystem() {
 		if ecs.Has[Resource](s.world, other) {
 			continue // 传感器球（金币）不挡弹丸：弹丸直接穿过，双方保留
 		}
-		s.destroyBodyLocked(proj)
+		s.destroyBody(proj)
 		if ecs.Has[Projectile](s.world, other) {
 			continue // 弹丸互撞：移除当前弹丸，无得分
 		}
 		switch {
 		case ecs.Has[Target](s.world, other):
-			s.destroyBodyLocked(other)
+			s.destroyBody(other)
 			s.score++
 		case ecs.Has[Enemy](s.world, other):
 			hp, ok := ecs.Get[Health](s.world, other)
@@ -105,39 +109,43 @@ func (s *Simulation) projectileSystem() {
 			*hp--
 			if *hp <= 0 {
 				if pos, ok := ecs.Get[Position](s.world, other); ok {
-					s.dropResourceLocked(*pos) // 击杀掉落金币
+					s.dropResource(*pos) // 击杀掉落金币
 				}
-				s.destroyBodyLocked(other)
+				s.destroyBody(other)
 				s.score++
 			}
 		}
 	}
 }
 
-// enemyDamageSystem 敌人接触伤害：从角色接触事件里找出敌人（接触求解每步触发，
-// 同一敌人每 tick 只结算一次），低难度每 tick 每只扣 0.4 点；玩家血尽复活。
-func (s *Simulation) enemyDamageSystem(contacts []uint32) {
-	hp, ok := ecs.Get[Health](s.world, s.player)
-	if !ok {
-		return
-	}
-	touched := map[uint32]bool{}
-	for _, id := range contacts {
-		e := ecs.Entity(id)
-		if touched[id] || !ecs.Has[Enemy](s.world, e) {
+// enemyDamageSystem 敌人接触伤害：从每个角色的接触事件里找出敌人（接触求解每步
+// 触发，同一敌人每 tick 每角色只结算一次），低难度每 tick 每只扣 0.4 点；
+// 玩家血尽复活。
+func (s *Simulation) enemyDamageSystem(contacts [MaxPlayers][]uint32) {
+	for i := 0; i < MaxPlayers; i++ {
+		hp, ok := ecs.Get[Health](s.world, s.players[i])
+		if !ok {
 			continue
 		}
-		touched[id] = true
-		*hp -= enemyDamage
-	}
-	if *hp <= 0 {
-		*hp = 100
-		// 立即复活到出生点并清零速度；同时把 Position 组件同步为出生点，
-		// 避免当 tick 快照出现"满血却还站在死亡点"的不一致（syncSystem 要到
-		// 下个 tick 才会回写角色位置）。
-		s.physics.SetCharacterPosition(0, playerSpawnY, 12)
-		s.physics.SetCharacterVelocity([3]float32{0, 0, 0})
-		ecs.Add(s.world, s.player, Position{0, playerSpawnY, 12})
+		touched := map[uint32]bool{}
+		for _, id := range contacts[i] {
+			e := ecs.Entity(id)
+			if touched[id] || !ecs.Has[Enemy](s.world, e) {
+				continue
+			}
+			touched[id] = true
+			*hp -= enemyDamage
+		}
+		if *hp <= 0 {
+			*hp = 100
+			// 立即复活到出生点并清零速度；同时把 Position 组件同步为出生点，
+			// 避免当 tick 快照出现"满血却还站在死亡点"的不一致（syncSystem 要到
+			// 下个 tick 才会回写角色位置）。
+			x, z := playerSpawnXZ(i)
+			s.physics.SetCharacterPosition(i, x, playerSpawnY, z)
+			s.physics.SetCharacterVelocity(i, [3]float32{0, 0, 0})
+			ecs.Add(s.world, s.players[i], Position{x, playerSpawnY, z})
+		}
 	}
 }
 
@@ -150,21 +158,23 @@ func (s *Simulation) expireProjectilesSystem() {
 		}
 	})
 	for _, e := range dead {
-		s.destroyBodyLocked(e)
+		s.destroyBody(e)
 	}
 }
 
 // resourceSystem 金币拾取：角色接触到金币传感器球即拾取（物理接触判定，
-// 由角色接触事件驱动，不做距离计算）。
-func (s *Simulation) resourceSystem(contacts []uint32) {
-	for _, id := range contacts {
-		e := ecs.Entity(id)
-		r, ok := ecs.Get[Resource](s.world, e)
-		if !ok || r.Kind != 0 {
-			continue
+// 由角色接触事件驱动，不做距离计算）。任一玩家接触都拾取。
+func (s *Simulation) resourceSystem(contacts [MaxPlayers][]uint32) {
+	for i := 0; i < MaxPlayers; i++ {
+		for _, id := range contacts[i] {
+			e := ecs.Entity(id)
+			r, ok := ecs.Get[Resource](s.world, e)
+			if !ok || r.Kind != 0 {
+				continue
+			}
+			s.gold++
+			s.destroyBody(e) // 移除传感器刚体并销毁实体
 		}
-		s.gold++
-		s.destroyBodyLocked(e) // 移除传感器刚体并销毁实体
 	}
 }
 
@@ -189,21 +199,21 @@ func (s *Simulation) waveSystem() {
 		n = maxEnemiesPerWave
 	}
 	for i := 0; i < n; i++ {
-		s.spawnEnemyLocked()
+		s.spawnEnemy()
 	}
 	s.waveClearStep = 0
 }
 
-// spawnEnemyLocked 在离玩家 10m 外的随机位置刷一只怪物。怪物没有移动逻辑：
+// spawnEnemy 在离 0 号玩家 10m 外的随机位置刷一只怪物。怪物没有移动逻辑：
 // 是静态刚体（固定哨兵），不可被推动、不参与重力结算，贴身才造成伤害。
-func (s *Simulation) spawnEnemyLocked() {
+func (s *Simulation) spawnEnemy() {
 	var player [3]float32
-	if p, ok := ecs.Get[Position](s.world, s.player); ok {
+	if p, ok := ecs.Get[Position](s.world, s.players[0]); ok {
 		player = *p
 	}
 	spawn := func(x, z float32) {
 		id := s.physics.AddCapsule(x, enemySpawnY, z, enemyHalfHeight, enemyRadius, MotionStatic)
-		e := s.registerBodyLocked(id, BodyCapsule, [3]float32{enemyRadius, enemyHalfHeight, 0}, true, [3]float32{x, enemySpawnY, z})
+		e := s.registerBody(id, BodyCapsule, [3]float32{enemyRadius, enemyHalfHeight, 0}, true, [3]float32{x, enemySpawnY, z})
 		ecs.Add2(s.world, e, Enemy{}, Health(enemyHealth))
 	}
 	for attempt := 0; attempt < 24; attempt++ {

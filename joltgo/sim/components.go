@@ -10,13 +10,15 @@ package sim
 
 // ---- 组件 ----
 
-// Player 标记玩家实体（唯一）。玩家是 Jolt 角色控制器，不是刚体，没有 Body。
+// Player 标记玩家实体（每局两个，按 char 槽位 0/1 区分）。玩家是 Jolt 角色
+// 控制器，不是刚体，没有 Body。
 type Player struct{}
 
 // Input 是玩家实体的最新输入：move 为世界空间水平期望速度（m/s），
-// Jump 是边沿触发，消费后清零。
+// Yaw 是水平朝向（弧度，绕 Y 轴），Jump 是边沿触发，消费后清零。
 type Input struct {
 	Move [2]float32
+	Yaw  float32
 	Jump bool
 }
 

@@ -1,7 +1,7 @@
 # joltgo
 
-本目录是服务端：Go 服务（ECS 模拟 + WebSocket）+ Jolt C 包装层。
-客户端在仓库根目录的 `godot_client/`（Godot 4）。
+本目录是服务端：Go 服务（pitaya 框架 + ECS 模拟 + Jolt C 包装层），分布式三服务
+gate / match / game（单二进制按 `-type` 区分）。客户端在仓库根目录的 `godot_client/`。
 
 项目概述、快速开始、架构、构建、API 与开发维护，请见仓库根目录文档：
 
@@ -16,5 +16,6 @@
 ```powershell
 cd joltgo
 .\build.ps1
-.\joltgo.exe   # 监听 ws://localhost:8080，然后用 Godot 打开 ../godot_client
+cd deploy
+.\start-all.ps1   # 起 etcd + nats + gate/match/game 三进程，然后用 Godot 打开 ../godot_client
 ```

@@ -127,9 +127,9 @@ struct JoltWorld
 	BroadPhaseLayerInterfaceTable *bp_layer_interface = nullptr;
 	ObjectVsBroadPhaseLayerFilterTable *object_vs_bp_filter = nullptr;
 	PhysicsSystem *physics_system = nullptr;
-	CharacterVirtual *character = nullptr;
+	CharacterVirtual *characters[2] = {nullptr, nullptr};
 	ContactRecorder contact_listener;
-	CharacterContactBridge character_listener;
+	CharacterContactBridge character_listener[2];
 	std::vector<BodyID> body_ids; // 刚体 id 登记表（仅身份，不含任何元数据）
 };
 
@@ -183,7 +183,8 @@ extern "C" void jolt_destroy(JoltWorld *w)
 	if (w == nullptr)
 		return;
 
-	delete w->character;
+	delete w->characters[0];
+	delete w->characters[1];
 	delete w->physics_system;
 	delete w->object_vs_bp_filter;
 	delete w->bp_layer_interface;
@@ -451,9 +452,11 @@ extern "C" int jolt_ray_cast(JoltWorld *w, const float *origin, const float *dir
 
 // ---- 角色控制器 ----
 
-extern "C" int jolt_character_create(JoltWorld *w, float half_height, float radius, float offset_y, float x, float y, float z)
+extern "C" int jolt_character_create(JoltWorld *w, int char_idx, float half_height, float radius, float offset_y, float x, float y, float z)
 {
-	if (w == nullptr || w->physics_system == nullptr || w->character != nullptr)
+	if (w == nullptr || w->physics_system == nullptr)
+		return 0;
+	if (char_idx < 0 || char_idx >= 2 || w->characters[char_idx] != nullptr)
 		return 0;
 
 	// 胶囊向上平移 offset_y，使形状底部位于角色位置（脚底）。
@@ -463,79 +466,92 @@ extern "C" int jolt_character_create(JoltWorld *w, float half_height, float radi
 	CharacterVirtualSettings settings;
 	settings.mShape = shape;
 
-	w->character = new CharacterVirtual(&settings, RVec3(x, y, z), Quat::sIdentity(), w->physics_system);
-	w->character->SetListener(&w->character_listener);
+	w->characters[char_idx] = new CharacterVirtual(&settings, RVec3(x, y, z), Quat::sIdentity(), w->physics_system);
+	w->characters[char_idx]->SetListener(&w->character_listener[char_idx]);
 	return 1;
 }
 
-extern "C" void jolt_character_set_dynamic_push(JoltWorld *w, int allow)
+static CharacterVirtual *GetCharacter(JoltWorld *w, int char_idx)
 {
-	if (w == nullptr)
-		return;
-	w->character_listener.dynamic_can_push = (allow != 0);
+	if (w == nullptr || char_idx < 0 || char_idx >= 2)
+		return nullptr;
+	return w->characters[char_idx];
 }
 
-extern "C" void jolt_character_get_position(JoltWorld *w, float *out_xyz)
+extern "C" void jolt_character_set_dynamic_push(JoltWorld *w, int char_idx, int allow)
 {
-	if (w == nullptr || w->character == nullptr || out_xyz == nullptr)
+	if (w == nullptr || char_idx < 0 || char_idx >= 2)
+		return;
+	w->character_listener[char_idx].dynamic_can_push = (allow != 0);
+}
+
+extern "C" void jolt_character_get_position(JoltWorld *w, int char_idx, float *out_xyz)
+{
+	CharacterVirtual *c = GetCharacter(w, char_idx);
+	if (c == nullptr || out_xyz == nullptr)
 		return;
 
-	RVec3 p = w->character->GetPosition();
+	RVec3 p = c->GetPosition();
 	out_xyz[0] = p.GetX();
 	out_xyz[1] = p.GetY();
 	out_xyz[2] = p.GetZ();
 }
 
-extern "C" void jolt_character_set_position(JoltWorld *w, float x, float y, float z)
+extern "C" void jolt_character_set_position(JoltWorld *w, int char_idx, float x, float y, float z)
 {
-	if (w == nullptr || w->character == nullptr)
+	CharacterVirtual *c = GetCharacter(w, char_idx);
+	if (c == nullptr)
 		return;
-	w->character->SetPosition(RVec3(x, y, z));
+	c->SetPosition(RVec3(x, y, z));
 }
 
-extern "C" void jolt_character_get_velocity(JoltWorld *w, float *out_xyz)
+extern "C" void jolt_character_get_velocity(JoltWorld *w, int char_idx, float *out_xyz)
 {
-	if (w == nullptr || w->character == nullptr || out_xyz == nullptr)
+	CharacterVirtual *c = GetCharacter(w, char_idx);
+	if (c == nullptr || out_xyz == nullptr)
 		return;
 
-	Vec3 v = w->character->GetLinearVelocity();
+	Vec3 v = c->GetLinearVelocity();
 	out_xyz[0] = v.GetX();
 	out_xyz[1] = v.GetY();
 	out_xyz[2] = v.GetZ();
 }
 
-extern "C" void jolt_character_set_velocity(JoltWorld *w, float vx, float vy, float vz)
+extern "C" void jolt_character_set_velocity(JoltWorld *w, int char_idx, float vx, float vy, float vz)
 {
-	if (w == nullptr || w->character == nullptr)
+	CharacterVirtual *c = GetCharacter(w, char_idx);
+	if (c == nullptr)
 		return;
-	w->character->SetLinearVelocity(Vec3(vx, vy, vz));
+	c->SetLinearVelocity(Vec3(vx, vy, vz));
 }
 
-extern "C" int jolt_character_get_ground_state(JoltWorld *w)
+extern "C" int jolt_character_get_ground_state(JoltWorld *w, int char_idx)
 {
-	if (w == nullptr || w->character == nullptr)
+	CharacterVirtual *c = GetCharacter(w, char_idx);
+	if (c == nullptr)
 		return 3; // InAir
-	return (int)w->character->GetGroundState();
+	return (int)c->GetGroundState();
 }
 
-extern "C" void jolt_character_update(JoltWorld *w, float dt)
+extern "C" void jolt_character_update(JoltWorld *w, int char_idx, float dt)
 {
-	if (w == nullptr || w->character == nullptr)
+	CharacterVirtual *c = GetCharacter(w, char_idx);
+	if (c == nullptr)
 		return;
 
 	CharacterVirtual::ExtendedUpdateSettings settings;
-	w->character->ExtendedUpdate(dt, w->physics_system->GetGravity(), settings,
+	c->ExtendedUpdate(dt, w->physics_system->GetGravity(), settings,
 		BroadPhaseLayerFilter(), ObjectLayerFilter(), BodyFilter(), ShapeFilter(), *w->temp_allocator);
 }
 
-extern "C" uint32_t jolt_character_poll_contacts(JoltWorld *w, uint32_t *out_ids, uint32_t max_ids)
+extern "C" uint32_t jolt_character_poll_contacts(JoltWorld *w, int char_idx, uint32_t *out_ids, uint32_t max_ids)
 {
-	if (w == nullptr || out_ids == nullptr)
+	if (w == nullptr || char_idx < 0 || char_idx >= 2 || out_ids == nullptr)
 		return 0;
 
 	// 角色更新在单线程（Go tick goroutine）内完成，无需加锁。从队头取最多
 	// max_ids 条、剩余留待下次（配合 Go 侧分块循环排空），避免超过缓冲被丢弃。
-	auto &touches = w->character_listener.touches;
+	auto &touches = w->character_listener[char_idx].touches;
 	size_t n = std::min(touches.size(), (size_t)max_ids);
 	for (size_t i = 0; i < n; ++i)
 		out_ids[i] = touches[i];

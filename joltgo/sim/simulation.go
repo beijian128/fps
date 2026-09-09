@@ -1,22 +1,24 @@
 package sim
 
-// Simulation 组装 ecs 世界、Physics 接口与各系统，对外暴露与旧 Game 相同的
-// 公开 API，WebSocket 层（package main）无需关心 ECS 细节。
+// Simulation 组装 ecs 世界、Physics 接口与各系统，对外暴露游戏公开 API。
 //
-// 锁约定：公开方法（Init / ApplyInput / Shoot / Reset / Step / Snapshot）内部
-// 自带 s.mu 加锁；xLocked 形式的内部方法要求调用方已持有锁。tick 循环和
-// WebSocket 读线程可以安全并发调用。
+// 并发模型：**单线程所有**。Simulation 不持锁——由调用方（game 包的 Instance
+// goroutine）保证同一时刻只有一个 goroutine 访问它：输入通过命令 channel 投递，
+// tick 由同一条 goroutine 驱动，全部顺序执行。因此所有方法无需加锁。
+// 本包可以用 fake 物理做单元测试（fake 物理同样单线程）。
 
 import (
 	"joltgo/ecs"
 	"math"
 	"math/rand/v2"
 	"sort"
-	"sync"
 )
 
 // TickDT 是模拟 tick 时长（20 Hz）。
 const TickDT = 1.0 / 20.0
+
+// MaxPlayers 是每局玩家数。
+const MaxPlayers = 2
 
 // 物理调参（游戏侧所有调参都在这里，C++ 包装层不携带任何业务数值）。
 const (
@@ -79,7 +81,7 @@ type Contact struct {
 // Physics 是物理世界的抽象，只暴露物理层原生能力（世界/刚体/角色控制器/接触
 // 事件），隔离 Jolt cgo 调用（package main 实现）。所有游戏业务（敌人/弹丸/
 // 靶球/血量/移动策略）都在 sim 侧，不在物理层。刚体 id 即实体 id，由物理层
-// 分配、从 1 递增，0 表示失败。
+// 分配、从 1 递增，0 表示失败。一个世界最多两个角色控制器，用 charIdx（0/1）区分。
 type Physics interface {
 	Create() // 创建物理世界（Reset 前须先 Destroy）
 	Destroy()
@@ -102,29 +104,29 @@ type Physics interface {
 	Sync(fn func(id uint32, active bool, pos [3]float32, quat [4]float32))
 	// PollContacts 排空接触事件队列（所有刚体对，命中判定由 sim 做）。
 	PollContacts() []Contact
-	// PollCharacterContacts 排空本 tick 角色控制器接触到的刚体 id（可能重复）。
-	PollCharacterContacts() []uint32
 
 	// 角色控制器：形状/出生点/移动策略全部由 sim 决定，物理层只执行。
-	CreateCharacter(halfHeight, radius, offsetY, x, y, z float32)
-	SetCharacterDynamicPush(allow bool) // 动态刚体接触时是否允许推动角色
-	CharacterPosition() [3]float32
-	SetCharacterPosition(x, y, z float32)
-	CharacterVelocity() [3]float32
-	SetCharacterVelocity(v [3]float32)
-	CharacterOnGround() bool
-	UpdateCharacter(dt float32)
+	// charIdx 是角色槽位（0/1），每个角色有独立的控制器与接触监听器。
+	CreateCharacter(charIdx int, halfHeight, radius, offsetY, x, y, z float32)
+	SetCharacterDynamicPush(charIdx int, allow bool) // 动态刚体接触时是否允许推动角色
+	CharacterPosition(charIdx int) [3]float32
+	SetCharacterPosition(charIdx int, x, y, z float32)
+	CharacterVelocity(charIdx int) [3]float32
+	SetCharacterVelocity(charIdx int, v [3]float32)
+	CharacterOnGround(charIdx int) bool
+	UpdateCharacter(charIdx int, dt float32)
+	// PollCharacterContacts 排空本 tick 指定角色接触到的刚体 id（可能重复）。
+	PollCharacterContacts(charIdx int) []uint32
 }
 
-// Simulation 是 ECS 模拟：世界、物理、玩家实体与全局游戏状态。
+// Simulation 是 ECS 模拟：世界、物理、玩家实体与全局游戏状态。单线程所有，不加锁。
 type Simulation struct {
-	mu      sync.Mutex
 	physics Physics
 	world   *ecs.World
-	player  ecs.Entity
+	players [MaxPlayers]ecs.Entity
 	// bodyQuery 是快照刚体循环的缓存查询（有 Body/Position/Rotation 且无
 	// Resource）：排除过滤在 archetype 粒度完成、传感器球整表跳过，三列
-	// 行内直取（registerBodyLocked 保证每个 Body 实体都有 Position/Rotation）。
+	// 行内直取（registerBody 保证每个 Body 实体都有 Position/Rotation）。
 	bodyQuery ecs.Query
 
 	step          int
@@ -146,129 +148,130 @@ func New(p Physics) *Simulation {
 // Init 创建物理世界与初始场景。只在启动时调用一次；重复调用等同 Reset（幂等，
 // 不会叠加场景或残留旧实体）。
 func (s *Simulation) Init() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.player != ecs.InvalidEntity {
-		s.resetLocked()
+	if s.players[0] != ecs.InvalidEntity {
+		s.reset()
 		return
 	}
-	s.initLocked()
+	s.init()
 }
 
 // Shutdown 释放物理世界资源（进程退出前调用一次；调用后不应再 Step/Shoot/Snapshot）。
 func (s *Simulation) Shutdown() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.physics.Destroy()
 }
 
-// ApplyInput 记录客户端最新输入（跳跃为边沿触发：服务端在下一个 tick 消费）。
-func (s *Simulation) ApplyInput(move [2]float32, jump bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	in, ok := ecs.Get[Input](s.world, s.player)
+// ApplyInput 记录玩家最新输入（跳跃为边沿触发：服务端在下一个 tick 消费）。
+// playerIdx 是玩家槽位（0/1），yaw 是水平朝向（弧度，绕 Y 轴）。
+func (s *Simulation) ApplyInput(playerIdx int, move [2]float32, yaw float32, jump bool) {
+	if playerIdx < 0 || playerIdx >= MaxPlayers {
+		return
+	}
+	in, ok := ecs.Get[Input](s.world, s.players[playerIdx])
 	if !ok {
 		return
 	}
 	in.Move = move
+	in.Yaw = yaw
 	if jump {
 		in.Jump = true
 	}
 }
 
 // Shoot 发射一枚弹丸，返回弹丸 id（0 = 失败）。dir 会被归一化，零向量忽略。
+// 弹丸归属由 origin 决定（客户端上报的枪口位置），命中记分到共享 team score。
 func (s *Simulation) Shoot(origin, dir [3]float32) uint32 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.shootLocked(origin, dir)
+	return s.shoot(origin, dir)
 }
 
 // Reset 销毁并重建整个场景，重置所有游戏状态与输入。
 func (s *Simulation) Reset() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.resetLocked()
+	s.reset()
 }
 
 // Step 推进一个模拟 tick（1/20 秒），按固定顺序运行各系统。
 func (s *Simulation) Step() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.stepLocked()
+	s.stepOne()
 }
 
 // Snapshot 返回当前完整状态（序列化由调用方负责）。
 func (s *Simulation) Snapshot() State {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.snapshotLocked()
+	return s.snapshot()
 }
 
-// ---- 以下 *Locked 方法要求调用方持有 s.mu ----
+// ---- 内部方法（单线程，调用方保证串行） ----
 
-func (s *Simulation) initLocked() {
+func (s *Simulation) init() {
 	s.physics.Create()
 	s.physics.SetGravity(0, gravityY, 0)
-	// 玩家角色控制器：形状/出生点由 sim 决定；不可被动态刚体推动（撞来的
-	// 怪物/箱子被弹开，角色位置完全由输入决定——这是游戏规则，不是物理规则）。
-	s.physics.CreateCharacter(characterHalfHeight, characterRadius, characterOffsetY, 0, characterSpawnY, 12)
-	s.physics.SetCharacterDynamicPush(false)
 
-	// 玩家实体：纯逻辑（角色控制器不是刚体），初始站在出生点。
-	s.player = s.world.NewEntity()
-	ecs.Add4(s.world, s.player, Player{}, Health(100), Position{0, playerSpawnY, 12}, Input{})
+	// 两个玩家角色控制器：形状/出生点由 sim 决定；不可被动态刚体推动（撞来的
+	// 怪物/箱子被弹开，角色位置完全由输入决定——这是游戏规则，不是物理规则）。
+	for i := 0; i < MaxPlayers; i++ {
+		x, z := playerSpawnXZ(i)
+		s.physics.CreateCharacter(i, characterHalfHeight, characterRadius, characterOffsetY, x, characterSpawnY, z)
+		s.physics.SetCharacterDynamicPush(i, false)
+
+		// 玩家实体：纯逻辑（角色控制器不是刚体），初始站在出生点。
+		s.players[i] = s.world.NewEntity()
+		ecs.Add4(s.world, s.players[i], Player{}, Health(100), Position{x, playerSpawnY, z}, Input{})
+	}
 
 	// 地板 + 竞技场四墙。
-	s.registerBodyLocked(s.physics.AddBox(100, 1, 100, 0, -1, 0, MotionStatic), BodyBox, [3]float32{100, 1, 100}, true, [3]float32{0, -1, 0})
-	s.registerBodyLocked(s.physics.AddBox(20, 4, 1, 0, 3, 20, MotionStatic), BodyBox, [3]float32{20, 4, 1}, true, [3]float32{0, 3, 20})
-	s.registerBodyLocked(s.physics.AddBox(20, 4, 1, 0, 3, -20, MotionStatic), BodyBox, [3]float32{20, 4, 1}, true, [3]float32{0, 3, -20})
-	s.registerBodyLocked(s.physics.AddBox(1, 4, 20, 20, 3, 0, MotionStatic), BodyBox, [3]float32{1, 4, 20}, true, [3]float32{20, 3, 0})
-	s.registerBodyLocked(s.physics.AddBox(1, 4, 20, -20, 3, 0, MotionStatic), BodyBox, [3]float32{1, 4, 20}, true, [3]float32{-20, 3, 0})
+	s.registerBody(s.physics.AddBox(100, 1, 100, 0, -1, 0, MotionStatic), BodyBox, [3]float32{100, 1, 100}, true, [3]float32{0, -1, 0})
+	s.registerBody(s.physics.AddBox(20, 4, 1, 0, 3, 20, MotionStatic), BodyBox, [3]float32{20, 4, 1}, true, [3]float32{0, 3, 20})
+	s.registerBody(s.physics.AddBox(20, 4, 1, 0, 3, -20, MotionStatic), BodyBox, [3]float32{20, 4, 1}, true, [3]float32{0, 3, -20})
+	s.registerBody(s.physics.AddBox(1, 4, 20, 20, 3, 0, MotionStatic), BodyBox, [3]float32{1, 4, 20}, true, [3]float32{20, 3, 0})
+	s.registerBody(s.physics.AddBox(1, 4, 20, -20, 3, 0, MotionStatic), BodyBox, [3]float32{1, 4, 20}, true, [3]float32{-20, 3, 0})
 
 	// 箱子（动态，可被弹丸挡下、可被玩家推开）。
 	for _, c := range cratePositions {
 		id := s.physics.AddBox(0.5, 0.5, 0.5, c[0], c[1], c[2], MotionDynamic)
-		s.registerBodyLocked(id, BodyBox, [3]float32{0.5, 0.5, 0.5}, false, c)
+		s.registerBody(id, BodyBox, [3]float32{0.5, 0.5, 0.5}, false, c)
 	}
 
 	// 可破坏的悬浮靶球（静态球）。
 	for _, t := range targetPositions {
 		id := s.physics.AddSphere(t[0], t[1], t[2], 0.4, MotionStatic)
-		e := s.registerBodyLocked(id, BodySphere, [3]float32{0.4}, true, t)
+		e := s.registerBody(id, BodySphere, [3]float32{0.4}, true, t)
 		ecs.Add(s.world, e, Target{})
 	}
 
 	// PVE 初始波次 + 金币资源。
 	s.wave = 1
 	for i := 0; i < initialEnemies; i++ {
-		s.spawnEnemyLocked()
+		s.spawnEnemy()
 	}
 	for i := 0; i < initialResource; i++ {
-		s.spawnInitialResourceLocked()
+		s.spawnInitialResource()
 	}
 
 	// 让角色立即着地：否则第一次跳跃会在胶囊下落结算时被吞掉。
-	v := [3]float32{0, gravityY / 60.0, 0}
-	s.physics.SetCharacterVelocity(v)
-	s.physics.UpdateCharacter(1.0 / 60.0)
+	for i := 0; i < MaxPlayers; i++ {
+		v := [3]float32{0, gravityY / 60.0, 0}
+		s.physics.SetCharacterVelocity(i, v)
+		s.physics.UpdateCharacter(i, 1.0/60.0)
+	}
 	// 同步一次变换，让首帧快照带上角色着地后的真实位置。
 	s.syncSystem()
 }
 
-func (s *Simulation) resetLocked() {
+func (s *Simulation) reset() {
 	s.physics.Destroy()
 	s.world = ecs.New()
-	s.player = ecs.InvalidEntity
+	for i := range s.players {
+		s.players[i] = ecs.InvalidEntity
+	}
 	s.step = 0
 	s.score = 0
 	s.gold = 0
 	s.waveClearStep = 0
-	s.initLocked() // initLocked 里统一重置 wave = 1 并搭建场景
+	s.init() // init 里统一重置 wave = 1 并搭建场景
 }
 
-func (s *Simulation) stepLocked() {
+func (s *Simulation) stepOne() {
 	s.inputSystem()
-	charContacts := s.physics.PollCharacterContacts() // 角色本 tick 接触的刚体（物理事实）
+	// 角色接触每 tick 排空一次（两个角色各自独立），供伤害与拾取两个系统共享。
+	charContacts := s.pollCharacterContacts()
 	s.physics.Step(TickDT, 2)
 	s.step++
 	s.syncSystem()
@@ -279,7 +282,16 @@ func (s *Simulation) stepLocked() {
 	s.waveSystem()
 }
 
-func (s *Simulation) shootLocked(origin, dir [3]float32) uint32 {
+// pollCharacterContacts 排空两个角色的接触事件，返回 [MaxPlayers][]uint32。
+func (s *Simulation) pollCharacterContacts() [MaxPlayers][]uint32 {
+	var out [MaxPlayers][]uint32
+	for i := 0; i < MaxPlayers; i++ {
+		out[i] = s.physics.PollCharacterContacts(i)
+	}
+	return out
+}
+
+func (s *Simulation) shoot(origin, dir [3]float32) uint32 {
 	dx, dy, dz := dir[0], dir[1], dir[2]
 	l := dx*dx + dy*dy + dz*dz
 	if l < 1e-9 {
@@ -298,15 +310,15 @@ func (s *Simulation) shootLocked(origin, dir [3]float32) uint32 {
 	s.physics.SetBodyRestitution(id, 0)
 	s.physics.SetBodyVelocity(id, dx*projectileSpeed, dy*projectileSpeed, dz*projectileSpeed)
 
-	e := s.registerBodyLocked(id, BodySphere, [3]float32{projectileRadius}, false, origin)
+	e := s.registerBody(id, BodySphere, [3]float32{projectileRadius}, false, origin)
 	ecs.Add(s.world, e, Projectile{SpawnStep: s.step})
 	return id
 }
 
-// registerBodyLocked 用物理层返回的 body id 建立实体并挂上基础组件。
+// registerBody 用物理层返回的 body id 建立实体并挂上基础组件。
 // 实体 id 即 body id，创建时先写入已知的初始位置/旋转/活跃状态，
 // 让两次 tick 之间创建的实体（如弹丸）也能立即出现在快照里。
-func (s *Simulation) registerBodyLocked(id uint32, kind BodyKind, size [3]float32, static bool, pos [3]float32) ecs.Entity {
+func (s *Simulation) registerBody(id uint32, kind BodyKind, size [3]float32, static bool, pos [3]float32) ecs.Entity {
 	e := ecs.Entity(id)
 	// Bundle 式挂载：一次搬家进入 {Body,Position,Rotation} archetype。
 	ecs.Add3(s.world, e,
@@ -316,8 +328,8 @@ func (s *Simulation) registerBodyLocked(id uint32, kind BodyKind, size [3]float3
 	return e
 }
 
-// destroyBodyLocked 移除物理刚体并销毁对应实体（幂等：实体已销毁时跳过）。
-func (s *Simulation) destroyBodyLocked(e ecs.Entity) {
+// destroyBody 移除物理刚体并销毁对应实体（幂等：实体已销毁时跳过）。
+func (s *Simulation) destroyBody(e ecs.Entity) {
 	if !ecs.Has[Body](s.world, e) {
 		return
 	}
@@ -325,60 +337,68 @@ func (s *Simulation) destroyBodyLocked(e ecs.Entity) {
 	s.world.Destroy(e)
 }
 
-// 初始金币：随机撒在地图上（离出生点 4m 以外）。
-func (s *Simulation) spawnInitialResourceLocked() {
+// 初始金币：随机撒在地图上（离 0 号玩家出生点 4m 以外）。
+func (s *Simulation) spawnInitialResource() {
 	for attempt := 0; attempt < 24; attempt++ {
 		x := randRange(-16, 16)
 		z := randRange(-16, 16)
-		dx := x
-		dz := z - 12 // 出生点 (0, 0.2, 12)
+		sx, sz := playerSpawnXZ(0)
+		dx := x - sx
+		dz := z - sz
 		if dx*dx+dz*dz >= 4*4 {
-			s.spawnResourceLocked([3]float32{x, resourceY, z})
+			s.spawnResource([3]float32{x, resourceY, z})
 			return
 		}
 	}
 }
 
-// spawnResourceLocked 生成一枚金币实体（受场上上限约束）。金币是物理传感器球：
+// spawnResource 生成一枚金币实体（受场上上限约束）。金币是物理传感器球：
 // 不与刚体碰撞（弹丸/箱子穿过），但角色控制器接触到即触发拾取。
-func (s *Simulation) spawnResourceLocked(pos [3]float32) {
+func (s *Simulation) spawnResource(pos [3]float32) {
 	if ecs.Count[Resource](s.world) >= maxResource {
 		return
 	}
 	id := s.physics.AddSensorSphere(pos[0], pos[1], pos[2], resourceSensorRadius)
-	e := s.registerBodyLocked(id, BodySphere, [3]float32{resourceSensorRadius}, true, pos)
+	e := s.registerBody(id, BodySphere, [3]float32{resourceSensorRadius}, true, pos)
 	ecs.Add(s.world, e, Resource{Kind: 0})
 }
 
 // 击杀掉落：怪物死亡位置生成金币（带随机偏移，避免叠成一格）。
-func (s *Simulation) dropResourceLocked(at [3]float32) {
-	s.spawnResourceLocked([3]float32{
+func (s *Simulation) dropResource(at [3]float32) {
+	s.spawnResource([3]float32{
 		at[0] + randRange(-0.4, 0.4),
 		resourceY,
 		at[2] + randRange(-0.4, 0.4),
 	})
 }
 
-// snapshotLocked 从组件构建完整状态快照。刚体与资源按 id 排序，输出稳定
+// snapshot 从组件构建完整状态快照。刚体与资源按 id 排序，输出稳定
 // （swap-remove 会让 archetype 行序变化，客户端按 id 匹配、与顺序无关）。
 // 刚体循环用缓存查询（有 Body/Position/Rotation 且无 Resource）：排除过滤
 // 在 archetype 粒度完成、传感器球整表跳过；三列行内直取，Position/Rotation
 // 无需逐行查找，只有 Health 与标记组件走行视图。
-func (s *Simulation) snapshotLocked() State {
+func (s *Simulation) snapshot() State {
 	st := State{
 		Bodies:    []BodyInfo{},
 		Resources: []ResourceInfo{},
-		Player:    PlayerState{Health: 100},
+		Players:   make([]PlayerState, 0, MaxPlayers),
 		Step:      s.step,
 		Score:     s.score,
 		Wave:      s.wave,
 		Gold:      s.gold,
 	}
-	if p, ok := ecs.Get[Position](s.world, s.player); ok {
-		st.Player.Pos = *p
-	}
-	if h, ok := ecs.Get[Health](s.world, s.player); ok {
-		st.Player.Health = float32(*h)
+	for i := 0; i < MaxPlayers; i++ {
+		ps := PlayerState{Health: 100}
+		if p, ok := ecs.Get[Position](s.world, s.players[i]); ok {
+			ps.Pos = *p
+		}
+		if h, ok := ecs.Get[Health](s.world, s.players[i]); ok {
+			ps.Health = float32(*h)
+		}
+		if in, ok := ecs.Get[Input](s.world, s.players[i]); ok {
+			ps.Yaw = in.Yaw
+		}
+		st.Players = append(st.Players, ps)
 	}
 
 	ecs.QueryEach3(s.world, &s.bodyQuery, func(e ecs.Entity, b *Body, p *Position, rot *Rotation, row ecs.Row) {
@@ -414,6 +434,16 @@ func (s *Simulation) snapshotLocked() State {
 
 func randRange(a, b float32) float32 {
 	return a + rand.Float32()*(b-a)
+}
+
+// playerSpawnXZ 返回玩家槽位 i 的出生点水平坐标（两名玩家错开出生位置）。
+func playerSpawnXZ(i int) (float32, float32) {
+	switch i {
+	case 1:
+		return 3, 12
+	default:
+		return 0, 12
+	}
 }
 
 // ---- 场景数据 ----

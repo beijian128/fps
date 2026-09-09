@@ -1,0 +1,90 @@
+// 游戏协议消息（wire 契约）。gate / match / game 三服务与 Godot 客户端都遵守：
+//   - 客户端 → gate → match：match.join（JoinMsg，Notify）
+//   - match → 客户端：onMatched（MatchResult，Push）
+//   - match → game（RPC）：game.create（CreateGameMsg）
+//   - 客户端 → gate → game：game.input（InputMsg）/ game.shoot（ShootMsg）/ game.reset（空，Notify）
+//   - game → 客户端：onSnapshot（Snapshot，Push）
+//
+// 序列化用 pitaya 的 protobuf serializer。
+
+syntax = "proto3";
+
+package game;
+
+option go_package = "joltgo/game/protos";
+
+// InputMsg 是玩家移动输入（世界空间水平速度 + 跳跃边沿）。
+message InputMsg {
+  repeated float move = 1; // [wx, wz]，世界空间水平期望速度（m/s）
+  bool jump = 2;           // 跳跃边沿触发（服务端下一 tick 消费）
+  float yaw = 3;           // 水平朝向（弧度，绕 Y 轴，客户端相机 yaw）
+}
+
+// ShootMsg 是射击请求（枪口起点 + 朝向，朝向会被服务端归一化）。
+message ShootMsg {
+  repeated float origin = 1; // [x, y, z]
+  repeated float dir = 2;    // [x, y, z]
+}
+
+// JoinMsg 是加入匹配队列的空消息（无字段）。
+message JoinMsg {}
+
+// MatchResult 是匹配成功结果（match → 客户端 push route "onMatched"）。
+message MatchResult {
+  string match_id = 1;       // 对局 id
+  string game_server_id = 2; // 分配到的 game 节点 id
+  int32 player_idx = 3;      // 本客户端在局内的玩家槽位（0/1）
+}
+
+// CreateGameMsg 是 match → game 创建对局的 RPC 请求（route "game.create"）。
+// uids 按槽位顺序（下标即 player_idx），1 个 = 单人兜底局。
+message CreateGameMsg {
+  string match_id = 1;
+  repeated string uids = 2;
+}
+
+// CreateGameReply 是 game.create 的 RPC 应答（0 = 成功）。
+message CreateGameReply {
+  int32 code = 1;
+}
+
+// BodyInfo 是单个刚体的快照。
+message BodyInfo {
+  uint32 id = 1;
+  int32 type = 2;          // 0 = box, 1 = sphere, 2 = enemy capsule
+  bool static = 3;
+  bool target = 4;
+  bool enemy = 5;
+  bool projectile = 6;
+  repeated float pos = 7;  // [x, y, z] 质心位置
+  repeated float quat = 8; // [x, y, z, w] 旋转四元数
+  repeated float size = 9; // box 半边长；sphere 半径在 [0]；capsule 半径在 [0]、半高在 [1]
+  float health = 10;       // 敌人血量（其他刚体为 0）
+  bool active = 11;        // 是否仍在模拟（未休眠）
+}
+
+// ResourceInfo 是可拾取资源快照。
+message ResourceInfo {
+  int32 id = 1;
+  repeated float pos = 2; // [x, y, z] 悬浮位置
+  int32 kind = 3;         // 0 = 金币
+}
+
+// PlayerState 是单个玩家快照（pos 为脚底位置）。
+message PlayerState {
+  repeated float pos = 1; // [x, y, z]
+  float health = 2;
+  float yaw = 3;          // 水平朝向（弧度，绕 Y 轴）
+}
+
+// Snapshot 是每 tick 广播给客户端的完整状态快照。计分/金币/波次是共享团队状态，
+// players 按玩家槽位 0/1 顺序。
+message Snapshot {
+  repeated BodyInfo bodies = 1;
+  repeated ResourceInfo resources = 2;
+  repeated PlayerState players = 3;
+  int32 step = 4;  // 模拟 tick 计数（20 Hz）
+  int32 score = 5;
+  int32 wave = 6;
+  int32 gold = 7;
+}

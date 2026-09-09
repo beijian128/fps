@@ -86,33 +86,36 @@ uint32_t jolt_poll_contacts(JoltWorld *w, JoltContactPair *out, uint32_t max_cou
 
 int jolt_ray_cast(JoltWorld *w, const float *origin, const float *dir, float max_dist, JoltRayResult *out);
 
-/* ---- 角色控制器：形状与出生点由 Go 传入，移动策略由 Go 计算 ---- */
+/* ---- 角色控制器：形状与出生点由 Go 传入，移动策略由 Go 计算 ----
+   一个世界最多支持两个角色控制器，用 char_idx（0/1）区分。每个角色有独立的
+   接触监听器，因此轮询接触时也按 char_idx 取对应角色的接触事件。 */
 
-/* 创建胶囊角色：half_height/radius 是胶囊圆柱半高与半径，offset_y 是把形状
-   上移的量（让 GetPosition() 指向脚底），(x,y,z) 是初始脚底位置。重复创建失败。 */
-int jolt_character_create(JoltWorld *w, float half_height, float radius, float offset_y, float x, float y, float z);
+/* 创建胶囊角色：char_idx 是角色槽位（0/1），half_height/radius 是胶囊圆柱半高
+   与半径，offset_y 是把形状上移的量（让 GetPosition() 指向脚底），(x,y,z) 是
+   初始脚底位置。重复创建同一槽位失败。 */
+int jolt_character_create(JoltWorld *w, int char_idx, float half_height, float radius, float offset_y, float x, float y, float z);
 
 /* 动态刚体接触时是否允许推动角色（对应 Jolt CharacterContactSettings::mCanPushCharacter）。
-   静态几何不受影响。 */
-void jolt_character_set_dynamic_push(JoltWorld *w, int allow);
+   静态几何不受影响。按 char_idx 指定角色。 */
+void jolt_character_set_dynamic_push(JoltWorld *w, int char_idx, int allow);
 
-void jolt_character_get_position(JoltWorld *w, float *out_xyz);
-void jolt_character_set_position(JoltWorld *w, float x, float y, float z);
-void jolt_character_get_velocity(JoltWorld *w, float *out_xyz);
-void jolt_character_set_velocity(JoltWorld *w, float vx, float vy, float vz);
+void jolt_character_get_position(JoltWorld *w, int char_idx, float *out_xyz);
+void jolt_character_set_position(JoltWorld *w, int char_idx, float x, float y, float z);
+void jolt_character_get_velocity(JoltWorld *w, int char_idx, float *out_xyz);
+void jolt_character_set_velocity(JoltWorld *w, int char_idx, float vx, float vy, float vz);
 
 /* 着地状态，取值与 JPH::CharacterVirtual::EGroundState 一致：
    0 = OnGround, 1 = OnSteepGround, 2 = NotSupported, 3 = InAir。 */
-int jolt_character_get_ground_state(JoltWorld *w);
+int jolt_character_get_ground_state(JoltWorld *w, int char_idx);
 
 /* ExtendedUpdate：按世界重力推进角色一步（移动速度请先通过
    jolt_character_set_velocity 设置）。 */
-void jolt_character_update(JoltWorld *w, float dt);
+void jolt_character_update(JoltWorld *w, int char_idx, float dt);
 
-/* 取走本 tick 角色接触到的刚体 id（接触建立时 + 每步接触求解时都会记录，
+/* 取走本 tick 指定角色接触到的刚体 id（接触建立时 + 每步接触求解时都会记录，
    同一刚体可能出现多次；单线程调用）。每次取最多 max_ids 条，剩余留待下次，
    Go 侧循环取到 0 即排空并自行去重。 */
-uint32_t jolt_character_poll_contacts(JoltWorld *w, uint32_t *out_ids, uint32_t max_ids);
+uint32_t jolt_character_poll_contacts(JoltWorld *w, int char_idx, uint32_t *out_ids, uint32_t max_ids);
 
 #ifdef __cplusplus
 }

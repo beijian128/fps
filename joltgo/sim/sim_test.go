@@ -2,6 +2,7 @@ package sim
 
 // 用 fake 物理（只做运动学积分 + 地板钳制）验证各系统的行为，不依赖 cgo/Jolt DLL。
 // fake 的职责是模拟 Physics 接口的契约：发放递增 id、积分速度、上报接触事件。
+// 双角色：character 数组按槽位 0/1 存放。
 
 import (
 	"math"
@@ -18,6 +19,11 @@ type fakeBody struct {
 	sensor bool
 }
 
+type fakeCharacter struct {
+	pos [3]float32
+	vel [3]float32
+}
+
 type fakePhysics struct {
 	bodies      map[uint32]*fakeBody
 	nextID      uint32
@@ -26,18 +32,17 @@ type fakePhysics struct {
 	restitution map[uint32]float32
 	sensors     map[uint32]bool
 
-	character      [3]float32
-	charVel        [3]float32
-	charCreated    bool
+	characters     [MaxPlayers]*fakeCharacter
+	charCreated    int
 	charHalfHeight float32
 	charRadius     float32
 	charOffsetY    float32
-	charSpawn      [3]float32
+	charSpawn      [2][3]float32
 	dynamicPush    bool
 	gravity        [3]float32
 
-	charContacts []uint32 // 本 tick 角色接触的刚体（UpdateCharacter 时重建）
-	sticky       []uint32 // 测试注入的固定接触
+	charContacts [MaxPlayers][]uint32 // 本 tick 每个角色接触的刚体（UpdateCharacter 时重建）
+	sticky       []uint32             // 测试注入的固定接触（作用于 0 号角色）
 	contacts     []Contact
 	respawns     int
 	createCalls  int
@@ -52,12 +57,13 @@ func (f *fakePhysics) Create() {
 	f.friction = map[uint32]float32{}
 	f.restitution = map[uint32]float32{}
 	f.sensors = map[uint32]bool{}
-	f.character = [3]float32{}
-	f.charVel = [3]float32{}
-	f.charCreated = false
+	for i := 0; i < MaxPlayers; i++ {
+		f.characters[i] = &fakeCharacter{}
+	}
+	f.charCreated = 0
 	f.dynamicPush = true
 	f.gravity = [3]float32{}
-	f.charContacts = nil
+	f.charContacts = [MaxPlayers][]uint32{}
 	f.sticky = nil
 	f.contacts = nil
 	f.respawns = 0
@@ -112,38 +118,43 @@ func (f *fakePhysics) SetBodyMotionQuality(id uint32, quality MotionQuality) {
 	f.quality[id] = quality
 }
 
-func (f *fakePhysics) CreateCharacter(halfHeight, radius, offsetY, x, y, z float32) {
-	f.charCreated = true
+func (f *fakePhysics) CreateCharacter(charIdx int, halfHeight, radius, offsetY, x, y, z float32) {
+	f.charCreated++
 	f.charHalfHeight = halfHeight
 	f.charRadius = radius
 	f.charOffsetY = offsetY
-	f.charSpawn = [3]float32{x, y, z}
-	f.character = [3]float32{x, y, z}
+	f.charSpawn[charIdx] = [3]float32{x, y, z}
+	f.characters[charIdx].pos = [3]float32{x, y, z}
 }
 
-func (f *fakePhysics) SetCharacterDynamicPush(allow bool) { f.dynamicPush = allow }
+func (f *fakePhysics) SetCharacterDynamicPush(charIdx int, allow bool) { f.dynamicPush = allow }
 
-func (f *fakePhysics) CharacterPosition() [3]float32 { return f.character }
+func (f *fakePhysics) CharacterPosition(charIdx int) [3]float32 { return f.characters[charIdx].pos }
 
-func (f *fakePhysics) SetCharacterPosition(x, y, z float32) {
-	f.character = [3]float32{x, y, z}
+func (f *fakePhysics) SetCharacterPosition(charIdx int, x, y, z float32) {
+	f.characters[charIdx].pos = [3]float32{x, y, z}
 	f.respawns++
 }
 
-func (f *fakePhysics) CharacterVelocity() [3]float32 { return f.charVel }
+func (f *fakePhysics) CharacterVelocity(charIdx int) [3]float32 { return f.characters[charIdx].vel }
 
-func (f *fakePhysics) SetCharacterVelocity(v [3]float32) { f.charVel = v }
+func (f *fakePhysics) SetCharacterVelocity(charIdx int, v [3]float32) {
+	f.characters[charIdx].vel = v
+}
 
-func (f *fakePhysics) CharacterOnGround() bool { return f.character[1] <= 1e-3 }
+func (f *fakePhysics) CharacterOnGround(charIdx int) bool {
+	return f.characters[charIdx].pos[1] <= 1e-3
+}
 
 // UpdateCharacter 积分角色速度并钳制到地板（y=0），模拟 ExtendedUpdate 的着地；
-// 同时重建本 tick 的角色接触列表（与真实 Jolt 一致：接触是物理事实）。
-func (f *fakePhysics) UpdateCharacter(dt float32) {
-	f.character[0] += f.charVel[0] * dt
-	f.character[1] += f.charVel[1] * dt
-	f.character[2] += f.charVel[2] * dt
-	if f.character[1] < 0 {
-		f.character[1] = 0
+// 同时重建本 tick 该角色的接触列表（与真实 Jolt 一致：接触是物理事实）。
+func (f *fakePhysics) UpdateCharacter(charIdx int, dt float32) {
+	c := f.characters[charIdx]
+	c.pos[0] += c.vel[0] * dt
+	c.pos[1] += c.vel[1] * dt
+	c.pos[2] += c.vel[2] * dt
+	if c.pos[1] < 0 {
+		c.pos[1] = 0
 	}
 
 	contacts := make([]uint32, 0, 8)
@@ -151,15 +162,18 @@ func (f *fakePhysics) UpdateCharacter(dt float32) {
 		if b.radius <= 0 {
 			continue // fake 只对球/胶囊生成角色接触
 		}
-		dx := f.character[0] - b.pos[0]
-		dy := f.character[1] - b.pos[1]
-		dz := f.character[2] - b.pos[2]
+		dx := c.pos[0] - b.pos[0]
+		dy := c.pos[1] - b.pos[1]
+		dz := c.pos[2] - b.pos[2]
 		r := characterRadius + b.radius
 		if dx*dx+dy*dy+dz*dz < r*r {
 			contacts = append(contacts, id)
 		}
 	}
-	f.charContacts = append(contacts, f.sticky...)
+	if charIdx == 0 {
+		contacts = append(contacts, f.sticky...)
+	}
+	f.charContacts[charIdx] = contacts
 }
 
 func (f *fakePhysics) Step(dt float32, collisionSteps int) {
@@ -182,7 +196,9 @@ func (f *fakePhysics) PollContacts() []Contact {
 	return c
 }
 
-func (f *fakePhysics) PollCharacterContacts() []uint32 { return f.charContacts }
+func (f *fakePhysics) PollCharacterContacts(charIdx int) []uint32 {
+	return f.charContacts[charIdx]
+}
 
 // ---- 测试钩子 ----
 
@@ -190,7 +206,7 @@ func (f *fakePhysics) queueContact(a, b uint32) {
 	f.contacts = append(f.contacts, Contact{BodyA: a, BodyB: b})
 }
 
-// queueCharacterContact 注入一个持续存在的角色接触（每次 UpdateCharacter 都会带上）。
+// queueCharacterContact 注入一个持续存在的 0 号角色接触（每次 UpdateCharacter 都会带上）。
 func (f *fakePhysics) queueCharacterContact(id uint32) {
 	f.sticky = append(f.sticky, id)
 }
@@ -260,6 +276,9 @@ func projectilesOf(st State) []uint32 {
 
 func near(a, b, tol float32) bool { return math.Abs(float64(a-b)) <= float64(tol) }
 
+// player0 返回快照里 0 号玩家状态（Players[0]）。
+func player0(st State) PlayerState { return st.Players[0] }
+
 // ---- 测试 ----
 
 func TestInitialSnapshot(t *testing.T) {
@@ -299,8 +318,11 @@ func TestInitialSnapshot(t *testing.T) {
 	if st.Step != 0 || st.Score != 0 || st.Wave != 1 || st.Gold != 0 {
 		t.Fatalf("初始状态应为 step=0/score=0/wave=1/gold=0，得到 %+v", st)
 	}
-	if st.Player.Health != 100 {
-		t.Fatalf("初始血量应为 100，得到 %v", st.Player.Health)
+	if len(st.Players) != MaxPlayers {
+		t.Fatalf("快照应有 %d 个玩家，得到 %d", MaxPlayers, len(st.Players))
+	}
+	if player0(st).Health != 100 {
+		t.Fatalf("0 号玩家初始血量应为 100，得到 %v", player0(st).Health)
 	}
 
 	// 敌人快照字段：type=2、health=3、enemy=true。
@@ -324,12 +346,12 @@ func TestInitialSnapshot(t *testing.T) {
 	}
 
 	// 角色配置与重力全部来自 sim 侧调参。
-	if !p.charCreated || p.charHalfHeight != 0.5 || p.charRadius != 0.4 || p.charOffsetY != 0.9 {
-		t.Fatalf("角色形状应由 sim 传入（0.5/0.4/0.9），得到 %v/%v/%v",
-			p.charHalfHeight, p.charRadius, p.charOffsetY)
+	if p.charCreated != MaxPlayers || p.charHalfHeight != 0.5 || p.charRadius != 0.4 || p.charOffsetY != 0.9 {
+		t.Fatalf("两个角色形状都应由 sim 传入（0.5/0.4/0.9），得到 created=%d %v/%v/%v",
+			p.charCreated, p.charHalfHeight, p.charRadius, p.charOffsetY)
 	}
-	if p.charSpawn != [3]float32{0, 0, 12} {
-		t.Fatalf("角色出生点应由 sim 传入，得到 %v", p.charSpawn)
+	if p.charSpawn[0] != [3]float32{0, 0, 12} {
+		t.Fatalf("0 号角色出生点应由 sim 传入，得到 %v", p.charSpawn[0])
 	}
 	if p.dynamicPush {
 		t.Fatal("玩家不可被动态刚体推动（游戏规则，sim 侧设置）")
@@ -459,7 +481,7 @@ func TestNonEnemyContactsNoDamage(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		s.Step()
 	}
-	if h := s.Snapshot().Player.Health; h != 100 {
+	if h := player0(s.Snapshot()).Health; h != 100 {
 		t.Fatalf("碰到箱子不应掉血，得到 %v", h)
 	}
 }
@@ -490,12 +512,12 @@ func TestProjectileKillsEnemyAndDropsResource(t *testing.T) {
 func TestPlayerContactDamageAndRespawn(t *testing.T) {
 	s, p := newTestSim(t)
 	enemy := enemiesOf(s.Snapshot())[0]
-	p.moveBody(enemy, [3]float32{0, 0, 12}) // 贴到玩家身上
+	p.moveBody(enemy, [3]float32{0, 0, 12}) // 贴到 0 号玩家身上
 
 	for i := 0; i < 10; i++ {
 		s.Step()
 	}
-	if h := s.Snapshot().Player.Health; !near(h, 96, 0.1) {
+	if h := player0(s.Snapshot()).Health; !near(h, 96, 0.1) {
 		t.Fatalf("10 tick 贴身伤害后血量应约 96，得到 %v", h)
 	}
 
@@ -505,23 +527,23 @@ func TestPlayerContactDamageAndRespawn(t *testing.T) {
 	if p.respawns < 1 {
 		t.Fatal("血量耗尽后应复活一次")
 	}
-	if h := s.Snapshot().Player.Health; h <= 0 || h > 100 {
+	if h := player0(s.Snapshot()).Health; h <= 0 || h > 100 {
 		t.Fatalf("复活后血量应在 (0, 100]，得到 %v", h)
 	}
-	if p.character[0] != 0 || p.character[2] != 12 || p.character[1] > playerSpawnY+1e-3 {
-		t.Fatalf("复活后应回到出生点（着地），得到 %v", p.character)
+	if p.characters[0].pos[0] != 0 || p.characters[0].pos[2] != 12 || p.characters[0].pos[1] > playerSpawnY+1e-3 {
+		t.Fatalf("复活后应回到出生点（着地），得到 %v", p.characters[0].pos)
 	}
 }
 
 func TestJumpLiftsPlayer(t *testing.T) {
 	s, p := newTestSim(t)
-	s.ApplyInput([2]float32{}, true)
+	s.ApplyInput(0, [2]float32{}, 0, true)
 	s.Step()
 
-	if p.character[1] <= 1e-3 {
-		t.Fatalf("跳跃应让角色离地（v0=%v，g=%v），得到 y=%v", jumpSpeed, gravityY, p.character[1])
+	if p.characters[0].pos[1] <= 1e-3 {
+		t.Fatalf("跳跃应让角色离地（v0=%v，g=%v），得到 y=%v", jumpSpeed, gravityY, p.characters[0].pos[1])
 	}
-	in, _ := ecs.Get[Input](s.world, s.player)
+	in, _ := ecs.Get[Input](s.world, s.players[0])
 	if in.Jump {
 		t.Fatal("跳跃输入应在消费后清零")
 	}
@@ -530,7 +552,7 @@ func TestJumpLiftsPlayer(t *testing.T) {
 func TestResourcePickup(t *testing.T) {
 	s, p := newTestSim(t)
 	r := s.Snapshot().Resources[0]
-	p.character = r.Pos // 传送到金币位置
+	p.characters[0].pos = r.Pos // 传送到金币位置
 
 	s.Step()
 
@@ -620,11 +642,11 @@ func TestEnemyStandsStill(t *testing.T) {
 
 func TestApplyInputMovesPlayer(t *testing.T) {
 	s, p := newTestSim(t)
-	s.ApplyInput([2]float32{8, 0}, false)
+	s.ApplyInput(0, [2]float32{8, 0}, 0, false)
 	s.Step()
 
-	if !near(p.character[0], 8*TickDT, 1e-4) {
-		t.Fatalf("移动输入应驱动角色（+%v），得到 x=%v", 8*TickDT, p.character[0])
+	if !near(p.characters[0].pos[0], 8*TickDT, 1e-4) {
+		t.Fatalf("移动输入应驱动角色（+%v），得到 x=%v", 8*TickDT, p.characters[0].pos[0])
 	}
 }
 
@@ -644,8 +666,8 @@ func TestResetRebuildsScene(t *testing.T) {
 	if st.Step != 0 || st.Score != 0 || st.Gold != 0 || st.Wave != 1 {
 		t.Fatalf("Reset 后全局状态应清零，得到 %+v", st)
 	}
-	if st.Player.Health != 100 {
-		t.Fatalf("Reset 后血量应为 100，得到 %v", st.Player.Health)
+	if player0(st).Health != 100 {
+		t.Fatalf("Reset 后血量应为 100，得到 %v", player0(st).Health)
 	}
 	if len(st.Bodies) != 34 || len(st.Resources) != initialResource || len(enemiesOf(st)) != initialEnemies {
 		t.Fatalf("Reset 后场景应重建（34 刚体/6 金币/3 敌人），得到 %d/%d/%d",
@@ -679,10 +701,10 @@ func TestInputClampedToMaxSpeed(t *testing.T) {
 	s, p := newTestSim(t)
 	// 客户端上报远超限幅的速度（60,80 → 模长 100）：服务端应封顶到
 	// maxPlayerSpeed 且保持方向，而不是照单全收造成超速/穿墙。
-	s.ApplyInput([2]float32{60, 80}, false)
+	s.ApplyInput(0, [2]float32{60, 80}, 0, false)
 	s.Step()
-	dx := p.character[0]
-	dz := p.character[2] - 12
+	dx := p.characters[0].pos[0]
+	dz := p.characters[0].pos[2] - 12
 	d := float32(math.Sqrt(float64(dx*dx + dz*dz)))
 	if !near(d, maxPlayerSpeed*TickDT, 1e-3) {
 		t.Fatalf("水平位移应按 maxPlayerSpeed=%v 限幅，实测 %v", maxPlayerSpeed, d)
@@ -703,17 +725,17 @@ func TestRespawnSameTickConsistent(t *testing.T) {
 		t.Fatal("贴身持续伤害应在 500 tick 内触发复活")
 	}
 	st := s.Snapshot()
-	if st.Player.Health != 100 {
-		t.Fatalf("复活当 tick 血量应为 100，得到 %v", st.Player.Health)
+	if player0(st).Health != 100 {
+		t.Fatalf("复活当 tick 血量应为 100，得到 %v", player0(st).Health)
 	}
-	if st.Player.Pos != (Position{0, playerSpawnY, 12}) {
-		t.Fatalf("复活当 tick 快照位置应已是出生点（不再留在死亡点），得到 %v", st.Player.Pos)
+	if player0(st).Pos != (Position{0, playerSpawnY, 12}) {
+		t.Fatalf("复活当 tick 快照位置应已是出生点（不再留在死亡点），得到 %v", player0(st).Pos)
 	}
-	if p.character != ([3]float32{0, playerSpawnY, 12}) {
-		t.Fatalf("物理角色位置应立即回到出生点，得到 %v", p.character)
+	if p.characters[0].pos != ([3]float32{0, playerSpawnY, 12}) {
+		t.Fatalf("物理角色位置应立即回到出生点，得到 %v", p.characters[0].pos)
 	}
-	if p.charVel != ([3]float32{}) {
-		t.Fatalf("复活应清零角色速度，得到 %v", p.charVel)
+	if p.characters[0].vel != ([3]float32{}) {
+		t.Fatalf("复活应清零角色速度，得到 %v", p.characters[0].vel)
 	}
 }
 
@@ -735,10 +757,50 @@ func TestInitIsIdempotent(t *testing.T) {
 		t.Fatalf("重复 Init 不应叠加场景：刚体 %d → %d", before, got)
 	}
 	st := s.Snapshot()
-	if st.Step != 0 || st.Score != 0 || st.Wave != 1 || st.Player.Health != 100 {
+	if st.Step != 0 || st.Score != 0 || st.Wave != 1 || player0(st).Health != 100 {
 		t.Fatalf("重复 Init 后状态应回到初始，得到 %+v", st)
 	}
 	if len(projectilesOf(st)) != 0 {
 		t.Fatalf("重复 Init 后应无残留弹丸，得到 %d", len(projectilesOf(st)))
+	}
+}
+
+// TestTwoPlayersIndependentInputs 验证两名玩家有独立输入与位置。
+func TestTwoPlayersIndependentInputs(t *testing.T) {
+	s, p := newTestSim(t)
+	s.ApplyInput(0, [2]float32{8, 0}, 0, false)
+	s.ApplyInput(1, [2]float32{-8, 0}, 0, false)
+	s.Step()
+
+	if p.characters[0].pos[0] <= 0 {
+		t.Fatalf("0 号玩家应向右移，得到 x=%v", p.characters[0].pos[0])
+	}
+	if p.characters[1].pos[0] >= 3 {
+		t.Fatalf("1 号玩家应向左移，得到 x=%v", p.characters[1].pos[0])
+	}
+	st := s.Snapshot()
+	if len(st.Players) != MaxPlayers {
+		t.Fatalf("快照应有 %d 个玩家，得到 %d", MaxPlayers, len(st.Players))
+	}
+	if st.Players[0].Pos[0] < 0 || st.Players[1].Pos[0] > 3 {
+		t.Fatalf("玩家应按各自输入移动：p0=%v p1=%v", st.Players[0].Pos, st.Players[1].Pos)
+	}
+}
+
+// TestTwoPlayerIndependentDamage 验证敌人贴身只伤害接触它的那个玩家。
+func TestTwoPlayerIndependentDamage(t *testing.T) {
+	s, p := newTestSim(t)
+	enemy := enemiesOf(s.Snapshot())[0]
+	p.moveBody(enemy, [3]float32{0, 0, 12}) // 贴到 0 号玩家
+
+	for i := 0; i < 10; i++ {
+		s.Step()
+	}
+	st := s.Snapshot()
+	if h := st.Players[0].Health; h >= 100 {
+		t.Fatalf("0 号玩家应被贴身伤害，得到 %v", h)
+	}
+	if h := st.Players[1].Health; h != 100 {
+		t.Fatalf("1 号玩家不应受伤（未接触敌人），得到 %v", h)
 	}
 }

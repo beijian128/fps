@@ -1,6 +1,9 @@
 # IDE
 .idea/
 
+# ZCode session artifacts
+.zcode/
+
 # Jolt Physics — third-party dependency, clone separately:
 #   git clone https://github.com/jrouwe/JoltPhysics.git
 JoltPhysics/
@@ -14,6 +17,9 @@ joltgo/joltgo.exe
 joltgo/joltgo.exe~
 joltgo/libjolt_c.dll
 joltgo/*.log
+
+# Local cluster infra data (etcd)
+joltgo/deploy/etcd-data/
 
 # Binaries and build artifacts
 *.exe
