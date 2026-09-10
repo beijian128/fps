@@ -165,10 +165,28 @@
   ```
 
   `ws_smoke` 验证匹配 + 20 Hz 增量帧推送，预期输出 `SMOKE matched` +
-  `SMOKE unique_steps=80 span=79 elapsed_ms=4000` 左右；双客户端并发跑可验证 2 人匹配
-  （match 日志出现 `with 2 players`）。`rejoin_smoke` 验证断线重连回到**同一 match_id +
-  同一 player_idx** 并收到 full 帧——它是新协议下唯一端到端验证「重连回同一局」的测试，
-  改匹配/回局/resync 链路后必跑。
+  `SMOKE unique_steps=80 span=79 elapsed_ms=4000` 左右。`rejoin_smoke` 验证断线重连回到
+  **同一 match_id + 同一 player_idx** 并收到 full 帧——它是新协议下唯一端到端验证
+  「重连回同一局」的测试，改匹配/回局/resync 链路后必跑。
+
+  **验证 2 人匹配**（match 日志出现 `with 2 players`、slot 1、双人广播）时，必须让两个
+  客户端拿到**不同的 token**。token 就是会话 UID（持久化在 `user://client_id.txt`），而
+  Godot 的 `user://` 是**每项目一个目录**（Windows 下 `%APPDATA%\Godot\app_userdata\<项目名>`），
+  同机所有实例共用：两个客户端会读到同一个 token、绑到同一个 pitaya UID——后连的那个会
+  把先连的会话顶掉，匹配队列又按 UID 去重、只剩一条，于是 1 号槽位与双人广播永远测不到，
+  两个客户端还会互相踢下线。Godot 4.7.2 **没有** `--user-data-dir` 参数（传了会被静默
+  忽略），但 `user://` 落在 `%APPDATA%` 下，所以给额外实例换一个 `APPDATA` 就能让它拥有
+  独立的 `client_id.txt`：
+
+  ```bash
+  # 第一个客户端：默认 user 目录
+  Godot_v4.7.2-stable_win64_console.exe --path godot_client
+  # 第二个客户端：独立 APPDATA → 独立 user://client_id.txt → 独立会话 UID
+  APPDATA="$PWD/.client2" Godot_v4.7.2-stable_win64_console.exe --path godot_client
+  ```
+
+  PowerShell 里对应
+  `$env:APPDATA="$PWD\.client2"; Godot_v4.7.2-stable_win64_console.exe --path godot_client`。
 - 客户端运行期日志在 `%APPDATA%\Godot\app_userdata\Jolt FPS Client\logs\godot.log`
 
 ## 已知限制 / 待办

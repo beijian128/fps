@@ -76,6 +76,12 @@ var _jump_queued := false
 # 本帧待上报的射击 / 重置：与输入合并成一条 game.cmd 发出，帧是最小发送单位。
 var _pending_shot := {}
 var _pending_reset := false
+# 服务端 Reset() 会把**全部**存活实体标死（含玩家与静态刚体），重置帧因此带回一整批
+# destroy；那是「重开」不是「命中/拾取」，照常反馈就会在重置瞬间按每个存活弹丸放一声
+# 命中、每枚金币放一声拾取。按了 Reset 后置起此闩锁，识别出重置帧再清掉。
+# 不能只静音「下一帧」：重置命令要等下一个服务端 tick 才生效，其间还会先到常规帧，
+# 而且重置生效的那个 tick 也未必正好落在客户端紧接着收到的下一帧上。
+var _reset_pending := false
 
 var _fps_ema := 60.0
 var _hud_score := 0
@@ -118,6 +124,8 @@ func _on_connection(connected: bool) -> void:
 		conn_label.text = "正在连接服务器…"
 		conn_label.visible = true
 		_matched = false
+		# 断线后重置帧可能永远不会到达，闩锁留着会误静音重连后第一次真实销毁反馈。
+		_reset_pending = false
 		_store.clear()
 		_reset_interp()
 		for id in _res_nodes:
@@ -171,8 +179,8 @@ func _process(delta: float) -> void:
 
 	overlay.visible = not captured
 
-	# 每渲染帧都上报一条命令（输入 + 射击 + 重置合并成一条，帧是最小发送单位），
-	# **包括鼠标未捕获（按了 ESC 暂停）时**。两个理由：
+	# 匹配成功后，每渲染帧都上报一条命令（输入 + 射击 + 重置合并成一条，帧是最小
+	# 发送单位），**包括鼠标未捕获（按了 ESC 暂停）时**。两个理由：
 	#   1. 服务端合并后的 Cmd 每帧都调 ApplyInput，客户端必须每帧都给出 move；
 	#   2. 服务端按「最近一次上行消息」判定实例空闲（60 s）。暂停时若停止上报，
 	#      玩家虽然仍连着却完全静默 —— 60 s 后服务端会在**在线**状态下把他回收，
@@ -182,6 +190,12 @@ func _process(delta: float) -> void:
 	# 根本不看 captured，照 raw 调用会让 WASD 在鼠标释放后照样驱动角色（85% 不透明的
 	# 暂停面板下面，服务端在实时执行输入）。旧行为是释放鼠标时补发一条静止输入，
 	# 这里等价地发零向量 —— 是「发零」，不是「不发」。
+	#
+	# 匹配成功**前**不发：那时 gate 还没把 gameServerId 绑定到会话（要等 match
+	# 配对完走 bindPlayer），每条 game.cmd 都会落进 gate 的「no game server bound
+	# to session」分支、被 pitaya 打一条错误日志 —— 匹配最坏要等 10 s（单人兜底），
+	# 按每秒上百行算就是上千行噪音。待上报的跳跃/射击/重置状态照常消费清空，
+	# 只是不发出（否则重建连接后会把过期输入补发出去）。
 	var move := _wish_velocity() if captured else Vector2.ZERO
 	var jump := _jump_queued
 	_jump_queued = false
@@ -194,7 +208,8 @@ func _process(delta: float) -> void:
 		_pending_shot = {}
 	var reset := _pending_reset
 	_pending_reset = false
-	fps_client.send_command(move, _yaw, jump, shoot, origin, dir, reset)
+	if _matched:
+		fps_client.send_command(move, _yaw, jump, shoot, origin, dir, reset)
 
 func _input(event: InputEvent) -> void:
 	if Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
@@ -284,8 +299,14 @@ func _on_frame(frame: Dictionary) -> void:
 	_refresh_derived()
 
 	_reconcile_scene()
-	for ev: Variant in res.get("destroyed", []):
-		_on_entity_destroyed(ev as Dictionary)
+	var destroyed: Array = res.get("destroyed", [])
+	if _reset_pending and _is_reset_frame(destroyed):
+		# 识别出重置帧：整批 destroy 都是「重开」，不触发命中/拾取反馈（只做场景清理，
+		# 那已由上面的 _reconcile_scene 完成）。
+		_reset_pending = false
+	else:
+		for ev: Variant in destroyed:
+			_on_entity_destroyed(ev as Dictionary)
 	_render_resources_from_store()
 	_update_hud()
 	# 收尾再插值一次。Godot 先跑父节点 _process（里面已有一次 _render_interpolated）
@@ -325,6 +346,17 @@ func _refresh_derived() -> void:
 			_remote_pos_target = feet
 			_prev_remote_yaw = _remote_yaw
 			_remote_yaw_target = float(_store.attr(eid, "Facing"))
+
+## _is_reset_frame 判定这一帧的销毁是不是服务端 Reset() 引发的。Reset 会销毁包括
+## 玩家（带 Player.Idx）与静态刚体（Body.Static）在内的**全部**实体，而正常玩法里
+## 这两类从不销毁（玩家血尽只是原地满血复活，不销毁实体）。销毁事件按实体 id 升序
+## 到达，不能等撞见玩家那一条再回头补救，必须在整帧开始反馈之前就判定。
+func _is_reset_frame(destroyed: Array) -> bool:
+	for ev: Variant in destroyed:
+		var attrs: Dictionary = (ev as Dictionary).get("attrs", {})
+		if attrs.has("Player.Idx") or bool(attrs.get("Body.Static", false)):
+			return true
+	return false
 
 ## _on_entity_destroyed 消失的实体触发对应反馈。销毁事件带着消失前的属性，
 ## 所以这里能分辨消失的是弹丸（爆闪 + 命中音）还是金币（拾取音）。
@@ -548,6 +580,8 @@ func _on_reset_pressed() -> void:
 	_last_health = 100.0
 	# reset 是一个边沿：下一渲染帧与输入合并成一条命令上报一次。
 	_pending_reset = true
+	# 同时置起销毁反馈闩锁：重置帧会带回整批 destroy，不该被当成命中/拾取（见变量说明）。
+	_reset_pending = true
 
 func _pop(point: Vector3, color: Color, size: float, ttl: float) -> void:
 	var m := SphereMesh.new()

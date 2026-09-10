@@ -15,7 +15,7 @@ extends Node
 ##     发 match.join 进入匹配，收到 onMatched 后进入对局
 ##   - 心跳：按固定间隔发 Heartbeat 空帧，防止服务端超时踢人
 ##
-## 活性保障：服务端每 tick（50 ms）都推送快照，因此用"N 秒收不到任何数据"作为
+## 活性保障：服务端每 tick（50 ms）都推送同步帧，因此用"N 秒收不到任何数据"作为
 ## 接收看门狗——半开连接（对端崩溃不发 FIN、路由丢包、休眠唤醒）不会让
 ## WebSocketPeer 进入 CLOSED，此时强制重建连接，避免画面永久冻结。
 
@@ -50,7 +50,7 @@ var _retry_at := 0.0
 var _last_recv := 0.0    # 最近一次收到数据的时间戳（秒）
 var _last_beat := 0.0    # 最近一次发心跳的时间戳（秒）
 var _handshaken := false # 是否已完成握手（连接后置 false，收到握手响应后置 true）
-var _matched := false    # 是否已匹配进入对局（匹配前无快照流，看门狗不生效）
+var _matched := false    # 是否已匹配进入对局（匹配前无帧流，看门狗不生效）
 var connected := false
 var client_token := ""
 
@@ -105,7 +105,7 @@ func _process(_delta: float) -> void:
 			if _handshaken and now - _last_beat >= HEARTBEAT_EVERY:
 				_last_beat = now
 				_send_frame(TYPE_HEARTBEAT, PackedByteArray())
-			# 接收看门狗只在匹配后（有 20Hz 快照流）生效：匹配等待期间没有快照，
+			# 接收看门狗只在匹配后（有 20Hz 帧流）生效：匹配等待期间没有帧，
 			# 2.5s 无数据是正常的（单人兜底要等 10s）。
 			if _matched and now - _last_recv > RECV_TIMEOUT:
 				_force_reconnect()

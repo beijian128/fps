@@ -17,14 +17,13 @@ const KIND_VEC2 := 4
 const KIND_VEC3 := 5
 const KIND_VEC4 := 6
 
-var schema_version := 0
-
 var _entities := {}   # int -> Dictionary（属性名 -> 值；向量是 Array[float]）
 var _names := {}      # int(属性 ID) -> String(属性名)
 var _kinds := {}      # int(属性 ID) -> int(kind)
 
 ## apply_schema 应用 full 帧里携带的属性表。服务端每次下发 full 帧都会带一份，
-## 重复应用是幂等的。
+## 重复应用是幂等的。schema 里的 version 只是诊断信息，这里不读也不比对——
+## 客户端容忍未知属性（见下），版本不一致不会出错，比对它没有意义。
 func apply_schema(fields: Array) -> void:
 	_names.clear()
 	_kinds.clear()

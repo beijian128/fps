@@ -35,7 +35,6 @@ type Instance struct {
 	uids    []string // 玩家 uid，下标即 player_idx（槽位 0/1）
 
 	pendingFull [sim.MaxPlayers]bool // 本 tick 需要下发全量的槽位（重连 / resync）
-	startedAt   time.Time
 
 	lastSeen [sim.MaxPlayers]time.Time // 各槽位最近一次上行时间（仅 run goroutine 读写）
 	onExit   func()                    // 实例自行退出时的回调（由 game 组件设置）
@@ -59,9 +58,9 @@ func NewInstance(app pitaya.Pitaya, matchID string, uids []string) *Instance {
 
 // Start 创建物理世界并启动对局 goroutine。
 func (i *Instance) Start() {
-	i.startedAt = time.Now()
+	startedAt := time.Now()
 	for slot := range i.lastSeen {
-		i.lastSeen[slot] = i.startedAt
+		i.lastSeen[slot] = startedAt
 	}
 	i.sim.Init()
 	go i.run()

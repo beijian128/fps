@@ -13,11 +13,13 @@
 //     类型断言；reflect.Append/Zero 等真正走反射的只在搬家（结构性变更）时
 //   - Add2/Add3/Add4 是 Bundle 式批量挂载：多个组件作为整体写入、只搬一次家，
 //     不产生中间 archetype（spawn 路径用）
-//   - Query 是缓存查询：匹配条件在 archetype 粒度求值（Without 排除过滤），
+//   - Query 是缓存查询：匹配条件在 archetype 粒度求值（Without 追加排除过滤），
 //     结果缓存；世界出现新 archetype（generation 变化）时自动重建。
 //     QueryEach2/3/4 对多组件查询做列指针绑定：每个 archetype 只绑定一次
 //     *[]T 列，行内多列直取、无逐行查找（多组件系统的热路径用）。
-//     快照系统用 Without[Resource] 整表跳过传感器球
+//     `Without[U]` 适合「整表跳过某一类实体」（例如排除传感器球），RowHas/RowGet
+//     适合列不全固定的行视图取值。注意：该查询族在本仓库目前只由 ecs 自己的
+//     测试与基准调用（玩法同步层已改为 replication/ 的属性帧，不再有生产调用点）。
 //   - 实体只是 uint32 ID。物理实体使用外部（物理桥）发放的 id（从 1 递增，
 //     桥内与 Jolt BodyID 互译），纯逻辑实体（金币等）由 NewEntity 从
 //     logicEntityBase 起分配，两个 ID 空间不会重叠。Destroy 回收逻辑实体 id

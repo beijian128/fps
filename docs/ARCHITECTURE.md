@@ -72,9 +72,12 @@
   查找），archetype 按组件 ID 序列键 O(1) 查找。
   Add/Remove 组件时实体整体搬到目标 archetype（公共列复制、目标列补零、源行
   swap-remove，代价 O(组件数)）；`Add2/Add3/Add4` 批量挂载只搬一次家、不产生
-  中间 archetype（spawn 路径用）。查询匹配在 archetype 粒度完成：`Without[U]` 追加排除
-  条件，`QueryEach3` 三列行内直取 Body/Position/Rotation（每 archetype 只绑定一次
-  列指针，无逐行查找），查询缓存匹配结果、新 archetype 出现时自动失效重建。
+  中间 archetype（spawn 路径用）。ecs 核心另提供按 archetype 粒度的缓存查询
+  （`Without[U]` 追加排除、`QueryEach2/3/4` 多列行内直取、`RowHas`/`RowGet` 行视图），
+  由 `ecs` 自己的测试与基准覆盖；但**玩法层现在没有生产调用点**——旧的快照路径
+  `Simulation.snapshot`（曾用 `Without[Resource]` 整表跳过金币传感器球）已随实体-属性
+  同步改造删除，同步改由 `replication/` 的终值表驱动，金币由 `Resource.Kind` 属性区分、
+  在客户端排除。查询族仍留在 ecs 核心中备用。
   规模模拟（`ecs/scale_test.go`）验证到 100+ archetype、10000 实体：
   `Position` / `Rotation` / `Body`（形状/尺寸/静态/活跃/材质，同步给客户端的渲染元数据）、
   `Player` / `Input` / `Health`、`Enemy` / `Target` / `Projectile` / `Resource`
@@ -105,8 +108,8 @@ sim/ 各系统（变更点）──rep.Set(实体, 属性, 终值)──▶ repl
   `sim.Simulation.New()` 里由 `declareAttributes` **一次性声明**（当前 17 个，清单见
   [API.md](API.md)）。Schema **只随 full 帧下发**（full 帧自带一份，避免「schema 与全量帧
   分两条消息、顺序可能颠倒」的竞态）；`version` 是属性表（名字 + Kind）的 FNV-1a 哈希，
-  供客户端检测前后端属性表不一致（当前客户端只缓存、不强制比对——属性表有差异也不会
-  崩：不认识的属性会被忽略）。**新增一个属性不需要改 proto / 重生成 Go 码 / 改
+  随 Schema 一起携带、**仅供诊断**，客户端**不比对**它——属性表有差异也不会崩（不认识
+  的属性会被忽略），比对没有意义。**新增一个属性不需要改 proto / 重生成 Go 码 / 改
   客户端解码** —— 客户端只按属性名取值，不认识的属性照常存下、只是不渲染。
 - **值类型**：`KindF32` / `KindI32` / `KindBool` / `KindStr` / `KindVec2` / `KindVec3` /
   `KindVec4`；wire 上按族塞进 `AttrValue` 的 `f` / `i` / `b` / `s`。以后加一个 int 属性，

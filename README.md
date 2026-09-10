@@ -96,7 +96,9 @@ cd joltgo
 Godot_v4.7.2-stable_win64.exe --path godot_client
 ```
 
-点击画面锁定鼠标即可游玩（匹配成功进入对局，支持两个客户端一起匹配双人局）。
+点击画面锁定鼠标即可游玩（匹配成功进入对局，支持两个客户端一起匹配双人局；**同一台机器**
+上跑两个客户端时，两个实例必须各自使用独立的 user 目录，否则 token 相同会被当成同一个
+会话、互相顶下线 —— 做法见 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) 的冒烟测试一节）。
 gate 监听 `ws://localhost:8080/`；基础设施见 `joltgo/deploy/README.md`。
 
 ## 玩法
