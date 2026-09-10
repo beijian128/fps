@@ -423,7 +423,7 @@ func dirtyIDs(s *Store, id uint32) []uint32 {
 - [ ] **Step 2: 跑测试确认失败**
 
 Run: `cd joltgo && go test ./replication`
-Expected: FAIL —— `undefined: Store`、`undefined: AttrValue`
+Expected: FAIL —— `undefined: Store`、`undefined: New`、`undefined: dirtyIDs`
 
 - [ ] **Step 3: 实现**
 
@@ -441,8 +441,6 @@ Expected: FAIL —— `undefined: Store`、`undefined: AttrValue`
 //
 // 非并发安全：与 sim.Simulation 一样，由对局实例 goroutine 独占。
 package replication
-
-import "sort"
 
 // Attr 是一个属性的声明：ID 从 1 起，0 保留为无效。
 type Attr struct {
@@ -606,16 +604,6 @@ func schemaVersion(attrs []Attr) uint32 {
 		h = (h ^ uint32(a.Kind)) * prime32
 	}
 	return h
-}
-
-// sortedIDs 返回按键升序排列的实体 ID 列表（map 迭代无序，输出必须确定）。
-func sortedIDs[V any](m map[uint32]V) []uint32 {
-	out := make([]uint32, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
-	return out
 }
 ```
 
@@ -805,6 +793,8 @@ Expected: FAIL —— `undefined: Frame`、`undefined: EntityDelta`
 ```go
 package replication
 
+import "sort"
+
 // AttrValue 是一个属性的一次取值。
 type AttrValue struct {
 	Attr  uint32
@@ -927,6 +917,17 @@ func (s *Store) touchedIDs() []uint32 {
 		seen[id] = true
 	}
 	return sortedIDs(seen)
+}
+
+// sortedIDs 返回按键升序排列的 ID 列表。map 迭代无序，而帧的输出必须确定
+// （可测试、字节稳定），所以每条产出路径都要经过它排序。
+func sortedIDs[V any](m map[uint32]V) []uint32 {
+	out := make([]uint32, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
 }
 ```
 
