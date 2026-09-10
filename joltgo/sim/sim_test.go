@@ -13,6 +13,7 @@ import (
 
 type fakeBody struct {
 	active bool
+	quat   [4]float32
 	pos    [3]float32
 	vel    [3]float32
 	radius float32 // 球/胶囊半径；盒子为 0（fake 只对球/胶囊生成角色接触）
@@ -77,7 +78,13 @@ func (f *fakePhysics) SetGravity(x, y, z float32) { f.gravity = [3]float32{x, y,
 func (f *fakePhysics) addBody(pos [3]float32, motion Motion, radius float32, sensor bool) uint32 {
 	id := f.nextID
 	f.nextID++
-	f.bodies[id] = &fakeBody{active: motion != MotionStatic, pos: pos, radius: radius, sensor: sensor}
+	f.bodies[id] = &fakeBody{
+		active: motion != MotionStatic,
+		pos:    pos,
+		quat:   [4]float32{0, 0, 0, 1},
+		radius: radius,
+		sensor: sensor,
+	}
 	if sensor {
 		f.sensors[id] = true
 	}
@@ -186,7 +193,7 @@ func (f *fakePhysics) Step(dt float32, collisionSteps int) {
 
 func (f *fakePhysics) Sync(fn func(id uint32, active bool, pos [3]float32, quat [4]float32)) {
 	for id, b := range f.bodies {
-		fn(id, b.active, b.pos, [4]float32{0, 0, 0, 1})
+		fn(id, b.active, b.pos, b.quat)
 	}
 }
 
@@ -217,6 +224,21 @@ func (f *fakePhysics) moveBody(id uint32, pos [3]float32) {
 	if b, ok := f.bodies[id]; ok {
 		b.pos = pos
 		b.vel = [3]float32{}
+	}
+}
+
+// setBodyActive 翻转一个刚体的「仍在模拟」状态。fake 的 active 只在创建时赋值、
+// 之后从不变化，不翻转它就无法验证 Body.Active 的同步（syncSystem 只在值变了才 Set）。
+func (f *fakePhysics) setBodyActive(id uint32, active bool) {
+	if b, ok := f.bodies[id]; ok {
+		b.active = active
+	}
+}
+
+// setBodyQuat 直接改一个刚体的旋转，用于验证旋转变换的同步。
+func (f *fakePhysics) setBodyQuat(id uint32, quat [4]float32) {
+	if b, ok := f.bodies[id]; ok {
+		b.quat = quat
 	}
 }
 

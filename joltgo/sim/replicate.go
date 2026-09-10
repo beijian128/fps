@@ -69,8 +69,10 @@ func (s *Simulation) FullFrame() replication.Frame {
 }
 
 // replicateBodyMeta 把一个刚体的渲染元数据写进同步 store。
-// 只在创建时调用一次（静态属性不会变）；变换由 syncSystem 每 tick 推送。
-func (s *Simulation) replicateBodyMeta(e ecs.Entity, b Body, pos [3]float32) {
+// 只在创建时调用一次（静态属性不会变，变换由 syncSystem 每 tick 推送）。
+// 初始旋转由调用方传入：写死成单位四元数会和 registerBody 的 Rotation 悄悄脱钩，
+// 而「静默不同步」正是本任务要防的东西。
+func (s *Simulation) replicateBodyMeta(e ecs.Entity, b Body, pos [3]float32, rot [4]float32) {
 	id := uint32(e)
 	s.rep.Set(id, attrBodyKind, replication.I32(int32(b.Kind)))
 	s.rep.Set(id, attrBodySize, replication.Vec3(b.Size[0], b.Size[1], b.Size[2]))
@@ -78,7 +80,7 @@ func (s *Simulation) replicateBodyMeta(e ecs.Entity, b Body, pos [3]float32) {
 	s.rep.Set(id, attrBodyActive, replication.Bool(b.Active))
 	s.rep.Set(id, attrBodyMat, replication.I32(int32(b.Mat)))
 	s.rep.Set(id, attrPos, replication.Vec3(pos[0], pos[1], pos[2]))
-	s.rep.Set(id, attrRot, replication.Vec4(0, 0, 0, 1))
+	s.rep.Set(id, attrRot, replication.Vec4(rot[0], rot[1], rot[2], rot[3]))
 }
 
 // replicatePlayer 把玩家的槽位/位置/血量/朝向写进同步 store。

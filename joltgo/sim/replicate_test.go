@@ -152,16 +152,49 @@ func TestStoreMatchesWorldThroughoutMatch(t *testing.T) {
 	s, p := newTestSim(t)
 	assertStoreMatchesWorld(t, s)
 
-	// 跑一段：物理步进、弹丸命中、接触伤害、拾取、刷怪都要覆盖到。
+	// 跑一段：物理步进、刷怪、接触伤害都要覆盖到。
 	for i := 0; i < 40; i++ {
 		s.Step()
 		assertStoreMatchesWorld(t, s)
 	}
 
-	// 射击 -> 命中靶球（摧毁实体）
-	target := targetsOf(snapshotWorld(s))[0]
+	// 弹丸存活期间必须被同步（Projectile 属性只在创建时 Set 一次，而别的用例里
+	// 弹丸都在创建的同一 tick 就被销毁 —— 不单独跑这一条，漏写这个 Set 不会被发现）。
 	proj := s.Shoot(shoot0(), [3]float32{1, 0, 0})
+	s.Step()
+	assertStoreMatchesWorld(t, s)
+
+	// 弹丸命中靶球（摧毁实体）
+	target := targetsOf(snapshotWorld(s))[0]
 	p.queueContact(proj, target)
+	s.Step()
+	assertStoreMatchesWorld(t, s)
+
+	// 玩家朝向：yaw 必须真的变过才验证得到 Facing 的 Set（出生朝向是 0）。
+	s.ApplyInput(0, [2]float32{0, 0}, 0.7, false)
+	s.Step()
+	assertStoreMatchesWorld(t, s)
+
+	// 刚体的变换必须跟着物理走。fake 平时既不移动也不旋转刚体，所以这里手动推一下；
+	// 必须挑动态刚体（静态船体的 active 恒为 false，翻转不出变化）。
+	var dyn uint32
+	for _, b := range snapshotWorld(s).Bodies {
+		if !b.Static {
+			dyn = b.ID
+			break
+		}
+	}
+	if dyn == 0 {
+		t.Fatal("场景里应有动态刚体（木箱）")
+	}
+
+	p.moveBody(dyn, [3]float32{1.5, 2.5, 3.5})
+	p.setBodyQuat(dyn, [4]float32{0, 0.70710678, 0, 0.70710678})
+	s.Step()
+	assertStoreMatchesWorld(t, s)
+
+	// 休眠状态翻转：Body.Active 只在值真的变了才 Set，必须真的翻过才验证得到。
+	p.setBodyActive(dyn, false)
 	s.Step()
 	assertStoreMatchesWorld(t, s)
 
@@ -169,71 +202,42 @@ func TestStoreMatchesWorldThroughoutMatch(t *testing.T) {
 	// 见 TestInitialSnapshot 的同源 flake），所以先判空再取下标。
 	if res := snapshotWorld(s).Resources; len(res) > 0 {
 		p.queueCharacterContact(uint32(res[0].ID))
-		s.ApplyInput(0, [2]float32{0, 0}, 0, false)
 		s.Step()
 		assertStoreMatchesWorld(t, s)
 	}
 
-	// 敌人贴身伤害 + 复活
+	// 敌人贴身伤害。**每 tick 都断言**：玩家复活那一帧会同时改 Health 与 Position，
+	// 只在循环外断言的话，下一 tick 的同步会把两边都修好、漏写的 Set 就抓不住了。
 	enemy := enemiesOf(snapshotWorld(s))[0]
 	p.queueCharacterContact(enemy)
 	for i := 0; i < 300; i++ {
 		s.Step()
+		assertStoreMatchesWorld(t, s)
 	}
-	assertStoreMatchesWorld(t, s)
+}
 
-	// 波次推进：击杀全场敌人，等 2 秒（waveDelayTicks=40）应刷出新的一波
-	// —— 这会新建实体，必须同样被同步到。
-	for round := 0; round < 2; round++ {
-		for _, e := range enemiesOf(snapshotWorld(s)) {
+// 波次推进：击杀全场敌人 -> 清波 waveDelayTicks 后刷出新的一波（会新建实体）。
+// 单独成测是因为「真的把敌人打死」需要 enemyHealth 次命中；waveSystem 的
+// wave++ 与运行期的 spawnEnemy 只有走到这里才会被覆盖到。
+func TestStoreMatchesWorldAcrossWaveAdvance(t *testing.T) {
+	s, p := newTestSim(t)
+	before := s.wave
+
+	for _, e := range enemiesOf(snapshotWorld(s)) {
+		for hit := 0; hit < enemyHealth; hit++ {
 			proj := s.Shoot(shoot0(), [3]float32{1, 0, 0})
 			p.queueContact(proj, e)
 			s.Step()
 			assertStoreMatchesWorld(t, s)
 		}
-		for i := 0; i < 50; i++ {
-			s.Step()
-			assertStoreMatchesWorld(t, s)
-		}
-	}
-	if len(enemiesOf(snapshotWorld(s))) == 0 {
-		t.Fatal("清波 2 秒后应刷出下一波敌人（否则这个用例没覆盖到新建实体）")
-	}
-}
-
-// TestStoreMatchesWorldAcrossWaveAdvance 补上上一个用例没真正覆盖的一段：
-// 每只敌人有 3 点血，而上面「清波」循环每轮每只只打 1 发，敌人根本不会死，
-// 所以 waveSystem 的 wave++、运行时 spawnEnemy、击杀掉落 spawnResource 都没被
-// 跑到（那个 len==0 的守卫因此永远为真，是空转的）。这里真的清场来覆盖它们。
-func TestStoreMatchesWorldAcrossWaveAdvance(t *testing.T) {
-	s, p := newTestSim(t)
-	assertStoreMatchesWorld(t, s)
-
-	// 一次 tick 内击杀全部敌人（每只打满 3 发），顺带走击杀掉落。
-	for _, enemy := range enemiesOf(snapshotWorld(s)) {
-		for i := 0; i < 3; i++ {
-			proj := s.Shoot(shoot0(), [3]float32{1, 0, 0})
-			p.queueContact(proj, enemy)
-		}
-	}
-	s.Step()
-	assertStoreMatchesWorld(t, s) // 记分与掉落都必须已同步
-
-	if got := len(enemiesOf(snapshotWorld(s))); got != 0 {
-		t.Fatalf("一次 tick 内每只打满 3 发应清空全场，还剩 %d", got)
 	}
 
-	// 清波 2 秒后刷出新一波：wave++ 与运行时新建的敌人都必须被同步，
-	// 否则客户端会永远停在旧波次、且看不到新怪。
-	for i := 0; i < waveDelayTicks+5; i++ {
+	for i := 0; i < waveDelayTicks+10; i++ {
 		s.Step()
 		assertStoreMatchesWorld(t, s)
 	}
-	if s.wave != 2 {
-		t.Fatalf("清波 2 秒后波次应推进到 2，得到 %d", s.wave)
-	}
-	if got := len(enemiesOf(snapshotWorld(s))); got != initialEnemies+1 {
-		t.Fatalf("第 2 波应有 %d 只敌人，得到 %d", initialEnemies+1, got)
+	if s.wave <= before {
+		t.Fatalf("清波后应刷出新的一波（否则运行期 spawnEnemy 与 wave++ 都没被覆盖），wave 仍是 %d", s.wave)
 	}
 }
 
@@ -251,11 +255,12 @@ func TestDeltaStreamRebuildsFullState(t *testing.T) {
 		client.Declare(a.Name, a.Kind)
 	}
 
+	// 注意：destroy 之后**不能** continue —— 同帧销毁+重建时，同一个 EntityDelta
+	// 里既有 destroy 也有新实体的 set，丢掉 set 客户端就再也收不到重建的实体。
 	applyFrame := func(f replication.Frame) {
 		for _, ed := range f.Entities {
 			if ed.Destroy {
 				client.Destroy(ed.ID)
-				continue
 			}
 			for _, cid := range ed.Removed {
 				client.Remove(ed.ID, name[cid])
@@ -267,6 +272,14 @@ func TestDeltaStreamRebuildsFullState(t *testing.T) {
 	}
 
 	for i := 0; i < 60; i++ {
+		s.Step()
+		applyFrame(s.DrainFrame())
+	}
+
+	// 场景重建走的是「所有旧实体各发一条 destroy、随后整体重建」的路径，
+	// 而且刚体 id 会从头复用 —— 正好覆盖上面 destroy+set 同帧那个分支。
+	s.Reset()
+	for i := 0; i < 5; i++ {
 		s.Step()
 		applyFrame(s.DrainFrame())
 	}

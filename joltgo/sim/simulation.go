@@ -258,13 +258,15 @@ func (s *Simulation) init() {
 	// 机制可以让框架里不存在特例。
 	s.game = s.world.NewEntity()
 	ecs.Add(s.world, s.game, GameState{})
-	s.rep.Set(uint32(s.game), attrGameScore, replication.I32(0))
-	s.rep.Set(uint32(s.game), attrGameWave, replication.I32(1))
-	s.rep.Set(uint32(s.game), attrGameGold, replication.I32(0))
 
 	// PVE 初始波次 + 金币资源。
 	s.wave = 1
 	s.syncGameState() // 让组件立刻与 Go 侧计数一致，否则它会停在零值直到首次计数变化
+	// 用 s.* 字段而不是字面量：否则同一件事会有「组件」和「store」两处真相，
+	// 以后改初始波次就会悄悄脱钩。
+	s.rep.Set(uint32(s.game), attrGameScore, replication.I32(int32(s.score)))
+	s.rep.Set(uint32(s.game), attrGameWave, replication.I32(int32(s.wave)))
+	s.rep.Set(uint32(s.game), attrGameGold, replication.I32(int32(s.gold)))
 	for i := 0; i < initialEnemies; i++ {
 		s.spawnEnemy()
 	}
@@ -362,9 +364,10 @@ func (s *Simulation) shoot(origin, dir [3]float32) uint32 {
 func (s *Simulation) registerBody(id uint32, kind BodyKind, size [3]float32, static bool, pos [3]float32, mat Material) ecs.Entity {
 	e := ecs.Entity(id)
 	body := Body{Kind: kind, Size: size, Static: static, Active: !static, Mat: mat}
+	rot := Rotation{0, 0, 0, 1}
 	// Bundle 式挂载：一次搬家进入 {Body,Position,Rotation} archetype。
-	ecs.Add3(s.world, e, body, Position(pos), Rotation{0, 0, 0, 1})
-	s.replicateBodyMeta(e, body, pos)
+	ecs.Add3(s.world, e, body, Position(pos), rot)
+	s.replicateBodyMeta(e, body, pos, rot)
 	return e
 }
 
