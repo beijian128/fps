@@ -16,23 +16,6 @@ package game;
 
 option go_package = "joltgo/game/protos";
 
-// InputMsg / ShootMsg 是旧的上行消息（game.input / game.shoot）。本步保留：
-// game.Component 的 Input / Shoot handler 仍在用它们，删了编译不过；
-// 等到把 handler 合并成 Cmd（CommandMsg）时再一并删除。
-
-// InputMsg 是玩家移动输入（世界空间水平速度 + 跳跃边沿）。
-message InputMsg {
-  repeated float move = 1; // [wx, wz]，世界空间水平期望速度（m/s）
-  bool jump = 2;           // 跳跃边沿触发（服务端下一 tick 消费）
-  float yaw = 3;           // 水平朝向（弧度，绕 Y 轴，客户端相机 yaw）
-}
-
-// ShootMsg 是射击请求（枪口起点 + 朝向，朝向会被服务端归一化）。
-message ShootMsg {
-  repeated float origin = 1; // [x, y, z]
-  repeated float dir = 2;    // [x, y, z]
-}
-
 // CommandMsg 是一帧的上行命令：把输入、射击、重置合并成一条消息发送
 // （帧是最小发送单位）。shoot/reset 是边沿触发，未触发时为 false。
 message CommandMsg {

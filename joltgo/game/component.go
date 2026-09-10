@@ -1,5 +1,5 @@
 // Package game 是 game 服务（backend）：管理对局实例的生命周期，并把 pitaya 的
-// 远端 RPC（game.create / game.input / game.shoot / game.reset）翻译成对局实例的
+// 远端 RPC（game.create / game.cmd）翻译成对局实例的
 // 命令调用。每个对局一个 goroutine（Instance），内部顺序执行、无锁。
 //
 // 分层边界：sim/ 是纯 Go 业务层（单线程所有），本包只做「pitaya 协议 ↔ 实例命令」
@@ -71,43 +71,35 @@ func (c *Component) Create(ctx context.Context, msg *protos.CreateGameMsg) (*pro
 	return &protos.CreateGameReply{Code: 0}, nil
 }
 
-// Input 是远端 RPC handler（route "game.input"）：把玩家输入投给对应实例。
-// 玩家槽位由会话 UID 映射（match 创建实例时登记）。
-func (c *Component) Input(ctx context.Context, msg *protos.InputMsg) {
+// Cmd 是远端 RPC handler（route "game.cmd"）：一帧上行命令。
+// 输入、射击、重置合并成一条消息，减少消息数（帧是最小发送单位）。
+func (c *Component) Cmd(ctx context.Context, msg *protos.CommandMsg) {
 	inst, idx, ok := c.lookup(ctx)
 	if !ok {
 		return
 	}
+
 	var move [2]float32
 	if len(msg.Move) >= 2 {
 		move = [2]float32{msg.Move[0], msg.Move[1]}
 	}
 	inst.ApplyInput(idx, move, msg.Yaw, msg.Jump)
-}
 
-// Shoot 是远端 RPC handler（route "game.shoot"）。
-func (c *Component) Shoot(ctx context.Context, msg *protos.ShootMsg) {
-	inst, _, ok := c.lookup(ctx)
-	if !ok {
-		return
+	if msg.Shoot {
+		var origin, dir [3]float32
+		if len(msg.Origin) >= 3 {
+			origin = [3]float32{msg.Origin[0], msg.Origin[1], msg.Origin[2]}
+		}
+		if len(msg.Dir) >= 3 {
+			dir = [3]float32{msg.Dir[0], msg.Dir[1], msg.Dir[2]}
+		}
+		inst.Shoot(origin, dir)
 	}
-	var origin, dir [3]float32
-	if len(msg.Origin) >= 3 {
-		origin = [3]float32{msg.Origin[0], msg.Origin[1], msg.Origin[2]}
+	// 字段名 reset 与 protoc-gen-go 生成的 Reset() 方法冲突，被重命名为 Reset_
+	// （wire 字段号仍是 7，语义不变）。
+	if msg.Reset_ {
+		inst.Reset()
 	}
-	if len(msg.Dir) >= 3 {
-		dir = [3]float32{msg.Dir[0], msg.Dir[1], msg.Dir[2]}
-	}
-	inst.Shoot(origin, dir)
-}
-
-// Reset 是远端 RPC handler（route "game.reset"）：重建对局场景。
-func (c *Component) Reset(ctx context.Context) {
-	inst, _, ok := c.lookup(ctx)
-	if !ok {
-		return
-	}
-	inst.Reset()
 }
 
 // lookup 按会话 UID 找到实例与玩家槽位。
