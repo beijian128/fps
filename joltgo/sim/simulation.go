@@ -9,6 +9,7 @@ package sim
 
 import (
 	"joltgo/ecs"
+	"joltgo/replication"
 	"math"
 	"math/rand/v2"
 	"sort"
@@ -129,6 +130,7 @@ type Simulation struct {
 	// Resource）：排除过滤在 archetype 粒度完成、传感器球整表跳过，三列
 	// 行内直取（registerBody 保证每个 Body 实体都有 Position/Rotation）。
 	bodyQuery ecs.Query
+	rep       *replication.Store // 给客户端同步的属性终值表（见 replicate.go）
 
 	step          int
 	score         int
@@ -139,9 +141,12 @@ type Simulation struct {
 
 // New 创建一个空模拟。物理世界在 Init 时由 physics.Create 创建。
 func New(p Physics) *Simulation {
+	rep := replication.New()
+	declareAttributes(rep)
 	return &Simulation{
 		physics:   p,
 		world:     ecs.New(),
+		rep:       rep,
 		game:      ecs.InvalidEntity,
 		bodyQuery: ecs.Without[Resource](ecs.NewQuery3[Body, Position, Rotation]()),
 	}
@@ -221,6 +226,7 @@ func (s *Simulation) init() {
 		ecs.Add4(s.world, s.players[i], Player{Idx: i}, Health(100),
 			Position{x, playerSpawnY, z}, Input{Yaw: playerSpawnYaw(i)})
 		ecs.Add(s.world, s.players[i], Facing{Yaw: playerSpawnYaw(i)})
+		s.replicatePlayer(i, [3]float32{x, playerSpawnY, z}, 100, playerSpawnYaw(i))
 	}
 
 	// 场景几何全部来自 map.go 的部件表（甲板/船体/集装箱/走道/舷梯/桅杆）。
@@ -244,12 +250,17 @@ func (s *Simulation) init() {
 		id := s.physics.AddSphere(t[0], t[1], t[2], 0.4, MotionStatic)
 		e := s.registerBody(id, BodySphere, [3]float32{0.4}, true, t, MatDefault)
 		ecs.Add(s.world, e, Target{})
+		// 标记类组件没有别的变更点，创建时同步一次即可（漏写就是静默丢标记）。
+		s.rep.Set(uint32(e), attrTarget, replication.Bool(true))
 	}
 
 	// 全局状态单例实体：计分/波次/金币不是实体属性，但走同一套「实体 + 属性」
 	// 机制可以让框架里不存在特例。
 	s.game = s.world.NewEntity()
 	ecs.Add(s.world, s.game, GameState{})
+	s.rep.Set(uint32(s.game), attrGameScore, replication.I32(0))
+	s.rep.Set(uint32(s.game), attrGameWave, replication.I32(1))
+	s.rep.Set(uint32(s.game), attrGameGold, replication.I32(0))
 
 	// PVE 初始波次 + 金币资源。
 	s.wave = 1
@@ -274,6 +285,7 @@ func (s *Simulation) init() {
 func (s *Simulation) reset() {
 	s.physics.Destroy()
 	s.world = ecs.New()
+	s.rep.Reset() // 与世界一起重建：清掉终值表与已下发基线，重建后的世界整体重新下发
 	for i := range s.players {
 		s.players[i] = ecs.InvalidEntity
 	}
@@ -339,6 +351,8 @@ func (s *Simulation) shoot(origin, dir [3]float32) uint32 {
 
 	e := s.registerBody(id, BodySphere, [3]float32{projectileRadius}, false, origin, MatDefault)
 	ecs.Add(s.world, e, Projectile{SpawnStep: s.step})
+	// 标记类组件只在创建时同步一次（漏写就是静默丢标记）。
+	s.rep.Set(id, attrProjectile, replication.Bool(true))
 	return id
 }
 
@@ -347,11 +361,10 @@ func (s *Simulation) shoot(origin, dir [3]float32) uint32 {
 // 让两次 tick 之间创建的实体（如弹丸）也能立即出现在快照里。
 func (s *Simulation) registerBody(id uint32, kind BodyKind, size [3]float32, static bool, pos [3]float32, mat Material) ecs.Entity {
 	e := ecs.Entity(id)
+	body := Body{Kind: kind, Size: size, Static: static, Active: !static, Mat: mat}
 	// Bundle 式挂载：一次搬家进入 {Body,Position,Rotation} archetype。
-	ecs.Add3(s.world, e,
-		Body{Kind: kind, Size: size, Static: static, Active: !static, Mat: mat},
-		Position(pos),
-		Rotation{0, 0, 0, 1})
+	ecs.Add3(s.world, e, body, Position(pos), Rotation{0, 0, 0, 1})
+	s.replicateBodyMeta(e, body, pos)
 	return e
 }
 
@@ -362,6 +375,7 @@ func (s *Simulation) destroyBody(e ecs.Entity) {
 	}
 	s.physics.RemoveBody(uint32(e))
 	s.world.Destroy(e)
+	s.rep.Destroy(uint32(e)) // 同步侧一并销毁：实体 id 会被回收复用，基线必须清掉
 }
 
 // 初始金币：随机撒在甲板上（离 0 号玩家出生点 4m 以外、不与掩体重叠）。
@@ -393,6 +407,8 @@ func (s *Simulation) spawnResource(pos [3]float32) {
 	id := s.physics.AddSensorSphere(pos[0], pos[1], pos[2], resourceSensorRadius)
 	e := s.registerBody(id, BodySphere, [3]float32{resourceSensorRadius}, true, pos, MatDefault)
 	ecs.Add(s.world, e, Resource{Kind: 0})
+	// 金币的 Kind 只在创建时确定，之后不变 —— 只在这里同步一次。
+	s.rep.Set(id, attrResourceKind, replication.I32(0))
 }
 
 // 击杀掉落：怪物死亡位置生成金币（带随机偏移，避免叠成一格）。

@@ -15,6 +15,7 @@ package sim
 
 import (
 	"joltgo/ecs"
+	"joltgo/replication"
 	"math"
 )
 
@@ -29,6 +30,7 @@ func (s *Simulation) inputSystem() {
 		// 朝向与积分速度无关，只影响下发：从 Input 拆出来单独写一份，
 		// 好让同步层只下发 Facing 而不回灌客户端上行的 Input。
 		ecs.Add(s.world, s.players[i], Facing{Yaw: in.Yaw})
+		s.rep.Set(uint32(s.players[i]), attrFacing, replication.F32(in.Yaw))
 		jump := in.Jump
 		if jump {
 			in.Jump = false // 跳跃边沿：只消费一次
@@ -55,20 +57,27 @@ func (s *Simulation) inputSystem() {
 	}
 }
 
-// syncSystem 把物理世界的最新变换写回组件，是 Go 侧与 Jolt 之间唯一的
-// 每 tick 枚举点（旧实现每个系统各自枚举一遍）。
+// syncSystem 把物理世界的最新变换写回组件与同步 store，是 Go 侧与 Jolt 之间
+// 唯一的每 tick 枚举点（旧实现每个系统各自枚举一遍）。
+//
+// Sync 每 tick 会把全部刚体（含永不变化的静态几何）回调一遍，这里照旧全部 Set：
+// Store 与「上一次下发值」比较后不标脏，所以静态几何不会产生任何流量。
 func (s *Simulation) syncSystem() {
 	s.physics.Sync(func(id uint32, active bool, pos [3]float32, quat [4]float32) {
 		e := ecs.Entity(id)
 		ecs.Add(s.world, e, Position(pos))
 		ecs.Add(s.world, e, Rotation(quat))
-		if b, ok := ecs.Get[Body](s.world, e); ok {
+		s.rep.Set(id, attrPos, replication.Vec3(pos[0], pos[1], pos[2]))
+		s.rep.Set(id, attrRot, replication.Vec4(quat[0], quat[1], quat[2], quat[3]))
+		if b, ok := ecs.Get[Body](s.world, e); ok && b.Active != active {
 			b.Active = active
+			s.rep.Set(id, attrBodyActive, replication.Bool(active))
 		}
 	})
 	for i := 0; i < MaxPlayers; i++ {
 		pos := s.physics.CharacterPosition(i)
 		ecs.Add(s.world, s.players[i], Position(pos))
+		s.rep.Set(uint32(s.players[i]), attrPos, replication.Vec3(pos[0], pos[1], pos[2]))
 	}
 }
 
@@ -105,12 +114,14 @@ func (s *Simulation) projectileSystem() {
 			s.destroyBody(other)
 			s.score++
 			s.syncGameState()
+			s.rep.Set(uint32(s.game), attrGameScore, replication.I32(int32(s.score)))
 		case ecs.Has[Enemy](s.world, other):
 			hp, ok := ecs.Get[Health](s.world, other)
 			if !ok {
 				continue
 			}
 			*hp--
+			s.rep.Set(uint32(other), attrHealth, replication.F32(float32(*hp)))
 			if *hp <= 0 {
 				if pos, ok := ecs.Get[Position](s.world, other); ok {
 					s.dropResource(*pos) // 击杀掉落金币
@@ -118,6 +129,7 @@ func (s *Simulation) projectileSystem() {
 				s.destroyBody(other)
 				s.score++
 				s.syncGameState()
+				s.rep.Set(uint32(s.game), attrGameScore, replication.I32(int32(s.score)))
 			}
 		}
 	}
@@ -140,6 +152,7 @@ func (s *Simulation) enemyDamageSystem(contacts [MaxPlayers][]uint32) {
 			}
 			touched[id] = true
 			*hp -= enemyDamage
+			s.rep.Set(uint32(s.players[i]), attrHealth, replication.F32(float32(*hp)))
 		}
 		if *hp <= 0 {
 			*hp = 100
@@ -150,6 +163,10 @@ func (s *Simulation) enemyDamageSystem(contacts [MaxPlayers][]uint32) {
 			s.physics.SetCharacterPosition(i, x, playerSpawnY, z)
 			s.physics.SetCharacterVelocity(i, [3]float32{0, 0, 0})
 			ecs.Add(s.world, s.players[i], Position{x, playerSpawnY, z})
+			// 复活也是「本 tick 内的变更」：血量与位置都要立刻同步，否则客户端会
+			// 看到满血却仍留在死亡点（与上面组件的理由相同）。
+			s.rep.Set(uint32(s.players[i]), attrHealth, replication.F32(100))
+			s.rep.Set(uint32(s.players[i]), attrPos, replication.Vec3(x, playerSpawnY, z))
 		}
 	}
 }
@@ -179,6 +196,7 @@ func (s *Simulation) resourceSystem(contacts [MaxPlayers][]uint32) {
 			}
 			s.gold++
 			s.syncGameState()
+			s.rep.Set(uint32(s.game), attrGameGold, replication.I32(int32(s.gold)))
 			s.destroyBody(e) // 移除传感器刚体并销毁实体
 		}
 	}
@@ -201,6 +219,7 @@ func (s *Simulation) waveSystem() {
 	}
 	s.wave++
 	s.syncGameState()
+	s.rep.Set(uint32(s.game), attrGameWave, replication.I32(int32(s.wave)))
 	n := initialEnemies + (s.wave - 1)
 	if n > maxEnemiesPerWave {
 		n = maxEnemiesPerWave
@@ -223,6 +242,9 @@ func (s *Simulation) spawnEnemy() {
 		id := s.physics.AddCapsule(x, enemySpawnY, z, enemyHalfHeight, enemyRadius, MotionStatic)
 		e := s.registerBody(id, BodyCapsule, [3]float32{enemyRadius, enemyHalfHeight, 0}, true, [3]float32{x, enemySpawnY, z}, MatDefault)
 		ecs.Add2(s.world, e, Enemy{}, Health(enemyHealth))
+		// 标记与初始血量只在刷怪时确定一次（之后血量由 projectileSystem 维护）。
+		s.rep.Set(uint32(e), attrEnemy, replication.Bool(true))
+		s.rep.Set(uint32(e), attrHealth, replication.F32(enemyHealth))
 	}
 	for attempt := 0; attempt < 48; attempt++ {
 		x := randRange(-deckHalfX+1, deckHalfX-1)
