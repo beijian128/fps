@@ -49,7 +49,7 @@
   独立 Jolt 世界（互不共享）。
 - `Instance.run()` 是唯一访问 sim 的 goroutine：一个 select 循环消费
   - **命令 channel**（`cmds`）：输入/射击/重置，由 RPC handler 经 `enqueue` 投递；
-  - **20 Hz ticker**：`sim.Step()` + 广播快照；
+  - **20 Hz ticker**：`sim.Step()` + 广播同步帧（多数槽位发增量，待全量槽位发 full）；
   - **stop**：退出并释放物理世界。
 - 因为只有这一条 goroutine 访问 sim，`sim.Simulation` **去掉了 `sync.Mutex`**——并发
   安全由「单线程所有」这一模型保证，输入命令在 channel 上自然串行化。
@@ -72,12 +72,11 @@
   查找），archetype 按组件 ID 序列键 O(1) 查找。
   Add/Remove 组件时实体整体搬到目标 archetype（公共列复制、目标列补零、源行
   swap-remove，代价 O(组件数)）；`Add2/Add3/Add4` 批量挂载只搬一次家、不产生
-  中间 archetype（spawn 路径用）。查询匹配在 archetype 粒度完成：快照用
-  `Without[Resource]` 排除过滤整表跳过传感器球，`QueryEach3` 三列行内直取
-  Body/Position/Rotation（每 archetype 只绑定一次列指针，无逐行查找），
-  查询缓存匹配结果、新 archetype 出现时自动失效重建。规模模拟（`ecs/scale_test.go`）
-  验证到 100+ archetype、10000 实体：
-  `Position` / `Rotation` / `Body`（形状/尺寸/静态/活跃，快照渲染元数据）、
+  中间 archetype（spawn 路径用）。查询匹配在 archetype 粒度完成：`Without[U]` 追加排除
+  条件，`QueryEach3` 三列行内直取 Body/Position/Rotation（每 archetype 只绑定一次
+  列指针，无逐行查找），查询缓存匹配结果、新 archetype 出现时自动失效重建。
+  规模模拟（`ecs/scale_test.go`）验证到 100+ archetype、10000 实体：
+  `Position` / `Rotation` / `Body`（形状/尺寸/静态/活跃/材质，同步给客户端的渲染元数据）、
   `Player` / `Input` / `Health`、`Enemy` / `Target` / `Projectile` / `Resource`
 - **系统（System）**：每 tick 按固定顺序运行，只通过组件和 `Physics` 接口交互：
   输入 → 物理步进 → 变换同步 → 弹丸命中 → 接触伤害 → 弹丸过期 →
@@ -88,17 +87,61 @@
   系统行为不依赖真实物理引擎。包装层本身不含任何业务（见下），
   所有游戏调参（重力/跳跃/胶囊尺寸/弹丸配置/敌人参数）都在 `sim/` 常量区
 
+### 同步协议（实体-属性帧）
+
+服务端不再手写快照，而是把「给客户端同步什么」从 ECS 里**完全拆出来**，做成独立包
+`replication/`（不 import `ecs`）；`sim/replicate.go` 是唯一知道「组件 ↔ 属性」映射的地方。
+玩法层在每个**变更点就近**调用 `rep.Set(实体, 属性, 终值)`，同步层只负责去重与打包：
+
+```text
+sim/ 各系统（变更点）──rep.Set(实体, 属性, 终值)──▶ replication.Store
+                                                     ├ values : [实体][属性] = 终值
+                                                     ├ dirty  : 本帧脏集
+                                                     └ dead/gone : 销毁 / 移除
+每 tick：Drain() ─增量帧─▶ 局内多数槽位        Full() ─全量帧(带 Schema)─▶ 重连 / resync 槽位
+```
+
+- **属性表（Schema）**：属性名是扁平字符串（约定 `组件.字段`，如 `Body.Mat`），在
+  `sim.Simulation.New()` 里由 `declareAttributes` **一次性声明**（当前 17 个，清单见
+  [API.md](API.md)）。Schema **只随 full 帧下发**（full 帧自带一份，避免「schema 与全量帧
+  分两条消息、顺序可能颠倒」的竞态）；`version` 是属性表（名字 + Kind）的 FNV-1a 哈希，
+  供客户端检测前后端属性表不一致（当前客户端只缓存、不强制比对——属性表有差异也不会
+  崩：不认识的属性会被忽略）。**新增一个属性不需要改 proto / 重生成 Go 码 / 改
+  客户端解码** —— 客户端只按属性名取值，不认识的属性照常存下、只是不渲染。
+- **值类型**：`KindF32` / `KindI32` / `KindBool` / `KindStr` / `KindVec2` / `KindVec3` /
+  `KindVec4`；wire 上按族塞进 `AttrValue` 的 `f` / `i` / `b` / `s`。以后加一个 int 属性，
+  协议一个字都不用动。类型与 `Declare` 时声明的不符会 panic（防「写错属性名或值的
+  构造器」导致客户端按错误 Kind 解码）。
+- **增量 = 终值 + 脏集**：`Set` 与「上一次下发给客户端的值」比较，不同才标脏；同一帧内
+  改多次只留终值（A→B→A 则撤销脏标记，不产生流量）。因此 `syncSystem` 每 tick 给全部
+  刚体（含永不变化的静态船体）写 `Pos`/`Rot` 也不会产生任何流量。`Drain()` 每 tick
+  **恰好调用一次**——它负责清脏并推进「已下发基线」。
+- **全量 = 终值表整表**：`Full()` 与 `Drain()` 产出**同一个 `Frame` 类型、同一套编码**，
+  区别只有 `full=true` + 携带 Schema。「把断线期间的所有帧补上」在这里的形态就是把净效果
+  压缩成终值表一次性下发。`Full()` **刻意不修改增量基线**（全量只发给单个客户端）。
+- **属性存在性**：缺省即不存在。标记组件（`Enemy` / `Target` / `Projectile`）就是值恒为
+  `Bool(true)` 的属性 —— 存在即有该组件；`removed` / `destroy` 是属性存在性的终点。
+- **实体 id 会被复用**：`Destroy` / `Reset` 必须把已下发基线（`sent`）一并清掉，否则重建后
+  刚体 id 从头复用、新实体的 `Set` 会因「与旧实体值相同」被静默抑制 —— 客户端只收到
+  destroy、再也收不到重建（`Body.*` 这类只在创建时 Set 一次的属性就永久丢了）。
+- **就近 `Set` 的风险**：漏写一处 `rep.Set` 不会报错、没有日志，客户端只会静默停在旧值
+  （store 不反查 ECS 世界）。这是「变更时显式 Set」换 O(变化量) 的固有代价，由
+  `sim/replicate_test.go` 的 oracle 测试兜底（`expectedAttrs` 从 ECS 世界独立推期望值，
+  与 store 全量逐项比对）——加同步字段时先补 `rep.Set`、再补断言。
+- **已知安全取舍**：`JoinMsg.token` 是持有即可冒用的一次性身份，且被直接当作会话 UID；
+  生产环境应换成服务端签发、可吊销、带过期的凭证。本 demo 不做。
+
 ### 每 tick 只同步一次变换
 
-旧实现里每个系统各自枚举 C++ 刚体（快照、敌人 AI、伤害判定、计数、命中查找，
+旧实现里每个系统各自枚举 C++ 刚体（构建同步帧、敌人 AI、伤害判定、计数、命中查找，
 每 tick 多达 4~5 遍全量扫描）。重构后 `syncSystem` 每 tick 只枚举一次，
-把位置/旋转/活跃状态写回组件，其余系统全部读写 Go 侧组件。顺序语义与旧实现
-完全一致：
+把位置/旋转/活跃状态写回组件并就近 `rep.Set`，其余系统全部读写 Go 侧组件。
+顺序语义与旧实现完全一致：
 
 - AI 读的是**上个 tick** 同步的位置（等价于旧实现「步进前枚举」拿到的值）；
-  伤害与快照读的是**本 tick 步进后**同步的位置（等价于旧实现「步进后枚举」）
-- 两次 tick 之间创建的实体（如 WebSocket 线程里的射击）在创建时就写入已知的
-  初始位置，立即出现在快照里，不会闪现在原点
+  伤害与下发的同步帧读的是**本 tick 步进后**同步的位置（等价于旧实现「步进后枚举」）
+- 两次 tick 之间创建的实体（如 RPC handler 投递的射击命令）在创建时就写入已知的
+  初始位置，立即出现在同步帧里，不会闪现在原点
 
 ### 命中结算与物理桥的职责边界
 
@@ -109,10 +152,11 @@
   弹丸命中由弹丸系统从通用接触流中筛选（至少一侧带 `Projectile` 组件）
 - Go 桥（`physics/physics.go`）负责 id 翻译：Jolt 原生 BodyID 透传会与 ECS 的
   InvalidEntity（0）约定冲突，桥层维护双向映射，向 sim 发放从 1 递增的实体 id
-- 快照的 `bodyInfo` 各字段由组件重建（`type` ← `Body.Kind`，`enemy/target/
-  projectile` ← 标记组件，`health` ← `Health`），并**按 id 升序排序**输出，
-  与 archetype 行序（swap-remove 会变化）无关；协议字段与旧实现逐字一致，
-  客户端零改动
+- **同步层与 ECS 解耦**：旧实现里 `bodyInfo` 的每个字段都要在这里由组件重建（`type` ←
+  `Body.Kind`、`enemy/target/projectile` ← 标记组件、`health` ← `Health`）再整体下发；
+  现在改成通用属性名，客户端**按名字**取值（`Body.Kind` / `Enemy` / `Projectile` / `Pos` /
+  `Rot`…）。`replication/` 是独立包、不 import `ecs`，`sim/replicate.go` 是唯一知道
+  「ECS 组件 ↔ 属性名」映射的地方 —— 详见上文「同步协议（实体-属性帧）」。
 
 ## 为什么用 cgo + C ABI
 
@@ -135,18 +179,24 @@ Go 侧（sim）；包装层内部只保留两个物理层自身的状态：刚�
 
 游戏状态由服务端持有，客户端是「输入 + 展示」的瘦客户端，模拟节奏由服务端驱动：
 
-1. 客户端连接 gate（WS）→ pomelo 握手 → 发 `match.match.join` 进入匹配。
+1. 客户端连接 gate（WS）→ pomelo 握手 → 发 `match.match.join`（带持久化 `token`）进入匹配。
 2. match 服务配对（2 人，或 10s 兜底单人）→ `GetServersByType("game")` 挑一个 game
    节点 → `RPCTo("game.game.create")` 让该节点创建对局实例。
 3. game 节点的实例 goroutine 以固定 **20 Hz** tick 推进：消费最新输入 → 更新两个
    角色控制器 → 步进物理 → 处理弹丸命中/伤害/拾取/波次。
-4. 每个 tick 结束，实例把完整快照（route `onSnapshot`）经 `SendPushToUsers` 通过
-   NATS 转发给 gate，gate 再推给局内客户端；射击/重置立即补推。
-5. 客户端 60 Hz 渲染，收到快照后做**影子跟随插值**（位置 lerp、旋转 slerp），
-   让 20 Hz 数据在 60 Hz 屏幕上平滑；同一 tick 重复推送只保留首次到达时间。
-6. 客户端每渲染帧上报输入（`game.game.input`，世界空间水平速度 + 跳跃边沿），
+4. 每个 tick 结束，实例把本帧**增量**（route `onFrame`，只含变化的 (实体, 属性, 终值)）
+   经 `SendPushToUsers` 通过 NATS 转发给 gate，gate 再推给局内客户端；被标记为待全量的
+   槽位（重连 / resync）这一 tick 改推 **full 帧**（终值表整表 + Schema）。射击 / 重置
+   不再单独补推，统一等下一 tick 的帧。
+5. 客户端把增量累积进本地 `WorldStore`，60 Hz 渲染时对运动刚体和玩家位置做**影子跟随
+   插值**（位置 lerp、四元数 slerp、玩家朝向 lerp_angle），让 20 Hz 数据在 60 Hz 屏幕上
+   平滑。服务端不会重复推送同一 tick，客户端也不再靠快照 diff 推断「谁消失了」。
+6. 客户端每渲染帧上报一条 `game.game.cmd`（输入 + 射击 + 重置**合并成一条**），
    由 gate 定点路由到托管该对局的 game 节点。
-7. 连接断开后客户端每秒自动重连，重连后重新握手 + 重新匹配。
+7. 连接断开后客户端每秒自动重连：重新握手 + 用**同一个 token** 发 `match.match.join`；
+   match 先向各 game 节点 fan-out `game.rejoin`，命中存量实例则走与首次匹配相同的收尾
+   （写会话数据 + 推 `onMatched`），客户端回到**同一对局、同一槽位**、不入匹配队列；
+   客户端随后发 `game.resync` 请求 full 帧把本地世界整体重建（未命中则按新玩家重新匹配）。
 
 这种「服务端权威 + 固定 tick + 推送 + 客户端插值」让物理/游戏逻辑只存在于一处，
 模拟快慢与客户端数量/帧率无关，客户端换引擎也不影响逻辑。
@@ -182,7 +232,7 @@ Go 侧（sim）；包装层内部只保留两个物理层自身的状态：刚�
 集成测试 `physics/map_integration_test.go`（`go test -tags joltdll ./physics`）
 真的把角色从出生点走到走道上，防止改参数改坏手感。
 
-快照里每个刚体带一个 `mat` 材质号（`sim/map.go` 的 `Material`），客户端
+同步属性 `Body.Mat` 给每个刚体一个材质号（`sim/map.go` 的 `Material`），客户端
 （`body_entity.gd` 的 `MATS` 表）据此配色：甲板/船体/四色集装箱/走道格栅/栏杆/
 木箱/钢构件/踏步。它只是配色提示，不参与任何物理或玩法判定；客户端遇到不认识的
 材质号会退回默认配色，因此新增材质号向后兼容。
@@ -242,8 +292,8 @@ Go 侧（sim）；包装层内部只保留两个物理层自身的状态：刚�
   角色接触到即拾取（拾取半径 = 角色半径 0.4 + 传感器半径 0.6 ≈ 水平 1 m，
   与旧距离判定手感一致）
 - 初始 6 枚随机撒在地图（离出生点 4 m 外）；击杀掉落，场上上限 10 枚
-- 传感器球不出现在快照 `bodies` 里（客户端只渲染 `resources` 列表），拾取即
-  移除刚体并 `gold++`
+- 金币在同步层里也是普通刚体（`Body.*` + `Pos` + `Resource.Kind`），客户端渲染时按
+  `Resource.Kind` 把它从刚体渲染里排除、单独渲染金币节点；拾取即移除刚体并 `gold++`
 - 客户端渲染为金色双盘（自转 + 浮动动画），消失时播放拾取音效
 
 ## 关键设计决策与坑
@@ -279,21 +329,37 @@ Jolt 的 Release 构建定义 `NDEBUG`、`JPH_DEBUG_RENDERER`、`JPH_PROFILE_ENA
 - `ecs.World` 自身不加锁，由实例 goroutine 串行化。
 - `game.Component` 的实例注册表（`uid → Instance`、`matchId → Instance`）跨 RPC
   handler 共享，用一把 `sync.Mutex` 保护——这只是注册表查找，不含游戏逻辑。
-- 广播：实例每 tick 调 `app.SendPushToUsers("onSnapshot", snap, uids, "gate")`，
-  pitaya 经 NATS 用户频道把快照转给 gate，gate 再推给对应会话。每个对局的 uids
-  在 `game.create` 时固定，实例退出即停止广播。
+- 广播：实例每 tick 先 `sim.DrainFrame()`（**恰好一次**，它负责清脏并推进已下发基线），
+  再按槽位分发 —— 多数槽位收增量帧，`pendingFull` 槽位（重连 / resync）收 `FullFrame()`。
+  两路都调 `app.SendPushToUsers("onFrame", frame, uids, "gate")`，pitaya 经 NATS 用户
+  频道转给 gate，gate 再推给对应会话。每个对局的 uids 在 `game.create` 时固定，实例
+  退出即停止广播。
+- 实例自退：所有槽位 60s 无上行消息即结束（`instanceIdleTimeout`，远大于客户端 1s 重连 +
+  2.5s 看门狗）；`forget` 只在 `uidToInst[uid]` 仍指向该实例时才摘除映射 —— 玩家可能已经
+  匹配进新对局，无脑删会把新对局的 uid 映射一起抹掉。
 - 慢客户端：pitaya agent 每连接一个写者 + 有界发送缓冲，写不出去则断开连接，
   不会拖慢 20 Hz 模拟。
 - 服务间通信：etcd（服务发现，60s 租约）+ NATS（RPC）。route 三段式
-  `server.service.method`（`match.match.join` / `game.game.*`）。
+  `server.service.method`（`match.match.join` / `game.game.cmd` / `game.game.resync`）。
 
 ### 客户端插值
 
-- 快照双缓冲（`_prev_snap` / `_next_snap`）：tick 连续（step +1）时滚动，跳号时清空
-- 渲染 alpha = 距新快照到达时间 / 0.05s，位置 lerp、四元数 slerp，
-  渲染滞后一个 tick 平滑 20 Hz 数据
-- 新生成/移除的刚体不参与插值：按最新快照直接创建或删除（弹丸消失有爆闪特效兜底）
-- 双玩家：快照 `players` 数组按槽位 0/1；本地玩家（player_idx）第一人称视角，
-  远端玩家渲染 avatar
-- `FpsClient`（传输层）与渲染层通过信号解耦（`state_received` / `matched_received` /
-  `connection_changed`）
+- 世界状态在 `WorldStore`（`world_store.gd`）里按需累积：实体 ID → { 属性名: 值 }，
+  按**名字**取值，不认识的新属性照常存下、只是不渲染。full 帧先清空再整体覆盖，
+  因此「首次进入 / 重连 / 乱序」在应用层没有区别。
+- 插值状态由渲染层自己持有（`main.gd`）：保留每个刚体的**上一帧变换**作为插值起点
+  （`_prev_body_xform`，`id → {pos, quat}`），收到新帧时把当前变换整份拷进去（`_body_xform`），
+  渲染时在「上一帧 → 本帧」之间按 alpha = 距本帧到达时间 / 0.05s（`TICK`）做 lerp / slerp
+  （渲染滞后一个 tick）。
+- 玩家位置与远端朝向同样是 prev→target 插值（`_prev_player_pos` / `_player_pos_target`…），
+  显示值与服务端下发值**分开存**：`_render_interpolated` 一帧内会被调两次（`_process`
+  一次、`_on_frame` 收尾一次），显示值不能同时充当插值输入（否则第二次会拿结果再插一次）。
+- 旧实现的双缓冲（`_prev_snap` / `_next_snap`）与 `_snap_sig` / `_frame_keeps_bodies`
+  去重逻辑**整块删除**：增量协议下服务端不会重复推送，也不需要靠快照 diff 推断「谁消失了」
+  —— 消失由 `destroy` / `removed` op 显式下发，销毁事件还带着消失前的属性快照，渲染层
+  据此区分「弹丸爆闪」还是「金币拾取音」。
+- 新生成 / 移除的刚体不参与插值：按最新帧直接创建或删除（弹丸消失有爆闪特效兜底）。
+- 双玩家：按属性 `Player.Idx` 找槽位；本地玩家（player_idx）第一人称视角，
+  远端玩家渲染 avatar。
+- `FpsClient`（传输层）与渲染层通过信号解耦（`frame_received` / `matched_received` /
+  `connection_changed`）。

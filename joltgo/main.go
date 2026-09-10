@@ -69,8 +69,8 @@ func main() {
 		)
 	case "game":
 		// 同一个组件实例同时注册为 handler（客户端经 gate 路由来的
-		// game.input/shoot/reset，RPCType_Sys）与 remote（match 服务 RPCTo 来的
-		// game.create，RPCType_User）——两者的实例注册表必须共享。
+		// game.cmd / game.resync，RPCType_Sys）与 remote（match 服务 RPCTo 来的
+		// game.create / game.rejoin，RPCType_User）——两者的实例注册表必须共享。
 		comp := game.New(app)
 		app.Register(comp,
 			component.WithName("game"),

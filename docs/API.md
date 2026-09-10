@@ -5,8 +5,10 @@
 传输走 **pitaya 的 pomelo 帧格式**（二进制），payload 用 **protobuf** 序列化
 （schema 见 `joltgo/game/protos/game.proto`）。
 
-> 改动任何 route 或 proto 字段，必须同步改 `joltgo/game/protos/game.proto`、
+> 改动任何 route 或改 proto 的**字段定义**，必须同步改 `joltgo/game/protos/game.proto`、
 > `joltgo/game/`、`joltgo/match/` 与 `godot_client/scripts/fps_client.gd`（protobuf 编解码）。
+> **但新增一个同步属性不走这条路**——属性是数据不是字段：加一行 `Declare` + 变更点
+> `rep.Set` + 客户端按名字取值即可（见下文「属性表」与 `AGENTS.md` §3）。
 > route 一律**三段式** `server.service.method`。
 
 ## 帧格式（pomelo）
@@ -50,7 +52,7 @@ flag (1B) ─ route 长度 (1B) ─ route 字符串 ─ protobuf payload
    { "code": 200, "sys": { "heartbeat": 30, "dict": {}, "serializer": "protobuf" } }
    ```
 3. 客户端发 `HandshakeAck`（data `{"sys":{},"user":{}}`），会话进入 Working 状态
-4. 客户端发 `match.match.join`（Notify，空 payload）进入匹配队列
+4. 客户端发 `match.match.join`（Notify，`JoinMsg`，带持久化 `token`）进入匹配队列
 5. 之后客户端按固定间隔发 `Heartbeat` 空帧保活
 
 ## 匹配结果（Push，route `onMatched`）
@@ -66,109 +68,174 @@ message MatchResult {
 }
 ```
 
-## 服务端 → 客户端：状态快照（Push，route `onSnapshot`）
+**重连也走这条 push**：断线后客户端用同一 `token` 重新 `match.join`，match 服务向各
+game 节点 fan-out `game.rejoin`，命中存量实例时用同一条收尾路径（写会话数据 +
+推 `onMatched`），客户端回到**同一对局、同一 `player_idx`**、不再进匹配队列；收到
+`onMatched` 后客户端主动发 `game.resync` 请求全量帧（见下）。
 
-匹配成功后，game 节点以 **20 Hz** 固定节奏推进对局，每个 tick 结束把完整快照经
-gate 推给局内玩家；射击、重置等即时操作也会立即补推。payload 是 `Snapshot`：
+## 服务端 → 客户端：同步帧（Push，route `onFrame`）
+
+匹配成功后，game 节点以 **20 Hz** 固定节奏推进对局，每个 tick 结束把**一帧**经 gate
+推给局内玩家。payload 是 `Frame`：
 
 ```proto
-message Snapshot {
-  repeated BodyInfo bodies = 1;      // 按 id 升序
-  repeated ResourceInfo resources = 2;
-  repeated PlayerState players = 3;  // 按玩家槽位 0/1 顺序
-  int32 step = 4;                    // 模拟 tick 计数（20 Hz）
-  int32 score = 5;                   // 团队共享分数
-  int32 wave = 6;
-  int32 gold = 7;                    // 团队共享金币
+message Frame {
+  int32 step = 1;                  // 帧号（= 服务端 tick 计数）
+  bool full = 2;                   // 全量帧（重连 / resync），客户端先清空再整体覆盖
+  repeated EntityDelta entities = 3; // 帧内实体按 id 升序
+  Schema schema = 4;               // 仅 full 帧携带
 }
 ```
 
 ```proto
-message PlayerState {
-  repeated float pos = 1; // [x, y, z] 脚底位置（客户端眼高 = y + 1.6）
-  float health = 2;
-}
-```
-
-### BodyInfo
-
-```proto
-message BodyInfo {
+message EntityDelta {
   uint32 id = 1;
-  int32 type = 2;          // 0 = box, 1 = sphere, 2 = enemy capsule
-  bool static = 3;
-  bool target = 4;
-  bool enemy = 5;
-  bool projectile = 6;
-  repeated float pos = 7;  // [x, y, z] 质心位置（packed float）
-  repeated float quat = 8; // [x, y, z, w] 旋转四元数
-  repeated float size = 9; // box 半边长；sphere 半径在 [0]；capsule 半径在 [0]、半高在 [1]
-  float health = 10;       // 敌人血量（其他刚体为 0）
-  bool active = 11;        // 是否仍在模拟（未休眠）
-  int32 mat = 12;          // 视觉材质（场景配色，编号见 sim/map.go Material）：
-                           //   0 默认 1 甲板 2 船体 3–6 集装箱 7 高架走道
-                           //   8 栏杆 9 木箱 10 桅杆/烟囱/系缆桩 11 舷梯踏步
-                           // 靶球/敌人/弹丸由 target/enemy/projectile 标志位优先决定外观
+  bool destroy = 2;          // 整个实体消失（客户端删除该实体全部属性）
+  repeated uint32 removed = 3; // 移除的属性 ID（属性存在性的终点）
+  repeated AttrValue set = 4;  // 本帧变化的 (属性, 终值)
 }
 ```
 
-`mat` 只是**配色提示**，不影响任何物理或玩法判定；客户端不认识某个材质号时
-按未标材质的默认配色渲染（静态钢灰 / 动态木色），因此新增材质号是向后兼容的。
-
-### ResourceInfo
+**应用顺序固定为 `destroy` → `removed` → `set`。**
 
 ```proto
-message ResourceInfo {
-  int32 id = 1;
-  repeated float pos = 2; // [x, y, z] 悬浮位置
-  int32 kind = 3;         // 0 = 金币
+message AttrValue {
+  uint32 id = 1;         // 属性 ID，由 Schema 还原成名字
+  repeated float f = 2;  // KindF32(1 项) / KindVec2(2) / KindVec3(3) / KindVec4(4)
+  int32 i = 3;           // KindI32
+  bool b = 4;            // KindBool
+  string s = 5;          // KindStr
 }
 ```
 
-金币在物理上是 **Jolt 传感器球**（半径 0.6 m、悬浮 0.8 m）：不参与刚体碰撞
-（弹丸/箱子穿过），但角色控制器能接触到——**接触即拾取**（等效水平拾取半径
-= 角色半径 0.4 + 传感器半径 0.6 ≈ 1.0 m）；击杀怪物会在死亡位置掉落金币
-（场上上限 10 枚）。传感器球不出现在快照 `bodies` 里，客户端只渲染
-`resources` 列表。
+```proto
+message SchemaField {
+  uint32 id = 1;   // 属性 ID（Frame 里的 AttrValue.id）
+  string name = 2; // 属性名，客户端按名字取值
+  int32 kind = 3;  // 值类型，与 replication.Kind 取值一致
+}
+
+message Schema {
+  repeated SchemaField fields = 1;
+  uint32 version = 2; // 属性表哈希（名字 + 类型），客户端据此检测前后端不一致
+}
+```
+
+要点：
+
+- **增量帧 ≠ 快照**。它只含本帧变化的 `(实体, 属性, 终值)`，是**终值**不是相对量：
+  同一帧内改多次只发最后一个值；值没变（与「上一次下发的值」相同）就不产生流量——
+  所以连静态几何每 tick 被写一遍也不会出现在帧里。
+- **full 帧 = 终值表整表**（`full=true`，携带 Schema）。用于重连 / 首次进入 / 客户端
+  主动 `resync`。客户端收到后**先清空本地世界再整体覆盖**，因此即使中间先到了几帧
+  增量也会被整帧盖掉——不存在「onMatched 与 full 帧谁先到」的竞态，也不会残留
+  半新半旧的状态。
+- **Schema 只随 full 帧下发**（不单发），因此不存在「属性表与全量帧两条消息顺序颠倒」
+  的问题。属性 ID → 名字/类型的映射在客户端缓存，之后解码增量只靠它；`version`
+  供客户端检测前后端属性表是否一致（当前客户端只缓存、不强制比对）。
+- 客户端**按属性名取值**，不认识的属性照常存下、只是不渲染——这就是前后端可独立
+  演进的原因。
+
+## 属性表（客户端唯一需要知道的语义清单）
+
+属性名是扁平字符串（约定 `组件.字段`），在 `sim.Simulation.New()` 里由
+`declareAttributes` **一次性声明**，随 full 帧下发。当前共 17 个：
+
+| 属性名 | Kind | 含义 |
+|---|---|---|
+| `Pos` | Vec3 | 位置（刚体为质心，玩家为脚底） |
+| `Rot` | Vec4 | 旋转四元数 `[x,y,z,w]` |
+| `Health` | F32 | 血量（玩家 / 敌人） |
+| `Facing` | F32 | 水平朝向（弧度，绕 Y 轴） |
+| `Player.Idx` | I32 | 玩家槽位（0/1） |
+| `Body.Kind` | I32 | 刚体形状：0 box / 1 sphere / 2 capsule |
+| `Body.Size` | Vec3 | box 半边长；sphere 半径在 `[0]`；capsule 半径在 `[0]`、半高在 `[1]` |
+| `Body.Static` | Bool | 是否静态刚体 |
+| `Body.Active` | Bool | 是否仍在模拟（未休眠） |
+| `Body.Mat` | I32 | 视觉材质号（配色提示，编号见 `sim/map.go` `Material`）；不参与物理/玩法判定 |
+| `Enemy` | Bool | 存在即为敌人（标记组件） |
+| `Target` | Bool | 存在即为靶球（标记组件） |
+| `Projectile` | Bool | 存在即为弹丸（标记组件） |
+| `Resource.Kind` | I32 | 资源类型：0 = 金币 |
+| `Game.Score` | I32 | 团队共享分数 |
+| `Game.Wave` | I32 | 当前波次 |
+| `Game.Gold` | I32 | 团队共享金币 |
+
+- **属性存在性**：缺省即不存在。`Enemy` / `Target` / `Projectile` 三个标记属性值恒为
+  `true`，存在与否即代表该组件有无；`removed` / `destroy` 是属性存在性的终点。
+- **实体 ID 空间**：物理刚体 id（1 起递增）与逻辑实体 id（玩家，从 `1<<24` 起）不重叠，
+  都直接作为 `EntityDelta.id`。
+- **金币也是普通刚体**：同步为 `Body.*` + `Pos` + `Resource.Kind`，客户端按
+  `Resource.Kind` 把它从刚体渲染里排除、单独渲染金币节点。
+- **`Body.Mat` 向后兼容**：客户端不认识某个材质号时按未标材质的默认配色渲染
+  （静态钢灰 / 动态木色），因此新增材质号只需追加编号。
 
 ## 客户端 → 服务端：上行消息（Notify）
 
 route 三段式 `server.service.method`，payload 是 protobuf。
 
-### match.match.join —— 加入匹配队列
-
-payload：`JoinMsg`（空消息，无字段）。握手后发的第一条业务消息；match 服务据此绑定
-会话 UID 并入队，配对后推 `onMatched`。
-
-### game.game.input —— 上报输入（约 60 Hz）
+### match.match.join —— 加入匹配队列 / 重连回局
 
 ```proto
-message InputMsg {
-  repeated float move = 1; // [wx, wz]，世界空间水平期望速度（m/s）
-  bool jump = 2;           // 跳跃边沿触发
+message JoinMsg {
+  string token = 1;
+}
+```
+
+`token` 是客户端持久化的身份（首次运行生成 UUID 并写入 `user://client_id.txt`）。
+服务端把它当作**会话 UID**：重连时同一个 token 能找回原来的对局实例（见上文
+`onMatched` 的重连说明）。
+
+### game.game.cmd —— 一帧上行命令（约 60 Hz）
+
+输入、射击、重置**合并成一条消息**（帧是最小发送单位）。`shoot` / `reset` 是边沿
+触发，未触发时为 `false`：
+
+```proto
+message CommandMsg {
+  repeated float move = 1;   // [wx, wz]，世界空间水平期望速度（m/s）
+  float yaw = 2;             // 水平朝向（弧度，绕 Y 轴）
+  bool jump = 3;             // 跳跃边沿触发（服务端下一 tick 消费）
+  bool shoot = 4;            // 射击边沿触发
+  repeated float origin = 5; // [x, y, z] 枪口位置（shoot 为 true 时有效）
+  repeated float dir = 6;    // [x, y, z] 射击方向（服务端会归一化，零向量忽略）
+  bool reset = 7;            // 重建场景边沿触发
 }
 ```
 
 - `move`：世界空间水平期望速度（m/s），由客户端按相机朝向算出
-- `jump`：**边沿触发**——服务端仅在收到后的下一个 tick 消费，客户端只需在按键
-  按下瞬间置 true 一次
+- `jump` / `shoot` / `reset`：**边沿触发**——服务端仅在收到后的下一个 tick 消费，
+  客户端只需在按下瞬间置 `true` 一次
+- `reset`：销毁并重建整个场景（运输船地图的甲板/船体/集装箱/走道/舷梯/桅杆、木箱、
+  靶球、敌人、金币），重置分数、血量、步数、波次、输入状态
+- 射击 / 重置**不再单独补推**，统一等下一 tick 的同步帧
 
-### game.game.shoot —— 发射弹丸
+### game.game.resync —— 请求全量帧
+
+payload 空（Notify）。客户端在重连拿到 `onMatched` 后发一次：服务端把该槽位的
+**下一帧**标为全量，用 `onFrame` 单独下发一份 full 帧（含 Schema），客户端据此整体
+重建本地世界。
+
+## 服务端内部 RPC（客户端不可见）
+
+match 与 game 节点之间走 pitaya `RPCTo`（三段式 route），payload 也在同一 proto 里：
 
 ```proto
-message ShootMsg {
-  repeated float origin = 1; // [x, y, z] 枪口起点
-  repeated float dir = 2;    // [x, y, z] 朝向
+// match → game，创建对局（route "game.game.create"）
+message CreateGameMsg {
+  string match_id = 1;
+  repeated string uids = 2; // 按槽位顺序（下标即 player_idx），1 个 = 单人兜底局
+}
+message CreateGameReply { int32 code = 1; } // 0 = 成功
+
+// match → game，回局查询（route "game.game.rejoin"）：该节点是否托管此 token 的存量实例
+message RejoinMsg  { string token = 1; }
+message RejoinReply {
+  bool found = 1;
+  string match_id = 2;
+  int32 player_idx = 3; // 原本的玩家槽位（0/1）
 }
 ```
-
-`dir` 会被服务端归一化（零向量忽略）。服务端立即补推一帧快照。
-
-### game.game.reset —— 重建场景
-
-payload：空（handler 无入参）。销毁并重建整个场景（运输船地图的甲板/船体/集装箱/
-走道/舷梯/桅杆、木箱、靶球、敌人、金币），重置分数、血量、步数、波次、输入状态，
-并立即补推一帧。
 
 ## 波次规则（PVE）
 

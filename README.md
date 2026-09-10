@@ -17,6 +17,9 @@
 - 真实弹丸：`LinearCast` 小球飞行，通过接触监听（`ContactListener`）判定命中
 - 可破坏的红色靶球、可阻挡弹丸的箱子
 - 服务端以 **20 Hz** 固定 tick 推进模拟（服务器权威），状态变化经 WebSocket 主动推送
+  **实体-属性增量帧**（只发本帧变化的 `(实体, 属性, 终值)`；值没变不发、同帧只留终值）
+- **断线重连回到同一对局**：客户端持久化 token（即会话 UID），重连后自动找回原实例、
+  原槽位，服务端单独下发一份全量帧把本地世界整体重建
 - 服务端采用 **pitaya 分布式游戏服务端框架**（内置源码，**Cluster 模式**）拆成三个微服务：
   - **gate**（前端接入，WS 直连客户端，路由业务消息）
   - **match**（对局匹配，配对 2 人 / 超时单人兜底，分配 game 节点）
@@ -24,8 +27,10 @@
   - 三服务经 etcd（服务发现）+ NATS（RPC）通信，协议为 pomelo 帧 + protobuf payload
 - **双玩家**：每局两个玩家各自独立位置/血量/输入，计分/金币/波次共享；客户端第一人称视角 + 远端玩家 avatar
 - 服务端业务层采用 **ECS（实体-组件-系统）架构**：物理实体 id 即实体 id，每 tick 只同步一次
-  变换到组件，各系统（输入/弹丸/伤害/资源/波次）全部读写 Go 侧组件
-- 客户端 **60 Hz** 渲染：对运动物体做影子跟随插值（快照 lerp/slerp），输入 60 Hz 上报
+  变换到组件，各系统（输入/弹丸/伤害/资源/波次）全部读写 Go 侧组件；同步层独立成
+  `replication/` 包（与 ECS 解耦的终值表 + 脏集），映射集中在 `sim/replicate.go`
+- 客户端 **60 Hz** 渲染：把服务端增量累积成本地世界 + 对运动物体做**影子跟随插值**，
+  输入 60 Hz 上报
 - 音效：客户端程序化合成（Godot 端生成 WAV），无外部音频文件
 
 ## 快速开始
@@ -118,9 +123,10 @@ fps/
 │   ├── gate/                # gate 服务：AddRoute 路由（match.* / game.*）
 │   ├── match/               # match 服务：配对队列 + 分配 game 节点
 │   ├── game/                # game 服务：对局实例（instance.go 每局一 goroutine 无锁）
-│   │   └── protos/          # protobuf 消息定义 + 生成码（wire 契约）
+│   │   └── protos/          # protobuf 消息定义 + 生成码（wire 契约；新增同步属性无需改此文件）
 │   ├── physics/             # cgo 物理桥（sim.Physics 接口的 Jolt 实现，唯一 cgo 包）
-│   ├── sim/                 # ECS 模拟层：组件/系统/场景/快照（双玩家、单线程无锁）+ 单测
+│   ├── replication/         # 与 ECS 解耦的实体-属性同步层：终值表 + 本帧脏集（不 import ecs）
+│   ├── sim/                 # ECS 模拟层：组件/系统/场景 + ECS↔属性映射（replicate.go）+ oracle 单测
 │   ├── ecs/                 # ECS 核心：实体 + archetype 存储/查询 + Bundle（零依赖、可单测）
 │   ├── deploy/              # 本地集群基础设施：etcd/nats 二进制 + 启动脚本
 │   ├── CMakeLists.txt       # 将 Jolt 作为子项目，编译 libjolt_c.dll
@@ -128,11 +134,12 @@ fps/
 ├── godot_client/            # Godot 4 客户端
 │   ├── scenes/main.tscn     # 主场景（Main + FpsClient + Sfx 子节点）
 │   ├── scripts/
-│   │   ├── main.gd          # 输入/相机/双玩家渲染/快照插值/HUD/音效
-│   │   ├── fps_client.gd    # 传输层（pomelo 握手/匹配/心跳 + protobuf 编解码 + 重连）
+│   │   ├── main.gd          # 输入/相机/双玩家渲染/按属性名查询与插值/HUD/音效
+│   │   ├── world_store.gd   # 本地世界状态：实体-属性增量累积成完整世界（按名字取值）
+│   │   ├── fps_client.gd    # 传输层（pomelo 握手/匹配/心跳 + Frame 编解码 + 重连）
 │   │   ├── body_entity.gd   # 每个服务端刚体一个渲染节点
 │   │   └── sfx.gd           # 程序化音效
-│   └── tests/ws_smoke.gd    # 无头冒烟测试（匹配 + 20 Hz 推送速率）
+│   └── tests/               # 无头回归/冒烟测试（.gd；见 AGENTS.md §6）
 └── JoltPhysics/             # 第三方依赖（gitignored，需单独克隆）
 ```
 

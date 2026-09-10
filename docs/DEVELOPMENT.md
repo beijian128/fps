@@ -5,10 +5,11 @@
 1. 按 [BUILD.md](BUILD.md) 跑通构建与运行
 2. 读 [ARCHITECTURE.md](ARCHITECTURE.md) 理解分层和数据流
 3. 改客户端：只动 `godot_client/`，在 Godot 里直接 F5 运行即可
-4. 改服务端玩法逻辑：只动 `joltgo/sim/`（组件 + 系统），跑 `go test ./ecs ./sim` 后重跑 `build.ps1`
+4. 改服务端玩法逻辑：只动 `joltgo/sim/`（组件 + 系统 + `replicate.go` 的属性映射），跑 `go test ./ecs ./sim ./replication` 后重跑 `build.ps1`
 5. 改 ECS 核心：只动 `joltgo/ecs/`，注意它必须是零依赖、可单测的
 6. 改物理接口：动 `joltgo/wrapper/` 或 `joltgo/physics/`，必须重跑完整 `build.ps1`
-7. 改协议/pitaya 组件：动 `joltgo/game/protos/game.proto`（重跑 `protoc --go_out` 重新生成）+ `joltgo/game/` + `joltgo/match/` + 同步改 `godot_client/scripts/fps_client.gd`（protobuf 编解码）
+7. 加/改一个**同步属性**：只动 `joltgo/sim/replicate.go`（`declareAttributes` 加一行 + 变更点 `rep.Set`）+ `sim/replicate_test.go`，**不需要**改 proto、生成码或客户端解码（见下）
+8. 改**协议结构**（增删消息 / route、改 Frame/Schema 字段号）：动 `joltgo/game/protos/game.proto`（重跑 `protoc --go_out` 重新生成）+ `joltgo/game/` + `joltgo/match/` + 同步改 `godot_client/scripts/fps_client.gd`（protobuf 编解码）
 
 ## 如何扩展一个功能
 
@@ -25,15 +26,27 @@
    - 系统只读组件和 `sim.Physics`，不要引入 cgo
    - **sim 无锁**：单线程所有，由 game 实例 goroutine 独占驱动；不要把并发加回 sim
    - 用 fake 物理（见 `sim/sim_test.go`）给新系统补单元测试
-   - 新增快照字段时：先改 `game/protos/game.proto` 重生成 Go 码，再在
-     `game/component.go` 的 `toSnapshot` 里填上映射
+   - **同步属性映射**集中在 `sim/replicate.go`：加同步字段 = `declareAttributes` 加一行
+     `Declare` + 在每个「值会变的地方」就近 `rep.Set`，再在 `replicate_test.go` 的
+     `expectedAttrs` 里补一条断言。属性表必须在 `Simulation.New()` 里一次声明完整
+     （`Set` 未声明属性会 panic），`replication.Store` 与 `sim` 一样非并发安全
+     （由实例 goroutine 独占）
+   - **漏写一处 `rep.Set` 不会在运行时暴露**（没有报错、没有日志），客户端只会静默
+     停在旧值；唯一能抓住它的是 `sim/replicate_test.go` 的 oracle 测试（`expectedAttrs`
+     从 ECS 世界独立推期望值，与 store 全量逐项比对）。所以**先补 `rep.Set`、再补断言**
 3. **客户端** `godot_client/scripts/`
-   - 传输层：`fps_client.gd`（需要新消息时加一个 `send_xxx` 方法，注意 route 三段式
-     `server.service.method` 与服务端 handler 方法名小写对应；新字段要在 protobuf
+   - 传输层：`fps_client.gd`（上行只有三条：`match.join` / `game.cmd`（输入+射击+重置
+     合并成一条）/ `game.resync`；需要新消息时加一个 `send_xxx` 方法，注意 route 三段式
+     `server.service.method` 与服务端 handler 方法名小写对应；新消息要在 protobuf
      编解码函数里读写）
-   - 渲染层：`main.gd` / `body_entity.gd` 消费快照
+   - 世界状态：`world_store.gd` 按**属性名**累积；渲染层 `main.gd` / `body_entity.gd`
+     通过 `_store.attr(id, "属性名")` 取值 —— 新增同步属性时客户端取新值只需这一句
 
 ### 改 protobuf 消息的完整流程
+
+> **只加一个同步属性不必走这条路**——属性是数据不是字段，加一行 `Declare` + 变更点
+> `rep.Set` 就够（见上文）。只有增删**消息**、改 **route**、或改 `Frame` / `Schema` 的
+> 字段号时才需要下面的流程。
 
 1. 编辑 `joltgo/game/protos/game.proto`（增字段/改字段号/加消息）
 2. 在 `joltgo/` 下重生成 Go 码：
@@ -41,13 +54,14 @@
    protoc --go_out=. --go_opt=paths=source_relative -I . game/protos/game.proto
    ```
    （需要 `protoc` 与 `protoc-gen-go`；见 [BUILD.md](BUILD.md)）
-3. 改 `joltgo/game/component.go`：handler 入参类型、`toSnapshot` 映射
+3. 改 `joltgo/game/component.go`：handler 入参类型、`toFrame`（`replication.Frame` →
+   `protos.Frame` 的转换）
 4. 改 `godot_client/scripts/fps_client.gd`：`_encode_*` / `_decode_*` 手写 wire 编解码
-5. 跑 `go build ./...` + 无头冒烟测试验证
+5. 跑 `go build ./...` + 无头测试验证；改同步链路再跑 `tests/rejoin_smoke.gd`（需集群）
 
 示例：想加「玩家蹲下」——C 包装层加切换胶囊形状的函数（`jolt_character_set_shape`
 之类，只透传形状参数）；`sim` 给玩家实体加 `Crouching` 组件、在输入系统里应用；
-客户端在 `input` 消息里带上 `crouch` 字段。
+`CommandMsg` 加一个 `crouch` 字段，客户端在 `game.cmd` 里带上。
 
 ## 代码约定
 
@@ -67,9 +81,13 @@
   在多个 goroutine 间共享同一实例
 - ECS 组件是纯数据结构；`ecs.Each` 回调里不得增删实体（swap-remove 会打乱迭代），
   需要增删时先收集再处理；`ecs.Get` 返回的指针只在本 tick 内有效
-- 快照协议（`sim/state.go`）是服务端内部契约；wire 契约在 `game/protos/game.proto`
-  （protobuf），改动 proto 字段需重新生成 Go 码并同步改 Godot 客户端；
-  上行消息的 route/字段契约见 [API.md](API.md)（改动 `joltgo/game/`、`joltgo/match/` 时同步更新）
+- **同步是通用的「实体-属性」帧**：`replication/` 是与 ECS 解耦的独立包（终值表 + 本帧
+  脏集，不 import `ecs`），`sim/replicate.go` 是唯一知道「ECS 组件 ↔ 属性名」映射的地方。
+  属性名是扁平字符串（约定 `组件.字段`），加同步字段只动这一个文件；**漏写 `rep.Set`
+  是静默失败**，由 `sim/replicate_test.go` 的 oracle 测试兜底
+- 帧的 wire 契约在 `game/protos/game.proto`（protobuf）；改 proto **字段定义**需重新生成
+  Go 码并同步改 Godot 客户端，但**新增同步属性不需要**。上行 route/字段契约见
+  [API.md](API.md)（改动 `joltgo/game/`、`joltgo/match/` 时同步更新）
 - 场景地图只写 `sim/map.go` 的部件表：**只写半边**（带 `mirror: true` 的部件会自动
   补上绕 Y 轴旋转 180° 的孪生体），对称性由 `sim/map_test.go` 验证。舷梯参数
   （单级抬升 ≤ 0.4、进深 ≥ 0.5）是角色控制器决定的下限，改前先读 `map_test.go`
@@ -84,18 +102,22 @@
 - 服务端单元测试（不依赖 cgo / Jolt DLL，直接跑）：
 
   ```bash
-  cd joltgo && go test ./ecs ./sim
+  cd joltgo && go test ./ecs ./sim ./replication
   ```
 
-  `ecs` 覆盖组件存储语义；`sim` 用 fake 物理（只做运动学积分 + 地板钳制 + 接触生成）
-  覆盖各系统行为：初始快照与角色/重力配置、射击校验（归一化 + LinearCast/摩擦配置）、
-  命中结算（弹丸在接触对任意一侧）、无关接触忽略、传感器不挡弹丸、掉落、
-  接触伤害与复活、非敌人接触不掉血、跳跃离地、金币接触拾取守恒、波次推进、
-  弹丸过期、敌人静止、Reset 重建
-- 全部包（含 cgo 与 `game` 组件编译检查）：
+  `ecs` 覆盖组件存储语义；`replication` 覆盖同步层（终值表 / 脏集去重 / full 帧不推进
+  增量基线 / destroy 清基线 / 帧编码）；`sim` 用 fake 物理（只做运动学积分 + 地板钳制 +
+  接触生成）覆盖各系统行为：初始同步属性与角色/重力配置、射击校验（归一化 +
+  LinearCast/摩擦配置）、命中结算（弹丸在接触对任意一侧）、无关接触忽略、传感器不挡
+  弹丸、掉落、接触伤害与复活、非敌人接触不掉血、跳跃离地、金币接触拾取守恒、波次推进、
+  弹丸过期、敌人静止、Reset 重建；`sim/replicate_test.go` 是 oracle 测试——从 ECS 世界
+  独立推期望属性再与 store 全量逐项比对，漏写的 `rep.Set` 在这里失败
+- 全部包（含 cgo 与 `game` 组件编译检查；`./game ./physics` 需 `libjolt_c.dll` 在 PATH，
+  `joltgo/` 下已构建）：
 
   ```bash
-  go vet ./game && go test ./...
+  cd joltgo && PATH="$PWD:$PATH" go vet ./gate ./match ./game ./physics ./sim ./replication ./ecs
+  PATH="$PWD:$PATH" go test ./...
   ```
 
 - 地图集成测试（跑真 Jolt；需 `libjolt_c.dll` 在 PATH 或与测试二进制同目录）：
@@ -122,15 +144,31 @@
 
 ### 客户端
 
-- 无头冒烟测试（验证匹配 + 20 Hz 推送，需要分布式服务端已启动）：
+- 无服务端也能跑的无头回归测试（`tests/`，用 `_console.exe` 变体）：
+
+  ```bash
+  Godot_v4.7.2-stable_win64_console.exe --headless --path godot_client --script res://tests/world_store_test.gd
+  Godot_v4.7.2-stable_win64_console.exe --headless --path godot_client --script res://tests/frame_decode_test.gd
+  Godot_v4.7.2-stable_win64_console.exe --headless --path godot_client --script res://tests/game_frame_test.gd
+  Godot_v4.7.2-stable_win64_console.exe --headless --path godot_client --script res://tests/reconnect_cleanup_test.gd
+  ```
+
+  分别覆盖：世界存储语义（full / removed / destroy / 未知属性）、`Frame`/`Schema` 解码、
+  渲染路径（喂合成帧，不碰 WebSocket）、断线清理本地世界与插值状态。
+- 冒烟测试（需要分布式服务端已启动：etcd + NATS + gate/match/game 三进程）：
 
   ```bash
   Godot_v4.7.2-stable_win64_console.exe --headless \
     --path godot_client --script res://tests/ws_smoke.gd
+  Godot_v4.7.2-stable_win64_console.exe --headless \
+    --path godot_client --script res://tests/rejoin_smoke.gd
   ```
 
-  预期输出 `SMOKE matched` + `SMOKE unique_steps=80 span=79 elapsed_ms=4000` 左右。
-  双客户端并发跑可验证 2 人匹配（match 日志出现 `with 2 players`）。
+  `ws_smoke` 验证匹配 + 20 Hz 增量帧推送，预期输出 `SMOKE matched` +
+  `SMOKE unique_steps=80 span=79 elapsed_ms=4000` 左右；双客户端并发跑可验证 2 人匹配
+  （match 日志出现 `with 2 players`）。`rejoin_smoke` 验证断线重连回到**同一 match_id +
+  同一 player_idx** 并收到 full 帧——它是新协议下唯一端到端验证「重连回同一局」的测试，
+  改匹配/回局/resync 链路后必跑。
 - 客户端运行期日志在 `%APPDATA%\Godot\app_userdata\Jolt FPS Client\logs\godot.log`
 
 ## 已知限制 / 待办
