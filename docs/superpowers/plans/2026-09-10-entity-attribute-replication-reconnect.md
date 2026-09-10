@@ -2736,7 +2736,8 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 **Files:**
 - Modify: `joltgo/game/component.go`
-- Modify: `joltgo/game/instance.go`（`RequestFull` 已在 Task 6 加好，这里只补 `lastSeen` 刷新）
+
+（`Instance.RequestFull` 已在 Task 6 加好；`instance.go` 本步不动 —— `lastSeen` 的刷新属于 Task 10。）
 
 **Interfaces:**
 - Consumes: `Instance.RequestFull(slot int)`（Task 6）、`Component.lookup`（已存在）
