@@ -3006,8 +3006,18 @@ func TestForgetRemovesOwnUIDs(t *testing.T) {
 
 - [ ] **Step 3: 编译并跑测试**
 
-Run: `cd joltgo && gofmt -l . && go vet ./game && go test ./sim ./ecs ./replication`
-Expected: PASS
+```bash
+cd joltgo
+go build ./...
+go vet ./gate ./match ./game ./sim ./replication ./ecs
+PATH="$PWD:$PATH" go test -count=1 ./game ./ecs ./sim ./replication ./match
+```
+
+Expected: PASS。
+
+> `game` 包 import 了 `physics`，其 cgo 链接需要 `libjolt_c.dll`。所以 **`go test ./game`
+> 必须把 `joltgo/` 加进 PATH**，否则测试进程会以 `exit status 0xc0000135`（DLL 未找到）
+> 失败。这是本任务新增的 `game/component_test.go` 带来的环境要求，Task 14 要写进文档。
 
 - [ ] **Step 4: 提交**
 
