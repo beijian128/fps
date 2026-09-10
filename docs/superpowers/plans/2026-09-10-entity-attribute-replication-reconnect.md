@@ -3938,6 +3938,19 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 >    两个既有无头测试只覆盖 Task 11/12，`reconnect_cleanup_test` 只跑断线清理；
 >    无头跑 300 帧也证明不了什么（没有服务端，`frame_received` 根本不会触发）。
 >    上面 1–3 三个缺陷恰好都落在没有任何测试覆盖的那块代码上。
+>
+> 5. **`_render_interpolated` 的提前 return 现在会连玩家/远端字段一起挡掉** ——
+>    经第 2 条修正后它们只有这一个写者，`_body_xform` 为空时相机位置就冻住了。
+>    把三段玩家/远端 lerp 挪到 `_body_xform` 守卫**之前**。
+> 6. **`_reset_interp` 要一并重置玩家/远端的上一次值与目标值**，否则重新匹配时相机会
+>    从上一局的残留位置滑到新出生点，而不是直接落位。
+> 7. **`game_frame_test` 的 yaw 断言把容忍度放宽到 `< PI * 0.5`**：原来的 `< 0.1` 只有约
+>    1 ms 余量（`_frame_time` 是整数毫秒），机器一忙就 flaky。同时补一条**幂等断言** ——
+>    连续调两次 `_render_interpolated()`，玩家位置不应变化 —— 用来钉住 target/display 拆分
+>    （每组断言都在 alpha≈0 时跑，就地 lerp 的错误版本也能通过，必须靠这条区分）。
+> 8. **`rejoin_smoke.gd` 比较前先判空**：`_first_match_id == ""` 或 `_first_idx < 0` 直接判失败。
+>    两边默认值相同（`""` / `-1`），一旦 onMatched 载荷解析失败，旧写法会**假通过** ——
+>    而这个测试是全计划唯一端到端验证「重连回同一局」的东西。
 
 - [ ] **Step 1: 换信号、换状态变量**
 
