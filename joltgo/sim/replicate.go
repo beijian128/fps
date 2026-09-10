@@ -18,40 +18,37 @@ const (
 	attrHealth       = "Health"
 	attrFacing       = "Facing"
 	attrPlayerIdx    = "Player.Idx"
+	attrPlayerKills  = "Player.Kills"
+	attrPlayerDeaths = "Player.Deaths"
 	attrBodyKind     = "Body.Kind"
 	attrBodySize     = "Body.Size"
 	attrBodyStatic   = "Body.Static"
 	attrBodyActive   = "Body.Active"
 	attrBodyMat      = "Body.Mat"
-	attrEnemy        = "Enemy"
-	attrTarget       = "Target"
 	attrProjectile   = "Projectile"
-	attrResourceKind = "Resource.Kind"
-	attrGameScore    = "Game.Score"
-	attrGameWave     = "Game.Wave"
-	attrGameGold     = "Game.Gold"
+	attrGameWinner   = "Game.Winner"
 )
 
 // declareAttributes 声明全部同步属性。属性表必须完整稳定 —— 客户端在 full
 // 帧里一次拿到，之后靠它解码所有增量，所以不能等到首次 Set 才登记。
+//
+// 玩家命中盒（PlayerHitbox）**不在这里**：它没有任何需要下发的属性，客户端
+// 既看不到也不关心它。同步属性表是「下发给客户端的东西」的清单，不是 ECS 组件表。
 func declareAttributes(rep *replication.Store) {
 	rep.Declare(attrPos, replication.KindVec3)
 	rep.Declare(attrRot, replication.KindVec4)
 	rep.Declare(attrHealth, replication.KindF32)
 	rep.Declare(attrFacing, replication.KindF32)
 	rep.Declare(attrPlayerIdx, replication.KindI32)
+	rep.Declare(attrPlayerKills, replication.KindI32)
+	rep.Declare(attrPlayerDeaths, replication.KindI32)
 	rep.Declare(attrBodyKind, replication.KindI32)
 	rep.Declare(attrBodySize, replication.KindVec3)
 	rep.Declare(attrBodyStatic, replication.KindBool)
 	rep.Declare(attrBodyActive, replication.KindBool)
 	rep.Declare(attrBodyMat, replication.KindI32)
-	rep.Declare(attrEnemy, replication.KindBool)
-	rep.Declare(attrTarget, replication.KindBool)
 	rep.Declare(attrProjectile, replication.KindBool)
-	rep.Declare(attrResourceKind, replication.KindI32)
-	rep.Declare(attrGameScore, replication.KindI32)
-	rep.Declare(attrGameWave, replication.KindI32)
-	rep.Declare(attrGameGold, replication.KindI32)
+	rep.Declare(attrGameWinner, replication.KindI32)
 }
 
 // DrainFrame 取走本帧增量（填好帧号）。
@@ -92,4 +89,14 @@ func (s *Simulation) replicatePlayer(idx int, pos [3]float32, health float32, ya
 	s.rep.Set(id, attrPos, replication.Vec3(pos[0], pos[1], pos[2]))
 	s.rep.Set(id, attrHealth, replication.F32(health))
 	s.rep.Set(id, attrFacing, replication.F32(yaw))
+}
+
+// replicateScore 把某个槽位的战绩写进玩家组件与同步 store。调用方把 Go 侧数组
+// 传进来 —— 字段是真相，组件与 store 都是它的载体，三者一次写完不留两处真相。
+func (s *Simulation) replicateScore(idx int, sc PlayerScore) {
+	e := s.players[idx]
+	ecs.Add(s.world, e, sc)
+	id := uint32(e)
+	s.rep.Set(id, attrPlayerKills, replication.I32(sc.Kills))
+	s.rep.Set(id, attrPlayerDeaths, replication.I32(sc.Deaths))
 }

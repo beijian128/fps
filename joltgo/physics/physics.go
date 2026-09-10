@@ -127,6 +127,14 @@ func (p *Physics) SetBodyVelocity(id uint32, vx, vy, vz float32) {
 	}
 }
 
+// SetBodyPosition 把刚体瞬移到指定位置（质心）。用于让「跟随角色的刚体」
+// （命中盒）每 tick 贴到角色所在处；不做速度连续性处理。
+func (p *Physics) SetBodyPosition(id uint32, x, y, z float32) {
+	if raw, ok := p.joltOf[id]; ok {
+		C.jolt_set_body_position(p.world, C.uint32_t(raw), C.float(x), C.float(y), C.float(z))
+	}
+}
+
 func (p *Physics) SetBodyFriction(id uint32, friction float32) {
 	if raw, ok := p.joltOf[id]; ok {
 		C.jolt_set_body_friction(p.world, C.uint32_t(raw), C.float(friction))
@@ -208,6 +216,15 @@ func (p *Physics) SetCharacterDynamicPush(charIdx int, allow bool) {
 	C.jolt_character_set_dynamic_push(p.world, C.int(charIdx), C.int(v))
 }
 
+// CharacterIgnoreBody 让指定角色忽略某个刚体（不成障碍、不产生接触事件）。
+func (p *Physics) CharacterIgnoreBody(charIdx int, id uint32) {
+	raw, ok := p.joltOf[id]
+	if !ok {
+		return
+	}
+	C.jolt_character_ignore_body(p.world, C.int(charIdx), C.uint32_t(raw))
+}
+
 func (p *Physics) CharacterPosition(charIdx int) [3]float32 {
 	var out [3]C.float
 	C.jolt_character_get_position(p.world, C.int(charIdx), &out[0])
@@ -234,25 +251,4 @@ func (p *Physics) CharacterOnGround(charIdx int) bool {
 
 func (p *Physics) UpdateCharacter(charIdx int, dt float32) {
 	C.jolt_character_update(p.world, C.int(charIdx), C.float(dt))
-}
-
-// PollCharacterContacts 排空本 tick 指定角色接触到的刚体 id（同一刚体可能重复出现，
-// 由调用方去重）。接触是纯物理事实，「碰到谁算伤害/拾取」由 sim 判定。
-func (p *Physics) PollCharacterContacts(charIdx int) []uint32 {
-	var buf [256]C.uint32_t
-	var out []uint32
-	for {
-		n := int(C.jolt_character_poll_contacts(p.world, C.int(charIdx), &buf[0], 256))
-		if n == 0 {
-			return out
-		}
-		for i := 0; i < n; i++ {
-			if id, ok := p.goOf[uint32(buf[i])]; ok {
-				out = append(out, id)
-			}
-		}
-		if n < 256 {
-			return out
-		}
-	}
 }

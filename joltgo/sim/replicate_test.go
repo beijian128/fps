@@ -26,10 +26,7 @@ func expectedAttrs(s *Simulation) map[uint32]map[string]replication.Value {
 
 	// 全局状态单例实体
 	if gs, ok := ecs.Get[GameState](s.world, s.game); ok {
-		id := uint32(s.game)
-		put(id, attrGameScore, replication.I32(gs.Score))
-		put(id, attrGameWave, replication.I32(gs.Wave))
-		put(id, attrGameGold, replication.I32(gs.Gold))
+		put(uint32(s.game), attrGameWinner, replication.I32(gs.Winner))
 	}
 
 	// 玩家
@@ -43,10 +40,13 @@ func expectedAttrs(s *Simulation) map[uint32]map[string]replication.Value {
 		h, _ := ecs.Get[Health](s.world, e)
 		f, _ := ecs.Get[Facing](s.world, e)
 		pl, _ := ecs.Get[Player](s.world, e)
+		sc, _ := ecs.Get[PlayerScore](s.world, e)
 		put(id, attrPos, replication.Vec3(p[0], p[1], p[2]))
 		put(id, attrHealth, replication.F32(float32(*h)))
 		put(id, attrFacing, replication.F32(f.Yaw))
 		put(id, attrPlayerIdx, replication.I32(int32(pl.Idx)))
+		put(id, attrPlayerKills, replication.I32(sc.Kills))
+		put(id, attrPlayerDeaths, replication.I32(sc.Deaths))
 	}
 
 	// 刚体
@@ -64,19 +64,15 @@ func expectedAttrs(s *Simulation) map[uint32]map[string]replication.Value {
 		if h, ok := ecs.Get[Health](s.world, e); ok {
 			put(id, attrHealth, replication.F32(float32(*h)))
 		}
-		if ecs.Has[Enemy](s.world, e) {
-			put(id, attrEnemy, replication.Bool(true))
-		}
-		if ecs.Has[Target](s.world, e) {
-			put(id, attrTarget, replication.Bool(true))
-		}
 		if ecs.Has[Projectile](s.world, e) {
 			put(id, attrProjectile, replication.Bool(true))
 		}
-		if r, ok := ecs.Get[Resource](s.world, e); ok {
-			put(id, attrResourceKind, replication.I32(int32(r.Kind)))
-		}
 	})
+
+	// 玩家命中盒刻意不出现在这里：它在 ECS 世界里存在，但**一个同步属性都没有**
+	// （不是可渲染实体，客户端也不需要知道它）。assertStoreMatchesWorld 的反向断言
+	// （store 里不许有世界里不存在的实体）会替我们守住这条线 —— 哪天有人给命中盒
+	// 加了 rep.Set，它立刻会因为「多出一个实体」而失败。
 	return out
 }
 
@@ -166,7 +162,7 @@ func TestStoreMatchesWorldThroughoutMatch(t *testing.T) {
 	s, p := newTestSim(t)
 	assertStoreMatchesWorld(t, s)
 
-	// 跑一段：物理步进、刷怪、接触伤害都要覆盖到。
+	// 跑一段：物理步进、命中盒跟随都要覆盖到。
 	for i := 0; i < 40; i++ {
 		s.Step()
 		assertStoreMatchesWorld(t, s)
@@ -174,13 +170,13 @@ func TestStoreMatchesWorldThroughoutMatch(t *testing.T) {
 
 	// 弹丸存活期间必须被同步（Projectile 属性只在创建时 Set 一次，而别的用例里
 	// 弹丸都在创建的同一 tick 就被销毁 —— 不单独跑这一条，漏写这个 Set 不会被发现）。
-	proj := s.Shoot(shoot0(), [3]float32{1, 0, 0})
+	proj := s.Shoot(0, shoot0(), [3]float32{1, 0, 0})
 	s.Step()
 	assertStoreMatchesWorld(t, s)
 
-	// 弹丸命中靶球（摧毁实体）
-	target := targetsOf(snapshotWorld(s))[0]
-	p.queueContact(proj, target)
+	// 弹丸命中场景几何（摧毁实体）
+	deck := snapshotWorld(s).Bodies[0].ID
+	p.queueContact(proj, deck)
 	s.Step()
 	assertStoreMatchesWorld(t, s)
 
@@ -212,46 +208,45 @@ func TestStoreMatchesWorldThroughoutMatch(t *testing.T) {
 	s.Step()
 	assertStoreMatchesWorld(t, s)
 
-	// 玩家拾取金币。初始金币是随机撒的，理论上可能一枚都没撒上（既有随机性，
-	// 见 TestInitialSnapshot 的同源 flake），所以先判空再取下标。
-	if res := snapshotWorld(s).Resources; len(res) > 0 {
-		p.queueCharacterContact(uint32(res[0].ID))
+	// 命中扣血。**每 tick 都断言**：一次命中会同时改 Health 与（血尽时）Position/战绩，
+	// 只在循环外断言的话，下一 tick 的同步会把两边都修好、漏写的 Set 就抓不住了。
+	// 打到打死为止，把击杀 / 死亡 / 复活这条路径整个走到。
+	for hit := 0; hit <= killsToDie(); hit++ {
+		proj := s.Shoot(0, shoot0(), [3]float32{1, 0, 0})
+		p.queueContact(proj, uint32(s.hitboxes[1]))
 		s.Step()
 		assertStoreMatchesWorld(t, s)
 	}
-
-	// 敌人贴身伤害。**每 tick 都断言**：玩家复活那一帧会同时改 Health 与 Position，
-	// 只在循环外断言的话，下一 tick 的同步会把两边都修好、漏写的 Set 就抓不住了。
-	enemy := enemiesOf(snapshotWorld(s))[0]
-	p.queueCharacterContact(enemy)
-	for i := 0; i < 300; i++ {
-		s.Step()
-		assertStoreMatchesWorld(t, s)
+	if s.score[0].Kills != 1 || s.score[1].Deaths != 1 {
+		t.Fatalf("本段应走完一次击杀：kills=%d deaths=%d", s.score[0].Kills, s.score[1].Deaths)
 	}
 }
 
-// 波次推进：击杀全场敌人 -> 清波 waveDelayTicks 后刷出新的一波（会新建实体）。
-// 单独成测是因为「真的把敌人打死」需要 enemyHealth 次命中；waveSystem 的
-// wave++ 与运行期的 spawnEnemy 只有走到这里才会被覆盖到。
-func TestStoreMatchesWorldAcrossWaveAdvance(t *testing.T) {
+// 分出胜负：Game.Winner 是**全局单例**上的属性，只有真的有人打到 killTarget 才会
+// 被 Set 一次；不单独跑这一条，漏写那个 rep.Set 不会被发现。
+func TestStoreMatchesWorldWhenMatchEnds(t *testing.T) {
 	s, p := newTestSim(t)
-	before := s.wave
+	s.score[0] = PlayerScore{Kills: int32(killTarget - 1)}
+	s.replicateScore(0, s.score[0])
 
-	for _, e := range enemiesOf(snapshotWorld(s)) {
-		for hit := 0; hit < enemyHealth; hit++ {
-			proj := s.Shoot(shoot0(), [3]float32{1, 0, 0})
-			p.queueContact(proj, e)
-			s.Step()
-			assertStoreMatchesWorld(t, s)
-		}
-	}
-
-	for i := 0; i < waveDelayTicks+10; i++ {
+	for i := 0; i < killsToDie(); i++ {
+		proj := s.Shoot(0, shoot0(), [3]float32{1, 0, 0})
+		p.queueContact(proj, uint32(s.hitboxes[1]))
 		s.Step()
 		assertStoreMatchesWorld(t, s)
 	}
-	if s.wave <= before {
-		t.Fatalf("清波后应刷出新的一波（否则运行期 spawnEnemy 与 wave++ 都没被覆盖），wave 仍是 %d", s.wave)
+
+	if s.winner != 0 {
+		t.Fatalf("应判 0 号获胜，得到 %d", s.winner)
+	}
+
+	// 结算后到自动重开之间的每一帧都要保持一致（重开会整体重建世界）。
+	for i := 0; i < matchOverTicks+3; i++ {
+		s.Step()
+		assertStoreMatchesWorld(t, s)
+	}
+	if s.winner != -1 {
+		t.Fatalf("超时后应已自动重开，得到 winner=%d", s.winner)
 	}
 }
 
@@ -290,23 +285,20 @@ func TestDeltaStreamRebuildsFullState(t *testing.T) {
 		applyFrame(s.DrainFrame())
 	}
 
-	// 「只销毁、不重建」的帧——生产里最常见的路径（弹丸过期、金币被拾取、
-	// 敌人被击杀），而下面 Reset 那条路径只会产生 destroy+set。
+	// 「只销毁、不重建」的帧——生产里最常见的路径（弹丸过期、打中场景几何）。
 	// 不单独走一遍的话，客户端就算完全忽略 destroy 也测不出来。
-	doomed := enemiesOf(snapshotWorld(s))[0]
+	doomed := s.Shoot(0, shoot0(), [3]float32{1, 0, 0})
+	s.Step()
+	applyFrame(s.DrainFrame())
 	if _, seen := storeAttrsOf(client)[doomed]; !seen {
-		t.Fatalf("客户端本应已收到敌人 %d，否则这个用例覆盖不到销毁", doomed)
+		t.Fatalf("客户端本应已收到弹丸 %d，否则这个用例覆盖不到销毁", doomed)
 	}
-	for _, e := range enemiesOf(snapshotWorld(s)) {
-		for hit := 0; hit < enemyHealth; hit++ {
-			proj := s.Shoot(shoot0(), [3]float32{1, 0, 0})
-			p.queueContact(proj, e)
-			s.Step()
-			applyFrame(s.DrainFrame())
-		}
-	}
+	deck := snapshotWorld(s).Bodies[0].ID
+	p.queueContact(doomed, deck)
+	s.Step()
+	applyFrame(s.DrainFrame())
 	if attrs, still := storeAttrsOf(client)[doomed]; still {
-		t.Fatalf("敌人 %d 已被击杀，客户端 store 里不应还有它：%+v", doomed, attrs)
+		t.Fatalf("弹丸 %d 已被销毁，客户端 store 里不应还有它：%+v", doomed, attrs)
 	}
 
 	// 场景重建走的是「所有旧实体各发一条 destroy、随后整体重建」的路径，

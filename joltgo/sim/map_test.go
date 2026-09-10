@@ -40,16 +40,6 @@ func TestShipMapIsSymmetric(t *testing.T) {
 			t.Fatalf("胶囊 %+v 缺少 180° 旋转孪生体（地图左右不对称）", c)
 		}
 	}
-
-	tgt := map[[3]int]int{}
-	for _, p := range shipTargets {
-		tgt[[3]int{q(p[0]), q(p[1]), q(p[2])}]++
-	}
-	for _, p := range shipTargets {
-		if tgt[[3]int{q(-p[0]), q(p[1]), q(-p[2])}] == 0 {
-			t.Fatalf("靶球 %v 缺少 180° 旋转孪生体（地图左右不对称）", p)
-		}
-	}
 }
 
 // TestShipMapHullEnclosesDeck 验证甲板被船体完整围住：外板内侧面贴住甲板边缘
@@ -101,6 +91,8 @@ func TestShipMapHullEnclosesDeck(t *testing.T) {
 }
 
 // TestShipMapSpawnsClear 验证两个出生点既不卡在掩体里，也在甲板范围内。
+// 出生点同时是复活点（PVP 里每局会反复用到），所以这条断言直接决定「复活会不会
+// 卡进集装箱」。
 func TestShipMapSpawnsClear(t *testing.T) {
 	for i := 0; i < MaxPlayers; i++ {
 		x, z := playerSpawnXZ(i)
@@ -178,57 +170,20 @@ func TestShipMapCatwalksReachable(t *testing.T) {
 	}
 }
 
-// TestShipMapEnemiesSpawnInClearDeck 验证刷怪永远落在干净的甲板上：不会卡进
-// 集装箱/桅杆，也不会贴着 0 号玩家刷出来。
-func TestShipMapEnemiesSpawnInClearDeck(t *testing.T) {
-	s, _ := newTestSim(t)
-	px, pz := playerSpawnXZ(0)
-
-	seen := 0
-	for round := 0; round < 60; round++ {
-		before := map[uint32]bool{}
-		for _, id := range enemiesOf(snapshotWorld(s)) {
-			before[id] = true
+// TestShipMapHitboxesSpawnClear 验证开局时两个命中盒（跟随玩家的静态胶囊）都不
+// 卡在掩体里：命中盒是弹丸的唯一判定体，埋进集装箱就意味着「人站在明处却打不中」，
+// 或者反过来在掩体后面还能被打中。
+func TestShipMapHitboxesSpawnClear(t *testing.T) {
+	s, p := newTestSim(t)
+	for i := 0; i < MaxPlayers; i++ {
+		pos := p.bodyPos(uint32(s.hitboxes[i]))
+		if mapBlocks(pos[0], pos[1], pos[2], characterRadius) {
+			t.Fatalf("%d 号命中盒开局卡进掩体：%v", i, pos)
 		}
-		s.spawnEnemy()
-		st := snapshotWorld(s)
-		for _, id := range enemiesOf(st) {
-			if before[id] {
-				continue // 本波已有的敌人，只看这次新刷出来的
-			}
-			seen++
-			var pos [3]float32
-			for _, b := range st.Bodies {
-				if b.ID == id {
-					pos = b.Pos
-				}
-			}
-			if mapBlocks(pos[0], pos[1], pos[2], enemyRadius) {
-				t.Fatalf("怪物刷进了掩体：%v", pos)
-			}
-			dx, dz := pos[0]-px, pos[2]-pz
-			if dx*dx+dz*dz < enemyFreeGap*enemyFreeGap {
-				t.Fatalf("怪物刷得离 0 号玩家太近（%.1fm）：%v",
-					math.Sqrt(float64(dx*dx+dz*dz)), pos)
-			}
-			if math.Abs(float64(pos[0])) > deckHalfX || math.Abs(float64(pos[2])) > deckHalfZ {
-				t.Fatalf("怪物刷到甲板之外：%v", pos)
-			}
-		}
-	}
-	if seen == 0 {
-		t.Fatal("没有观察到任何新刷出的怪物")
-	}
-}
-
-// TestShipMapResourcesNotInsideCover 验证金币不会刷进掩体（否则玩家拾不到）。
-func TestShipMapResourcesNotInsideCover(t *testing.T) {
-	for round := 0; round < 30; round++ {
-		s, _ := newTestSim(t)
-		for _, r := range snapshotWorld(s).Resources {
-			if mapBlocks(r.Pos[0], r.Pos[1], r.Pos[2], resourceSensorRadius) {
-				t.Fatalf("金币刷进了掩体（拾取不到）：%v", r.Pos)
-			}
+		// 高度必须与角色脚底一致（差一帧没跟上就会让「打头/打脚」的命中区域错位）。
+		want := p.characters[i].pos[1] + hitboxOffsetY
+		if math.Abs(float64(pos[1]-want)) > 1e-3 {
+			t.Fatalf("%d 号命中盒高度应为角色脚底 + %v = %v，得到 %v", i, hitboxOffsetY, want, pos)
 		}
 	}
 }

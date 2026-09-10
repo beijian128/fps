@@ -178,9 +178,10 @@ func (i *Instance) ApplyInput(playerIdx int, move [2]float32, yaw float32, jump 
 	})
 }
 
-// Shoot 发射弹丸（origin/dir 为枪口与朝向，归一化在 sim 内完成）。
-func (i *Instance) Shoot(origin, dir [3]float32) {
-	i.enqueue(func() { i.sim.Shoot(origin, dir) })
+// Shoot 发射弹丸（playerIdx 是发射者槽位，origin/dir 为枪口与朝向，
+// 归一化在 sim 内完成）。归属由服务端按会话查出，不信客户端上报的任何身份字段。
+func (i *Instance) Shoot(playerIdx int, origin, dir [3]float32) {
+	i.enqueue(func() { i.sim.Shoot(playerIdx, origin, dir) })
 }
 
 // Reset 重建对局场景。

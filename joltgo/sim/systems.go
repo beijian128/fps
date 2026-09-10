@@ -1,17 +1,14 @@
 package sim
 
 // 系统：每 tick 按固定顺序运行，只通过组件与 s.physics 交互。
-// 顺序：输入 → 物理步进 → 变换同步 → 弹丸命中 → 接触伤害 → 弹丸过期 →
-// 金币拾取 → 波次推进。
+// 顺序：输入 → 命中盒跟随 → 物理步进 → 变换同步 → 弹丸命中 → 弹丸过期 → 对局结算。
 //
-// 碰撞判定全部走物理层，不做距离计算：
-//   - 贴身伤害：角色控制器的接触事件（CharacterContactListener，每步接触求解
-//     触发），碰到的刚体里带 Enemy 组件的才扣血
-//   - 金币拾取：金币是 Jolt 传感器球（不与刚体碰撞），角色接触到即拾取
-//   - 弹丸命中：刚体接触事件（ContactListener），带 Projectile 组件的才结算
+// 碰撞判定全部走物理层，不做距离计算：弹丸命中靠刚体接触事件（ContactListener），
+// 打中的是跟随玩家的**命中盒刚体**——玩家本体是 Jolt 角色控制器（不是刚体），
+// 弹丸（动态刚体 + CCD）既看不见它、也不会与它产生刚体接触事件。
 //
-// 变换同步（syncSystem）每 tick 只做一次，放在物理步进之后：弹丸掉落位置、
-// 刷怪位置、快照读取的都是本 tick 步进后的位置。
+// 变换同步（syncSystem）每 tick 只做一次，放在物理步进之后：弹丸位置、快照读取
+// 的都是本 tick 步进后的位置。
 
 import (
 	"joltgo/ecs"
@@ -57,19 +54,40 @@ func (s *Simulation) inputSystem() {
 	}
 }
 
+// hitboxFollowSystem 把每个玩家的命中盒刚体贴到该玩家的角色位置。
+//
+// 必须在物理步进**之前**运行：弹丸的接触判定用的是步进开始时的刚体位置，晚一步
+// 贴就等于拿上一 tick 的旧位置去判定命中（跑动时角色每 tick 挪 0.7 m，会打空）。
+func (s *Simulation) hitboxFollowSystem() {
+	for i := 0; i < MaxPlayers; i++ {
+		if s.hitboxes[i] == ecs.InvalidEntity {
+			continue
+		}
+		p := s.physics.CharacterPosition(i)
+		s.physics.SetBodyPosition(uint32(s.hitboxes[i]), p[0], p[1]+hitboxOffsetY, p[2])
+	}
+}
+
 // syncSystem 把物理世界的最新变换写回组件与同步 store，是 Go 侧与 Jolt 之间
-// 唯一的每 tick 枚举点（旧实现每个系统各自枚举一遍）。
+// 唯一的每 tick 枚举点。
 //
 // Sync 每 tick 会把全部刚体（含永不变化的静态几何）回调一遍，这里照旧全部 Set：
 // Store 与「上一次下发值」比较后不标脏，所以静态几何不会产生任何流量。
+//
+// 没有 Body 组件的刚体（玩家命中盒）直接跳过：它在 ECS 里只是「一个能被认出的
+// 碰撞体」，不是可渲染实体——照发 Pos/Rot 就是每 tick 推一对没人看的属性。
 func (s *Simulation) syncSystem() {
 	s.physics.Sync(func(id uint32, active bool, pos [3]float32, quat [4]float32) {
 		e := ecs.Entity(id)
+		b, ok := ecs.Get[Body](s.world, e)
+		if !ok {
+			return
+		}
 		ecs.Add(s.world, e, Position(pos))
 		ecs.Add(s.world, e, Rotation(quat))
 		s.rep.Set(id, attrPos, replication.Vec3(pos[0], pos[1], pos[2]))
 		s.rep.Set(id, attrRot, replication.Vec4(quat[0], quat[1], quat[2], quat[3]))
-		if b, ok := ecs.Get[Body](s.world, e); ok && b.Active != active {
+		if b.Active != active {
 			b.Active = active
 			s.rep.Set(id, attrBodyActive, replication.Bool(active))
 		}
@@ -82,8 +100,8 @@ func (s *Simulation) syncSystem() {
 }
 
 // projectileSystem 从物理层拿到的「全部接触事件」里挑出与弹丸有关的进行结算：
-// 靶球摧毁得分；敌人扣血，血尽死亡并掉落金币；命中其他物体仅移除弹丸。
-// 箱子落地、敌人相撞等无关接触在这里被忽略。
+// 打中别人的命中盒 → 扣血、血尽则结算击杀；命中其他任何刚体 → 仅移除弹丸。
+// 箱子落地、命中盒彼此不接触等无关接触在这里被忽略。
 func (s *Simulation) projectileSystem() {
 	for _, c := range s.physics.PollContacts() {
 		a, b := ecs.Entity(c.BodyA), ecs.Entity(c.BodyB)
@@ -96,78 +114,76 @@ func (s *Simulation) projectileSystem() {
 		default:
 			continue // 与弹丸无关的接触
 		}
-		if !ecs.Has[Body](s.world, proj) {
+		p, ok := ecs.Get[Projectile](s.world, proj)
+		if !ok {
 			continue // 同一弹丸的多条接触记录只结算一次
 		}
-		if !ecs.Has[Body](s.world, other) {
-			continue
+		hb, isHitbox := ecs.Get[PlayerHitbox](s.world, other)
+		if !isHitbox && !ecs.Has[Body](s.world, other) {
+			continue // 另一方既不是命中盒也不是实体刚体（例如已销毁）
 		}
-		if ecs.Has[Resource](s.world, other) {
-			continue // 传感器球（金币）不挡弹丸：弹丸直接穿过，双方保留
+		// 先把要用的值拷出来再销毁弹丸：ecs.Get 返回的指针与 archetype 存储共用内存，
+		// Destroy 的 swap-remove 会把它指的内容挪走（见 AGENTS.md「ECS 使用约束」）。
+		owner := p.Owner
+		victim := -1
+		if isHitbox {
+			victim = hb.Idx
+		}
+		if isHitbox && victim == owner {
+			// 打中自己的命中盒：既不扣血，也**不**吃掉这颗弹丸。枪口位置由客户端上报，
+			// 贴脸或低头时完全可能落在自己的盒里——那是枪口在体内，不是自伤。
+			continue
 		}
 		s.destroyBody(proj)
 		if ecs.Has[Projectile](s.world, other) {
-			continue // 弹丸互撞：移除当前弹丸，无得分
+			continue // 弹丸互撞：移除当前弹丸，不计伤害
 		}
-		switch {
-		case ecs.Has[Target](s.world, other):
-			s.destroyBody(other)
-			s.score++
-			s.syncGameState()
-			s.rep.Set(uint32(s.game), attrGameScore, replication.I32(int32(s.score)))
-		case ecs.Has[Enemy](s.world, other):
-			hp, ok := ecs.Get[Health](s.world, other)
-			if !ok {
-				continue
-			}
-			*hp--
-			s.rep.Set(uint32(other), attrHealth, replication.F32(float32(*hp)))
-			if *hp <= 0 {
-				if pos, ok := ecs.Get[Position](s.world, other); ok {
-					s.dropResource(*pos) // 击杀掉落金币
-				}
-				s.destroyBody(other)
-				s.score++
-				s.syncGameState()
-				s.rep.Set(uint32(s.game), attrGameScore, replication.I32(int32(s.score)))
-			}
+		if isHitbox {
+			s.hitPlayer(victim, owner)
 		}
 	}
 }
 
-// enemyDamageSystem 敌人接触伤害：从每个角色的接触事件里找出敌人（接触求解每步
-// 触发，同一敌人每 tick 每角色只结算一次），低难度每 tick 每只扣 0.4 点；
-// 玩家血尽复活。
-func (s *Simulation) enemyDamageSystem(contacts [MaxPlayers][]uint32) {
-	for i := 0; i < MaxPlayers; i++ {
-		hp, ok := ecs.Get[Health](s.world, s.players[i])
-		if !ok {
-			continue
-		}
-		touched := map[uint32]bool{}
-		for _, id := range contacts[i] {
-			e := ecs.Entity(id)
-			if touched[id] || !ecs.Has[Enemy](s.world, e) {
-				continue
-			}
-			touched[id] = true
-			*hp -= enemyDamage
-			s.rep.Set(uint32(s.players[i]), attrHealth, replication.F32(float32(*hp)))
-		}
-		if *hp <= 0 {
-			*hp = 100
-			// 立即复活到出生点并清零速度；同时把 Position 组件同步为出生点，
-			// 避免当 tick 快照出现"满血却还站在死亡点"的不一致（syncSystem 要到
-			// 下个 tick 才会回写角色位置）。
-			x, z := playerSpawnXZ(i)
-			s.physics.SetCharacterPosition(i, x, playerSpawnY, z)
-			s.physics.SetCharacterVelocity(i, [3]float32{0, 0, 0})
-			ecs.Add(s.world, s.players[i], Position{x, playerSpawnY, z})
-			// 复活也是「本 tick 内的变更」：血量与位置都要立刻同步，否则客户端会
-			// 看到满血却仍留在死亡点（与上面组件的理由相同）。
-			s.rep.Set(uint32(s.players[i]), attrHealth, replication.F32(100))
-			s.rep.Set(uint32(s.players[i]), attrPos, replication.Vec3(x, playerSpawnY, z))
-		}
+// hitPlayer 结算一次命中：victim 扣血；血尽则由 killer 记一次击杀、victim 记一次
+// 死亡并在己方出生点满血复活。
+func (s *Simulation) hitPlayer(victim, killer int) {
+	if victim < 0 || victim >= MaxPlayers {
+		return
+	}
+	hp, ok := ecs.Get[Health](s.world, s.players[victim])
+	if !ok {
+		return
+	}
+	*hp -= playerHitDamage
+	if *hp > 0 {
+		s.rep.Set(uint32(s.players[victim]), attrHealth, replication.F32(float32(*hp)))
+		return
+	}
+	if killer >= 0 && killer < MaxPlayers && killer != victim {
+		s.score[killer].Kills++
+		s.replicateScore(killer, s.score[killer])
+	}
+	s.score[victim].Deaths++
+	s.replicateScore(victim, s.score[victim])
+	s.respawn(victim)
+}
+
+// respawn 把玩家就地复活：回满血、回己方出生点、速度清零。
+// 组件与同步 store 都立刻写 —— 快照在同一个 tick 里就要反映复活结果，否则客户端
+// 会看到「满血却还站在死亡点」。
+func (s *Simulation) respawn(idx int) {
+	x, z := playerSpawnXZ(idx)
+	s.physics.SetCharacterPosition(idx, x, playerSpawnY, z)
+	s.physics.SetCharacterVelocity(idx, [3]float32{0, 0, 0})
+	ecs.Add(s.world, s.players[idx], Health(playerMaxHealth))
+	ecs.Add(s.world, s.players[idx], Position{x, playerSpawnY, z})
+	s.rep.Set(uint32(s.players[idx]), attrHealth, replication.F32(playerMaxHealth))
+	s.rep.Set(uint32(s.players[idx]), attrPos, replication.Vec3(x, playerSpawnY, z))
+	// 命中盒一并搬回出生点：它要到下一 tick 的 hitboxFollowSystem 才跟随角色，而
+	// 死者的命中盒若留在原地，本 tick 之后飞来的弹丸还会打中「已经复活在别处的
+	// 人」——既多扣一次血，也让命中盒与角色脱节一整帧。
+	if s.hitboxes[idx] != ecs.InvalidEntity {
+		s.physics.SetBodyPosition(uint32(s.hitboxes[idx]), x, playerSpawnY+hitboxOffsetY, z)
 	}
 }
 
@@ -184,81 +200,24 @@ func (s *Simulation) expireProjectilesSystem() {
 	}
 }
 
-// resourceSystem 金币拾取：角色接触到金币传感器球即拾取（物理接触判定，
-// 由角色接触事件驱动，不做距离计算）。任一玩家接触都拾取。
-func (s *Simulation) resourceSystem(contacts [MaxPlayers][]uint32) {
+// matchSystem 对局结算：某一方击杀数先到 killTarget 即分出胜负（写 Game.Winner），
+// 再过 matchOverTicks（5 秒）自动重开一局。重开直接走 Reset —— 整张场景（箱子被
+// 推乱、弹丸还在飞）都要一并复位，比「只清计数」多不了几行，但不会留下残局。
+func (s *Simulation) matchSystem() {
+	if s.winner >= 0 {
+		if s.step-s.overAt >= matchOverTicks {
+			s.reset()
+		}
+		return
+	}
 	for i := 0; i < MaxPlayers; i++ {
-		for _, id := range contacts[i] {
-			e := ecs.Entity(id)
-			r, ok := ecs.Get[Resource](s.world, e)
-			if !ok || r.Kind != 0 {
-				continue
-			}
-			s.gold++
-			s.syncGameState()
-			s.rep.Set(uint32(s.game), attrGameGold, replication.I32(int32(s.gold)))
-			s.destroyBody(e) // 移除传感器刚体并销毁实体
-		}
-	}
-}
-
-// waveSystem 波次推进：场上清空 2 秒后刷下一波。
-// 数量规则与文档一致：第 1 波 initialEnemies 只（3），之后每波 +1，封顶
-// maxEnemiesPerWave（即 3,4,5,6,6,…）。
-func (s *Simulation) waveSystem() {
-	if ecs.Count[Enemy](s.world) > 0 {
-		s.waveClearStep = 0
-		return
-	}
-	if s.waveClearStep == 0 {
-		s.waveClearStep = s.step
-		return
-	}
-	if s.step-s.waveClearStep < waveDelayTicks {
-		return
-	}
-	s.wave++
-	s.syncGameState()
-	s.rep.Set(uint32(s.game), attrGameWave, replication.I32(int32(s.wave)))
-	n := initialEnemies + (s.wave - 1)
-	if n > maxEnemiesPerWave {
-		n = maxEnemiesPerWave
-	}
-	for i := 0; i < n; i++ {
-		s.spawnEnemy()
-	}
-	s.waveClearStep = 0
-}
-
-// spawnEnemy 在离 0 号玩家 10m 外的随机甲板位置刷一只怪物。怪物没有移动逻辑：
-// 是静态刚体（固定哨兵），不可被推动、不参与重力结算，贴身才造成伤害。
-// 刷点必须避开掩体（mapBlocks）——否则怪物会卡在集装箱里，玩家打不到也碰不着。
-func (s *Simulation) spawnEnemy() {
-	var player [3]float32
-	if p, ok := ecs.Get[Position](s.world, s.players[0]); ok {
-		player = *p
-	}
-	spawn := func(x, z float32) {
-		id := s.physics.AddCapsule(x, enemySpawnY, z, enemyHalfHeight, enemyRadius, MotionStatic)
-		e := s.registerBody(id, BodyCapsule, [3]float32{enemyRadius, enemyHalfHeight, 0}, true, [3]float32{x, enemySpawnY, z}, MatDefault)
-		ecs.Add2(s.world, e, Enemy{}, Health(enemyHealth))
-		// 标记与初始血量只在刷怪时确定一次（之后血量由 projectileSystem 维护）。
-		s.rep.Set(uint32(e), attrEnemy, replication.Bool(true))
-		s.rep.Set(uint32(e), attrHealth, replication.F32(enemyHealth))
-	}
-	for attempt := 0; attempt < 48; attempt++ {
-		x := randRange(-deckHalfX+1, deckHalfX-1)
-		z := randRange(-deckHalfZ+1, deckHalfZ-1)
-		dx := x - player[0]
-		dz := z - player[2]
-		if dx*dx+dz*dz < enemyFreeGap*enemyFreeGap {
+		if s.score[i].Kills < killTarget {
 			continue
 		}
-		if mapBlocks(x, enemySpawnY, z, enemyRadius) {
-			continue
-		}
-		spawn(x, z)
+		s.winner = int32(i)
+		s.overAt = s.step
+		s.syncGameState()
+		s.rep.Set(uint32(s.game), attrGameWinner, replication.I32(s.winner))
 		return
 	}
-	spawn(0, -12) // 兜底：甲板中央通道（该处无掩体）
 }

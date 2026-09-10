@@ -35,14 +35,12 @@ const (
 	MatStairs     Material = 11 // 舷梯踏步
 )
 
-// 场景尺寸常量（供刷怪/刷资源与测试引用，避免各处写死坐标）。
+// 场景尺寸常量（供测试与角色出生点引用，避免各处写死坐标）。
 const (
-	deckHalfX    = 13.0 // 甲板半宽（x ∈ [-13, 13]）
-	deckHalfZ    = 22.0 // 甲板半长（z ∈ [-22, 22]）
-	spawnZ       = 18.0 // 两个出生点到中心的纵向距离
-	catwalkTop   = 2.4  // 高架走道面高度
-	spawnFreeGap = 4.0  // 资源离出生点的最小距离
-	enemyFreeGap = 10.0 // 敌人离 0 号玩家的最小距离
+	deckHalfX  = 13.0 // 甲板半宽（x ∈ [-13, 13]）
+	deckHalfZ  = 22.0 // 甲板半长（z ∈ [-22, 22]）
+	spawnZ     = 18.0 // 两个出生点到中心的纵向距离
+	catwalkTop = 2.4  // 高架走道面高度
 )
 
 // scenePos 是场景数据表里的一个坐标（x, y, z）。
@@ -148,18 +146,11 @@ var deckCratePositions = []scenePos{
 	{9.4, 0.5, 12.0}, {-9.4, 0.5, -12.0},
 }
 
-// ---- 悬浮靶球（可破坏，静态球） ----
-
-var deckTargetPositions = []scenePos{
-	{0, 3.2, -11}, {7, 2.8, -6}, {-7, 2.8, -6}, {4, 4.2, -3.5},
-}
-
-// shipBoxParts / shipCapsuleParts / shipTargets 是展开镜像与台阶后的最终部件表，
+// shipBoxParts / shipCapsuleParts 是展开镜像与台阶后的最终部件表，
 // 也是场景刚体数量的唯一来源（测试直接引用，不再手写期望值）。
 var (
 	shipBoxParts     = expandShipBoxes()
 	shipCapsuleParts = expandShipCapsules()
-	shipTargets      = expandShipTargets()
 )
 
 func mirrorBox(b shipBox) shipBox { b.x, b.z, b.mirror = -b.x, -b.z, false; return b }
@@ -215,18 +206,10 @@ func expandShipCapsules() []shipCapsule {
 	return out
 }
 
-func expandShipTargets() []scenePos {
-	out := make([]scenePos, 0, 8)
-	// 只写半边，孪生体由 180° 旋转补齐（同一条中线上的靶球写成两份）。
-	for _, t := range deckTargetPositions {
-		out = append(out, t, scenePos{-t[0], t[1], -t[2]})
-	}
-	return out
-}
-
 // mapBlocks 报告以 (x,y,z) 为中心、半径 margin 的球体是否与场景静态几何相交。
-// 刷怪 / 刷金币用它避免把实体塞进集装箱里（否则怪物卡在掩体中、金币无法拾取）。
-// 这是纯 Go 的几何判定，不依赖物理引擎，可在单测里直接验证。
+// 场景里没有运行期随机撒点（出生/复活点都是固定的、由 map_test.go 断言其畅通），
+// 所以这里是**地图自检**用的几何查询：改部件表后用 test 直接验「这个位置塞不塞得下
+// 一个半径 margin 的球」，而不必起物理引擎。
 func mapBlocks(x, y, z, margin float32) bool {
 	for _, b := range shipBoxParts {
 		if x > b.x-b.hx-margin && x < b.x+b.hx+margin &&

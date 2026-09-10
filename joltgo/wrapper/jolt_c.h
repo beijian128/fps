@@ -68,6 +68,7 @@ int jolt_get_body_transform(JoltWorld *w, uint32_t body_id, float *out_pos, floa
 int jolt_is_body_active(JoltWorld *w, uint32_t body_id);
 
 /* 修改刚体（对应 Jolt BodyInterface 的 Set 系列）。 */
+void jolt_set_body_position(JoltWorld *w, uint32_t body_id, float x, float y, float z);
 void jolt_set_body_velocity(JoltWorld *w, uint32_t body_id, float vx, float vy, float vz);
 void jolt_set_body_friction(JoltWorld *w, uint32_t body_id, float friction);
 void jolt_set_body_restitution(JoltWorld *w, uint32_t body_id, float restitution);
@@ -99,6 +100,13 @@ int jolt_character_create(JoltWorld *w, int char_idx, float half_height, float r
    静态几何不受影响。按 char_idx 指定角色。 */
 void jolt_character_set_dynamic_push(JoltWorld *w, int char_idx, int allow);
 
+/* 让指定角色忽略某个刚体：该刚体对它既不成障碍，也不产生接触事件（对应 Jolt
+   CharacterContactListener::OnContactValidate 返回 false）。用于跟随角色的命中盒
+   一类刚体——它们会落在角色正前方（对方玩家的命中盒是隐形墙；自己的命中盒每 tick
+   才跟随一次，角色一 tick 的位移可能把它甩到身前），Jolt 会把角色速度清零。
+   幂等；只影响该角色，多个角色各自登记。 */
+void jolt_character_ignore_body(JoltWorld *w, int char_idx, uint32_t body_id);
+
 void jolt_character_get_position(JoltWorld *w, int char_idx, float *out_xyz);
 void jolt_character_set_position(JoltWorld *w, int char_idx, float x, float y, float z);
 void jolt_character_get_velocity(JoltWorld *w, int char_idx, float *out_xyz);
@@ -111,11 +119,6 @@ int jolt_character_get_ground_state(JoltWorld *w, int char_idx);
 /* ExtendedUpdate：按世界重力推进角色一步（移动速度请先通过
    jolt_character_set_velocity 设置）。 */
 void jolt_character_update(JoltWorld *w, int char_idx, float dt);
-
-/* 取走本 tick 指定角色接触到的刚体 id（接触建立时 + 每步接触求解时都会记录，
-   同一刚体可能出现多次；单线程调用）。每次取最多 max_ids 条，剩余留待下次，
-   Go 侧循环取到 0 即排空并自行去重。 */
-uint32_t jolt_character_poll_contacts(JoltWorld *w, int char_idx, uint32_t *out_ids, uint32_t max_ids);
 
 #ifdef __cplusplus
 }

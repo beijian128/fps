@@ -9,19 +9,18 @@ extends SceneTree
 const SCHEMA := [
 	{"id": 1, "name": "Pos", "kind": 5},
 	{"id": 2, "name": "Health", "kind": 0},
-	{"id": 3, "name": "Enemy", "kind": 2},
+	{"id": 3, "name": "Projectile", "kind": 2},
 	{"id": 4, "name": "Body.Mat", "kind": 1},
 	{"id": 5, "name": "Body.Kind", "kind": 1},
 	{"id": 6, "name": "Body.Size", "kind": 5},
 	{"id": 7, "name": "Body.Static", "kind": 2},
 	{"id": 8, "name": "Body.Active", "kind": 2},
 	{"id": 9, "name": "Rot", "kind": 6},
-	{"id": 10, "name": "Resource.Kind", "kind": 1},
+	{"id": 10, "name": "Game.Winner", "kind": 1},
 	{"id": 11, "name": "Player.Idx", "kind": 1},
-	{"id": 12, "name": "Game.Score", "kind": 1},
-	{"id": 13, "name": "Game.Wave", "kind": 1},
-	{"id": 14, "name": "Game.Gold", "kind": 1},
-	{"id": 15, "name": "Facing", "kind": 0},
+	{"id": 12, "name": "Player.Kills", "kind": 1},
+	{"id": 13, "name": "Player.Deaths", "kind": 1},
+	{"id": 14, "name": "Facing", "kind": 0},
 ]
 
 # 用例完成标记。GDScript 无 try/catch：某个测试函数中途抛错会静默返回、_failures 仍为 0，
@@ -46,7 +45,7 @@ func _run() -> void:
 	_test_last_write_in_frame_is_interpolated()
 	_test_local_player_and_remote_yaw_interpolated()
 	_test_render_interpolated_is_idempotent()
-	_test_coin_has_no_extra_body()
+	_test_hud_reads_pvp_attrs()
 	_test_destroy_for_unknown_id_is_safe()
 	for name: String in ["full", "delta", "interp_node", "interp_player", "idempotent", "coin", "unknown"]:
 		if not _done.has(name):
@@ -81,13 +80,17 @@ func _body_attrs(kind: int, size: Array, pos: Vector3, mat: int = 1) -> Array:
 		_attr(9, {"f": [0.0, 0.0, 0.0, 1.0]}),        # Rot
 	]
 
-## 玩家实体属性：刚体属性之外再带 Player.Idx / Health / Facing。
+## 玩家实体属性：刚体属性之外再带 Player.Idx / Health / Facing / Player.Kills /
+## Player.Deaths（服务端声明并初始化时就会下发这五项）。
 ## 必须带全刚体属性 —— _refresh_derived 会把它们当刚体渲染，_build_body_dict 会逐项取用。
-func _player_attrs(idx: int, pos: Vector3, facing: float) -> Array:
+func _player_attrs(idx: int, pos: Vector3, facing: float,
+		hp := 100.0, kills := 0, deaths := 0) -> Array:
 	var out := _body_attrs(0, [0.4, 1.8, 0.4], pos, 0)
 	out.append(_attr(11, {"i": idx}))                 # Player.Idx
-	out.append(_attr(2, {"f": [100.0]}))              # Health
-	out.append(_attr(15, {"f": [facing]}))            # Facing
+	out.append(_attr(2, {"f": [hp]}))                 # Health
+	out.append(_attr(14, {"f": [facing]}))            # Facing
+	out.append(_attr(12, {"i": kills}))               # Player.Kills
+	out.append(_attr(13, {"i": deaths}))              # Player.Deaths
 	return out
 
 ## 一帧只含一个刚体（id 100）。
@@ -159,7 +162,7 @@ func _test_local_player_and_remote_yaw_interpolated() -> void:
 		{"id": 300, "set": [_attr(1, {"f": [local_b.x, local_b.y, local_b.z]})]},
 		{"id": 301, "set": [
 			_attr(1, {"f": [remote_b.x, remote_b.y, remote_b.z]}),
-			_attr(15, {"f": [PI]}),
+			_attr(14, {"f": [PI]}),
 		]},
 	]})
 	var d_local_a: float = (_main._player_pos - local_a).length()
@@ -207,19 +210,43 @@ func _test_render_interpolated_is_idempotent() -> void:
 		"alpha≈0.5 时玩家位置应离开 raw target (0,0.2,10)；实际 %s" % first)
 	_done["idempotent"] = true
 
-## 金币在 store 里是普通刚体，但**不该**额外长出一个灰色的刚体球。
-func _test_coin_has_no_extra_body() -> void:
+## HUD 读数全部走属性名：本机战绩挂在玩家实体上（Player.Kills / Player.Deaths），
+## 对局结果是全局单例上的 Game.Winner。这几条属性名写错不会报错、只会显示成恒定值，
+## 所以在这里钉住。
+func _test_hud_reads_pvp_attrs() -> void:
+	# 300 是本机（player_idx 0）、301 是对手；400 是全局单例。
 	_main._on_frame({"full": false, "entities": [
-		{"id": 200, "set": [
-			_attr(5, {"i": 1}), _attr(6, {"f": [0.6]}), _attr(7, {"b": true}),
-			_attr(8, {"b": true}), _attr(4, {"i": 0}),
-			_attr(1, {"f": [0.0, 0.8, 0.0]}), _attr(9, {"f": [0.0, 0.0, 0.0, 1.0]}),
-			_attr(10, {"i": 0}),                      # Resource.Kind
-		]},
+		{"id": 300, "set": _player_attrs(0, Vector3(0, 0.2, 18), 0.0, 66.0, 4, 2)},
+		{"id": 301, "set": _player_attrs(1, Vector3(0, 0.2, -18), PI, 32.0)},
+		{"id": 400, "set": [_attr(10, {"i": -1})]},   # Game.Winner
 	]})
-	_check(not _main._entities.has(200), "金币不应被当成刚体建出额外节点")
-	_check(_main._res_nodes.has(200), "金币应建出金币节点")
+	_check(_main._hud_kills == 4, "HUD 击杀数应取本机 Player.Kills，得到 %d" % _main._hud_kills)
+	_check(_main._hud_deaths == 2, "HUD 死亡数应取本机 Player.Deaths，得到 %d" % _main._hud_deaths)
+	_check(absf(_main._hud_opp_health - 32.0) < 0.01,
+		"HUD 对手血量应取另一名玩家的 Health，得到 %s" % _main._hud_opp_health)
+	_check(absf(_main.health_bar.value - 66.0) < 0.01,
+		"血条应取本机 Health，得到 %s" % _main.health_bar.value)
+	_check(_main._hud_winner == -1, "winner=-1 表示进行中，得到 %d" % _main._hud_winner)
+	_check(_main._match_over_text() == "", "进行中不应有结果文案")
+
+	# 分出胜负：0 号获胜 → 本机（0 号）看到 YOU WIN。
+	_main._on_frame({"full": false, "entities": [_attr_entity(400, _attr(10, {"i": 0}))]})
+	_check(_main._hud_winner == 0, "HUD 应读到大局已定，得到 %d" % _main._hud_winner)
+	_check(_main._match_over_text() == "YOU WIN\n",
+		"本机获胜应显示 YOU WIN，得到 %s" % _main._match_over_text())
+	# 战绩属性不该让玩家实体多长出一个刚体节点（玩家由 Avatar 渲染，
+	# _refresh_derived 只把带 Body.Kind 的实体算作刚体）。
+	var player_nodes := 0
+	for id: Variant in _main._entities:
+		if int(id) == 300 or int(id) == 301:
+			player_nodes += 1
+	_check(player_nodes == 2, "玩家实体应各有一个刚体渲染节点，得到 %d" % player_nodes)
 	_done["coin"] = true
+
+
+## _attr_entity 包一个只带单个属性的实体增量。
+func _attr_entity(id: int, av: Dictionary) -> Dictionary:
+	return {"id": id, "set": [av]}
 
 ## 服务端可能对客户端从未见过的 id 发 destroy（比如客户端刚 resync 完）。
 ## 真正的断言是「没抛错」—— 由上面的 _done 完成标记保证（抛错就到不了这一行）。

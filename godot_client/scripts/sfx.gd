@@ -14,7 +14,6 @@ func _ready() -> void:
 		"destroy": _tone(500.0, 0.22, Wave.SAW, 0.2, 90.0),
 		"jump": _tone(250.0, 0.14, Wave.SINE, 0.12, 500.0),
 		"damage": _tone(120.0, 0.18, Wave.SAW, 0.2, 60.0),
-		"pickup": _tone(880.0, 0.16, Wave.SINE, 0.22, 1520.0),
 	}
 	for key in defs:
 		var p := AudioStreamPlayer.new()

@@ -60,9 +60,9 @@ var _prev_remote_yaw := 0.0
 var _remote_yaw_target := 0.0
 var _frame_time := 0.0     # 本帧到达时间（秒），插值 alpha 的基准
 
-# 实体缓存：id -> BodyEntity；金币：id -> {node, base}
+# 渲染层自己的插值状态：id -> {"pos","quat"}（上一帧的变换），以及本帧到达时间。
+# 实体缓存：id -> BodyEntity（可渲染刚体，按 Body.Kind 建节点）。
 var _entities := {}
-var _res_nodes := {}
 
 var _player_pos := Vector3(0, 0.2, 18)
 var _remote_pos := Vector3(0, 0.2, -18)
@@ -84,13 +84,13 @@ var _pending_reset := false
 var _reset_pending := false
 
 var _fps_ema := 60.0
-var _hud_score := 0
-var _hud_wave := 1
-var _hud_gold := 0
-var _hud_targets := 0
-var _hud_enemies := 0
-var _last_score := 0
+# HUD 读数：本机战绩 + 对手血量 + 对局结果（全部从 store 的属性名读，见 _update_hud）。
+var _hud_kills := 0
+var _hud_deaths := 0
+var _hud_opp_health := 100.0
+var _hud_winner := -1
 var _last_health := 100.0
+var _last_opp_health := 100.0
 var _hit_flash: ColorRect
 # 自动化测试钩子：无头环境无法真正捕获鼠标，设置该环境变量后视作已捕获。
 var _capture_override := OS.get_environment("JOLT_FORCE_CAPTURE") != ""
@@ -128,9 +128,6 @@ func _on_connection(connected: bool) -> void:
 		_reset_pending = false
 		_store.clear()
 		_reset_interp()
-		for id in _res_nodes:
-			_res_nodes[id]["node"].queue_free()
-		_res_nodes = {}
 		# 刚体渲染节点一并清空：重连前不知道哪些 id 还会复用，全部交给重连后的
 		# full 帧重新协调（_reset_interp 已清掉插值状态，首帧直接落位不跳变）。
 		for id in _entities:
@@ -171,10 +168,10 @@ func _process(delta: float) -> void:
 		_jump_held = false
 
 	_render_interpolated()
-	_anim_resources(delta)
 	_update_camera()
-	stat_label.text = "SCORE %d\nWAVE %d\nGOLD %d\nTARGETS %d\nENEMIES %d\nFPS %d" % [
-		_hud_score, _hud_wave, _hud_gold, _hud_targets, _hud_enemies, roundi(_fps_ema),
+	stat_label.text = "KILLS %d\nDEATHS %d\nHP %d\nOPP HP %d\n%sFPS %d" % [
+		_hud_kills, _hud_deaths, roundi(_last_health), roundi(_hud_opp_health),
+		_match_over_text(), roundi(_fps_ema),
 	]
 
 	overlay.visible = not captured
@@ -307,7 +304,6 @@ func _on_frame(frame: Dictionary) -> void:
 	else:
 		for ev: Variant in destroyed:
 			_on_entity_destroyed(ev as Dictionary)
-	_render_resources_from_store()
 	_update_hud()
 	# 收尾再插值一次。Godot 先跑父节点 _process（里面已有一次 _render_interpolated）
 	# 再跑子节点 FpsClient._process，而后者同步 emit frame_received → 这里；上面
@@ -324,10 +320,6 @@ func _refresh_derived() -> void:
 	var next := {}
 	for id: Variant in _store.entities_with("Body.Kind"):
 		var eid := int(id)
-		# 金币也是普通刚体（Body.Kind / Pos 都在 store 里），这里必须排除：金币由
-		# _res_nodes 单独渲染，不排除就会在金币上再叠一个灰色刚体球。
-		if _store.has_attr(eid, "Resource.Kind"):
-			continue
 		next[eid] = {
 			"pos": _vec3_of(_store.attr(eid, "Pos")),
 			"quat": _quat_of(_store.attr(eid, "Rot")),
@@ -359,18 +351,16 @@ func _is_reset_frame(destroyed: Array) -> bool:
 	return false
 
 ## _on_entity_destroyed 消失的实体触发对应反馈。销毁事件带着消失前的属性，
-## 所以这里能分辨消失的是弹丸（爆闪 + 命中音）还是金币（拾取音）。
+## 所以这里能分辨消失的是弹丸（爆闪 + 命中音）还是别的什么。
 func _on_entity_destroyed(ev: Dictionary) -> void:
 	var attrs: Dictionary = ev.get("attrs", {})
 	# 此刻实体已从 store 移除（_body_xform 里也没有它），爆闪位置只能取销毁事件带的
 	# 「消失前属性」。从未渲染过的 id（destroy 一个客户端没见过的实体）attrs 为空，
-	# 既没有 Projectile 也没有 Resource.Kind —— 这里自然落成 no-op，不会索引空节点。
+	# 没有 Projectile —— 这里自然落成 no-op，不会索引空节点。
 	var p: Vector3 = _vec3_of(attrs.get("Pos"))
 	if attrs.has("Projectile"):
 		_pop(p, Color("ffe066"), 0.06, 0.2)
 		sfx.play("hit")
-	if attrs.has("Resource.Kind"):
-		sfx.play("pickup")
 
 ## _vec3_of / _quat_of 把 store 里的 Array 属性转成 Godot 类型。
 func _vec3_of(v: Variant) -> Vector3:
@@ -391,20 +381,16 @@ func _reconcile_scene() -> void:
 		if not _body_xform.has(int(eid)):
 			_remove_body(int(eid))
 
-## _build_body_dict 从 store 组装出 body_entity.gd 期望的字典 —— 形状与旧的快照
-## BodyInfo 完全一致，所以 body_entity.gd 的程序化建模代码零改动。
+## _build_body_dict 从 store 组装出 body_entity.gd 期望的字典。
 func _build_body_dict(eid: int) -> Dictionary:
 	return {
 		"id": eid,
 		"type": int(_store.attr(eid, "Body.Kind")),
 		"static": bool(_store.attr(eid, "Body.Static")),
-		"target": _store.has_attr(eid, "Target"),
-		"enemy": _store.has_attr(eid, "Enemy"),
 		"projectile": _store.has_attr(eid, "Projectile"),
 		"pos": _store.attr(eid, "Pos"),
 		"quat": _store.attr(eid, "Rot"),
 		"size": _store.attr(eid, "Body.Size"),
-		"health": float(_store.attr(eid, "Health")) if _store.has_attr(eid, "Health") else 0.0,
 		"active": bool(_store.attr(eid, "Body.Active")),
 		"mat": int(_store.attr(eid, "Body.Mat")),
 	}
@@ -447,104 +433,45 @@ func _remove_body(id: int) -> void:
 		e.queue_free()
 		_entities.erase(id)
 
-# ---- 金币资源 ----
-
-func _render_resources(resources: Dictionary) -> void:
-	var seen := {}
-	for id in resources.keys():
-		seen[id] = true
-		if not _res_nodes.has(id):
-			_res_nodes[id] = _spawn_coin(resources[id]["pos"])
-	for id in _res_nodes.keys():
-		if not seen.has(id):
-			var e = _res_nodes[id]
-			e.node.queue_free()
-			_res_nodes.erase(id)
-
-## _render_resources_from_store 把 store 里的金币摊平成 _render_resources 期望的形状。
-func _render_resources_from_store() -> void:
-	var out := {}
-	for id: Variant in _store.entities_with("Resource.Kind"):
-		var eid := int(id)
-		out[eid] = {"pos": _vec3_of(_store.attr(eid, "Pos")), "kind": int(_store.attr(eid, "Resource.Kind"))}
-	_render_resources(out)
-
-func _spawn_coin(base: Vector3) -> Dictionary:
-	var root := Node3D.new()
-	root.name = "Coin"
-
-	var coin := MeshInstance3D.new()
-	var cm := CylinderMesh.new()
-	cm.top_radius = 0.22
-	cm.bottom_radius = 0.22
-	cm.height = 0.05
-	cm.radial_segments = 22
-	coin.mesh = cm
-	coin.rotation_degrees = Vector3(90, 0, 0)
-	coin.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-	var gold_mat := StandardMaterial3D.new()
-	gold_mat.albedo_color = Color("ffd75e")
-	gold_mat.emission_enabled = true
-	gold_mat.emission = Color("ff9c3f")
-	gold_mat.emission_energy_multiplier = 0.35
-	gold_mat.roughness = 0.35
-	gold_mat.metallic = 0.5
-	coin.material_override = gold_mat
-	root.add_child(coin)
-
-	var ring := MeshInstance3D.new()
-	var rm := CylinderMesh.new()
-	rm.top_radius = 0.13
-	rm.bottom_radius = 0.13
-	rm.height = 0.06
-	rm.radial_segments = 18
-	ring.mesh = rm
-	ring.rotation_degrees = Vector3(90, 0, 0)
-	ring.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	var ring_mat := StandardMaterial3D.new()
-	ring_mat.albedo_color = Color("fff2b8")
-	ring_mat.emission_enabled = true
-	ring_mat.emission = Color("ffd75e")
-	ring_mat.emission_energy_multiplier = 0.6
-	ring.material_override = ring_mat
-	root.add_child(ring)
-
-	root.position = base
-	add_child(root)
-	return {"node": root, "base": base}
-
-func _anim_resources(delta: float) -> void:
-	var now := Time.get_ticks_msec() / 1000.0
-	for id in _res_nodes:
-		var e = _res_nodes[id]
-		e.node.rotation.y += delta * 2.2
-		e.node.position.y = e.base.y + sin(now * 2.6 + float(id)) * 0.06
-
-## _update_hud 从 store 读全局状态与本地玩家。全局状态是挂在单例实体上的
-## GameState 组件（属性名 Game.Score / Game.Wave / Game.Gold）。
+## 受击红闪：全屏红色快速淡入淡出。
+## _update_hud 从 store 读本机战绩、双方血量与对局结果。
+## 战绩挂在各自的玩家实体上（Player.Kills / Player.Deaths），对局结果是全局单例
+## 上的 Game.Winner（-1 = 进行中，否则为获胜槽位）。
 func _update_hud() -> void:
-	for id: Variant in _store.entities_with("Game.Score"):
-		var gid := int(id)
-		_hud_score = int(_store.attr(gid, "Game.Score"))
-		_hud_wave = int(_store.attr(gid, "Game.Wave"))
-		_hud_gold = int(_store.attr(gid, "Game.Gold"))
+	_hud_winner = -1
+	for id: Variant in _store.entities_with("Game.Winner"):
+		_hud_winner = int(_store.attr(int(id), "Game.Winner"))
 		break
-	_hud_targets = _store.entities_with("Target").size()
-	_hud_enemies = _store.entities_with("Enemy").size()
 
 	var hp := 100.0
+	var opp_hp := 100.0
 	for id: Variant in _store.entities_with("Player.Idx"):
 		var eid := int(id)
 		if int(_store.attr(eid, "Player.Idx")) == _my_player_idx:
 			hp = float(_store.attr(eid, "Health"))
+			_hud_kills = int(_store.attr(eid, "Player.Kills"))
+			_hud_deaths = int(_store.attr(eid, "Player.Deaths"))
+		else:
+			opp_hp = float(_store.attr(eid, "Health"))
 	health_bar.value = hp
 	if hp < _last_health - 0.001:
 		sfx.play("damage")
 		_flash_hit()
-	_last_health = hp
-	if _hud_score > _last_score:
+	# 对手掉血 = 打中了：给一声命中反馈。用「对方血量下降」而不是击杀数变化，
+	# 是因为每一发命中都该有回馈，而击杀数只在中枪者血尽时跳一次。
+	if opp_hp < _last_opp_health - 0.001 and _hud_winner < 0:
 		sfx.play("destroy")
-	_last_score = _hud_score
+	_hud_opp_health = opp_hp
+	_last_health = hp
+	_last_opp_health = opp_hp
+
+## _match_over_text 返回 HUD 里的对局结果行（进行中时为空串）。
+func _match_over_text() -> String:
+	if _hud_winner < 0:
+		return ""
+	if _hud_winner == _my_player_idx:
+		return "YOU WIN\n"
+	return "YOU LOSE\n"
 
 ## 受击红闪：全屏红色快速淡入淡出。
 func _flash_hit() -> void:
@@ -576,8 +503,8 @@ func _shoot() -> void:
 	_pending_shot = {"origin": origin, "dir": dir}
 
 func _on_reset_pressed() -> void:
-	_last_score = 0
 	_last_health = 100.0
+	_last_opp_health = 100.0
 	# reset 是一个边沿：下一渲染帧与输入合并成一条命令上报一次。
 	_pending_reset = true
 	# 同时置起销毁反馈闩锁：重置帧会带回整批 destroy，不该被当成命中/拾取（见变量说明）。
@@ -948,7 +875,7 @@ func _build_hud() -> void:
 	conn_label.visible = false
 	vbox.add_child(conn_label)
 
-	for t in ["点击进入游戏并锁定鼠标", "运输船 PVE：艏艉两个出生区，中部集装箱堆可跳上去，两舷高架走道可俯瞰全船", "清空怪物自动刷下一波，击杀掉落金币，靠近自动拾取", "W A S D 移动 · Space 跳跃 · Shift 奔跑 · V 切换第一/第三人称 · Reset 重开", "匹配机制：凑齐 2 名玩家开局，10 秒无人加入则单人开局"]:
+	for t in ["点击进入游戏并锁定鼠标", "运输船 PVP：艏艉两个出生区，中部集装箱堆可跳上去，两舷高架走道可俯瞰全船", "双人对枪，击杀数先到 10 者获胜，被击杀后立即在己方出生点满血复活", "W A S D 移动 · Space 跳跃 · Shift 奔跑 · V 切换第一/第三人称 · Reset 重开", "匹配机制：凑齐 2 名玩家开局，10 秒无人加入则单人开局"]:
 		var l := Label.new()
 		l.text = t
 		l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER

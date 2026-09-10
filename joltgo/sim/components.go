@@ -22,13 +22,13 @@ type Facing struct {
 	Yaw float32
 }
 
-// GameState 是对局的全局状态（计分/波次/金币），挂在一个单例实体上。
-// 做成组件是为了让框架里不存在「顶层字段」这个概念 —— 以后加全局状态
-// 也自动走同一套同步机制。
+// GameState 是对局的全局状态，挂在一个单例实体上。做成组件是为了让框架里
+// 不存在「顶层字段」这个概念 —— 以后加全局状态也自动走同一套同步机制。
+//
+// Winner 是对局结果：-1 = 进行中，否则为获胜玩家的槽位（0/1）。击杀/死亡数
+// 是**每名玩家自己的**，所以挂在玩家实体的 PlayerScore 上而不是这里。
 type GameState struct {
-	Score int32
-	Wave  int32
-	Gold  int32
+	Winner int32
 }
 
 // Input 是玩家实体的最新输入：move 为世界空间水平期望速度（m/s），
@@ -45,24 +45,34 @@ type Position [3]float32
 // Rotation 是世界坐标旋转四元数（x, y, z, w），仅物理刚体有。
 type Rotation [4]float32
 
-// Health 是当前血量（玩家与敌人）。
+// Health 是当前血量（玩家）。
 type Health float32
 
-// Enemy 标记敌人（追击 AI + 贴身伤害），配合 Health 使用。
-type Enemy struct{}
-
-// Target 标记可破坏靶球（弹丸命中即摧毁并得分）。
-type Target struct{}
-
-// Projectile 标记弹丸，SpawnStep 记录发射时的 tick，用于超时移除。
-type Projectile struct {
-	SpawnStep int
+// PlayerScore 是玩家在本局中的战绩（击杀 / 死亡），直接挂在玩家实体上。
+type PlayerScore struct {
+	Kills  int32
+	Deaths int32
 }
 
-// Resource 标记可拾取资源（金币）：物理上是 Jolt 传感器球——不与刚体碰撞
-// （弹丸/箱子穿过），角色控制器接触到即触发拾取。Kind: 0 = 金币。
-type Resource struct {
-	Kind int
+// PlayerHitbox 标记「跟随某个玩家角色的命中盒刚体」。玩家的移动体是 Jolt 的
+// 角色控制器（不是刚体），弹丸（动态刚体 + CCD）看不见它、也不会与它产生刚体
+// 接触事件，所以每个玩家额外配一个形状相同的静态胶囊：每 tick 被挪到角色所在
+// 处，弹丸靠普通刚体接触命中它 —— 与命中静态几何走的是同一条路径。
+//
+// 两个角色都会忽略全部命中盒（见 Simulation.init 与 Physics.CharacterIgnoreBody）：
+// 命中盒每 tick 才跟随一次，会被角色甩到正前方；对方玩家的命中盒更是隐形墙。
+//
+// 该刚体不进 ECS 的渲染路径（没有 Body 组件，因此不产生同步流量、客户端不渲染），
+// 但它必须在 ECS 里有实体，弹丸系统才能从接触事件认出「打中的是谁」。
+type PlayerHitbox struct {
+	Idx int
+}
+
+// Projectile 标记弹丸，SpawnStep 记录发射时的 tick（用于超时移除），
+// Owner 是发射者的玩家槽位（0/1）：弹丸不打自己的命中盒。
+type Projectile struct {
+	SpawnStep int
+	Owner     int
 }
 
 // BodyKind 是刚体形状类别，对应快照协议中的 "type" 字段。
@@ -70,8 +80,8 @@ type BodyKind int
 
 const (
 	BodyBox     BodyKind = 0 // 盒子（地板/墙/箱子）
-	BodySphere  BodyKind = 1 // 球（靶球/弹丸）
-	BodyCapsule BodyKind = 2 // 胶囊（敌人）
+	BodySphere  BodyKind = 1 // 球（弹丸）
+	BodyCapsule BodyKind = 2 // 胶囊（桅杆/烟囱等静态立柱；命中盒不带 Body，不下发）
 )
 
 // Body 是物理刚体实体的渲染元数据。Static/Size/Mat 在创建时确定；

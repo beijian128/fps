@@ -117,7 +117,7 @@ func (c *Component) Cmd(ctx context.Context, msg *protos.CommandMsg) {
 		if len(msg.Dir) >= 3 {
 			dir = [3]float32{msg.Dir[0], msg.Dir[1], msg.Dir[2]}
 		}
-		inst.Shoot(origin, dir)
+		inst.Shoot(idx, origin, dir)
 	}
 	// 字段名 reset 与 protoc-gen-go 生成的 Reset() 方法冲突，被重命名为 Reset_
 	// （wire 字段号仍是 7，语义不变）。

@@ -88,7 +88,7 @@ func has_attr(entity_id: int, name: String) -> bool:
 func entity_ids() -> Array:
 	return _entities.keys()
 
-## entities_with 返回带指定属性的全部实体 ID（标记类属性如 "Enemy" / "Player.Idx"
+## entities_with 返回带指定属性的全部实体 ID（标记类属性如 "Projectile" / "Player.Idx"
 ## 用它做查询）。
 func entities_with(name: String) -> Array:
 	var out: Array = []

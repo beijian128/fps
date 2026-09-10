@@ -80,15 +80,19 @@ namespace
 
 	// 角色接触监听器：做两件纯物理层的事——
 	//   1. 「动态刚体能否推动角色」开关（对应 Jolt mCanPushCharacter），由 Go 配置；
-	//   2. 把角色接触到的刚体 id 记录进队列，由 Go 每 tick 轮询。
-	// 「碰到谁算伤害/拾取」等业务判定全部在 Go 侧。
-	// 注意：Jolt 对同一接触只回调一次 Added（传感器接触也只走 Added），
-	// 持续接触的每步信号走 OnContactSolve（约束求解每步触发），两者都记录。
+	//   2. 忽略名单：名单里的刚体对该角色完全不存在（既不挡路，也不产生接触事件）。
+	// 「碰到谁算伤害/拾取」等业务判定全部在 Go 侧（走刚体接触事件，见 ContactRecorder）。
 	class CharacterContactBridge : public CharacterContactListener
 	{
 	public:
 		bool dynamic_can_push = true;
-		std::vector<uint32_t> touches;
+		// 与角色共位的刚体（如跟随角色的命中盒）需要在这里登记：命中盒每 tick 才
+		// 跟随一次，角色一 tick 的位移可能超过两者的接触距离，那一 tick 里它就在角色
+		// **正前方**，Jolt 会把角色速度清零；对方玩家的命中盒对本地角色同样是一堵
+		// 隐形墙。OnContactValidate 返回 false 才是「根本不碰」。
+		// （注：**共位**的静态刚体本身不挡人 —— CharacterVirtual 的扫掠会忽略
+		// fraction = 0 的初始重叠，见 physics/pvp_hit_integration_test.go。）
+		std::vector<uint32_t> ignored;
 
 		void Apply(CharacterContactSettings &ioSettings, const CharacterContact &inContact)
 		{
@@ -96,25 +100,23 @@ namespace
 				ioSettings.mCanPushCharacter = dynamic_can_push;
 		}
 
-		void Record(const CharacterContact &inContact)
+		virtual bool OnContactValidate(const CharacterVirtual *inCharacter, const CharacterContact &inContact) override
 		{
-			touches.push_back(inContact.mBodyB.GetIndexAndSequenceNumber());
+			uint32_t id = inContact.mBodyB.GetIndexAndSequenceNumber();
+			for (uint32_t ignored_id : ignored)
+				if (ignored_id == id)
+					return false;
+			return true;
 		}
 
 		virtual void OnContactAdded(const CharacterVirtual *inCharacter, const CharacterContact &inContact, CharacterContactSettings &ioSettings) override
 		{
 			Apply(ioSettings, inContact);
-			Record(inContact);
 		}
 
 		virtual void OnContactPersisted(const CharacterVirtual *inCharacter, const CharacterContact &inContact, CharacterContactSettings &ioSettings) override
 		{
 			Apply(ioSettings, inContact);
-		}
-
-		virtual void OnContactSolve(const CharacterVirtual *inCharacter, const BodyID &inBodyID2, const SubShapeID &inSubShapeID2, RVec3Arg inContactPosition, Vec3Arg inContactNormal, Vec3Arg inContactVelocity, const PhysicsMaterial *inContactMaterial, Vec3Arg inCharacterVelocity, Vec3 &ioNewCharacterVelocity) override
-		{
-			touches.push_back(inBodyID2.GetIndexAndSequenceNumber());
 		}
 	};
 }
@@ -349,6 +351,15 @@ extern "C" int jolt_is_body_active(JoltWorld *w, uint32_t body_id)
 	return w->physics_system->GetBodyInterface().IsActive(BodyID(body_id)) ? 1 : 0;
 }
 
+extern "C" void jolt_set_body_position(JoltWorld *w, uint32_t body_id, float x, float y, float z)
+{
+	if (w == nullptr || w->physics_system == nullptr)
+		return;
+	// 直接瞬移（不是 MoveKinematic）：调用方每 tick 把它摆到目标位置，不需要速度
+	// 连续性。DontActivate 避免被移动的刚体自己去唤醒邻居。
+	w->physics_system->GetBodyInterface().SetPosition(BodyID(body_id), RVec3(x, y, z), EActivation::DontActivate);
+}
+
 extern "C" void jolt_set_body_velocity(JoltWorld *w, uint32_t body_id, float vx, float vy, float vz)
 {
 	if (w == nullptr || w->physics_system == nullptr)
@@ -485,6 +496,17 @@ extern "C" void jolt_character_set_dynamic_push(JoltWorld *w, int char_idx, int 
 	w->character_listener[char_idx].dynamic_can_push = (allow != 0);
 }
 
+extern "C" void jolt_character_ignore_body(JoltWorld *w, int char_idx, uint32_t body_id)
+{
+	if (w == nullptr || char_idx < 0 || char_idx >= 2 || body_id == 0)
+		return;
+	auto &ignored = w->character_listener[char_idx].ignored;
+	for (uint32_t id : ignored)
+		if (id == body_id)
+			return; // 幂等：重复登记同一刚体不叠加
+	ignored.push_back(body_id);
+}
+
 extern "C" void jolt_character_get_position(JoltWorld *w, int char_idx, float *out_xyz)
 {
 	CharacterVirtual *c = GetCharacter(w, char_idx);
@@ -542,19 +564,4 @@ extern "C" void jolt_character_update(JoltWorld *w, int char_idx, float dt)
 	CharacterVirtual::ExtendedUpdateSettings settings;
 	c->ExtendedUpdate(dt, w->physics_system->GetGravity(), settings,
 		BroadPhaseLayerFilter(), ObjectLayerFilter(), BodyFilter(), ShapeFilter(), *w->temp_allocator);
-}
-
-extern "C" uint32_t jolt_character_poll_contacts(JoltWorld *w, int char_idx, uint32_t *out_ids, uint32_t max_ids)
-{
-	if (w == nullptr || char_idx < 0 || char_idx >= 2 || out_ids == nullptr)
-		return 0;
-
-	// 角色更新在单线程（Go tick goroutine）内完成，无需加锁。从队头取最多
-	// max_ids 条、剩余留待下次（配合 Go 侧分块循环排空），避免超过缓冲被丢弃。
-	auto &touches = w->character_listener[char_idx].touches;
-	size_t n = std::min(touches.size(), (size_t)max_ids);
-	for (size_t i = 0; i < n; ++i)
-		out_ids[i] = touches[i];
-	touches.erase(touches.begin(), touches.begin() + n);
-	return (uint32_t)n;
 }

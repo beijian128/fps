@@ -6,7 +6,7 @@
 
 ## 1. 项目一句话定位
 
-基于 [Jolt Physics](https://github.com/jrouwe/JoltPhysics) 的服务端权威第一人称 PVE demo：
+基于 [Jolt Physics](https://github.com/jrouwe/JoltPhysics) 的服务端权威第一人称 PVP demo：
 - **服务端** `joltgo/`：Go + cgo 调用 Jolt（C ABI 包装层），**pitaya 框架**（内置源码，
   **Cluster 模式**）做**分布式微服务**：gate（前端接入）/ match（匹配）/ game（对局逻辑）。
   ECS 架构，20 Hz 固定 tick，WebSocket 推送**实体-属性增量帧**（重连 / 首次进入推全量帧）。
@@ -31,7 +31,7 @@ fps/
 │   │   ├── map.go           # ★ 运输船场景：部件表（甲板/船体/集装箱/走道/舷梯/桅杆）+ 材质号
 │   │   ├── simulation.go    # 组装世界、按部件表搭场景、持有同步 store
 │   │   ├── components.go    # 组件定义（Body 带 Kind/Size/Static/Mat）
-│   │   ├── systems.go       # 每 tick 系统（输入/变换同步/命中/伤害/拾取/波次）+ 各处 rep.Set 变更点
+│   │   ├── systems.go       # 每 tick 系统（输入/命中盒跟随/变换同步/弹丸命中/对局结算）+ 各处 rep.Set 变更点
 │   │   ├── replicate.go     # ★ ECS ↔ 同步属性的唯一映射（declareAttributes + 变更点 rep.Set）
 │   │   └── replicate_test.go# oracle 测试：从 ECS 世界独立推期望属性，漏写的 rep.Set 在此失败
 │   ├── ecs/                 # 零依赖 archetype ECS 核心（纯 Go，可单测）—— 本次改造完全未动
@@ -61,18 +61,25 @@ fps/
 
 1. **实体 ID 双空间**：物理刚体 id = ECS 实体 id，由物理桥从 1 递增发放；纯逻辑实体（玩家）由 `ecs.NewEntity` 从 `1<<24` 起分配，两空间不重叠。
 2. **`physics/` 是唯一允许 cgo 的包**；`sim/` 与 `ecs/` 必须是纯 Go，只依赖 `sim.Physics` 接口（可用 fake 物理单测）。Jolt 原生 BodyID 不透传（0=失败；合法 id 带序号位）。**每个对局实例各建一个 Jolt 世界**（`physics.New()` 独立实例）。
-3. **包装层是纯物理桥**：只暴露 Jolt 原生能力，不含敌人/弹丸/靶球/血量/移动策略/任何调参；所有游戏调参集中在 `joltgo/sim/simulation.go` 常量区。多角色（charIdx 0/1）是纯物理能力，不带业务。
+3. **包装层是纯物理桥**：只暴露 Jolt 原生能力，不含玩家/弹丸/血量/移动策略/任何调参；所有游戏调参集中在 `joltgo/sim/simulation.go` 常量区。多角色（charIdx 0/1）是纯物理能力，不带业务。
 4. **服务端权威 + 固定 tick**：`sim.Simulation` 每 tick 顺序固定：
-   `inputSystem → 双角色接触排空 → physics.Step → step++ → syncSystem → projectileSystem → enemyDamageSystem → expireProjectilesSystem → resourceSystem → waveSystem`。
-   命中/伤害/拾取全部靠**接触事件**，不做距离判定。
+   `inputSystem → hitboxFollowSystem → physics.Step → step++ → syncSystem → projectileSystem → expireProjectilesSystem → matchSystem`。
+   命中全部靠**刚体接触事件**，不做距离判定。`hitboxFollowSystem` 必须在 `Step` **之前**：弹丸的接触判定用的是步进开始时的刚体位置，晚一步贴命中盒就是拿上一 tick 的旧位置判命中。
+   **玩家不是刚体**（是 `CharacterVirtual`），弹丸看不见它 —— 每个玩家配一个跟随角色的**命中盒刚体**（`PlayerHitbox`）承担「可被击中体积」，并让两个角色都忽略两个命中盒（`CharacterIgnoreBody`），细节见 §3.9 与 `docs/ARCHITECTURE.md`。
 5. **同步协议是通用「实体-属性」帧**：wire 契约仍是 `game/protos/game.proto`（protobuf），但**新增一个同步属性不需要改 proto、不需要重生成 Go 码、也不需要动客户端解码**——只有三步：
    - 在 `sim/replicate.go` 的 `declareAttributes` 里加一行 `Declare`（属性表必须完整稳定，见 §5）；
    - 在每个「值会变的地方」**就近** `rep.Set`（同步层只做终值去重，不做任何 ECS 遍历）；
    - 客户端按**属性名**取值（`WorldStore.attr(id, "名字")`）。
-   属性名是扁平字符串（约定 `组件.字段`，如 `Body.Mat` / `Player.Idx` / `Game.Score`）。属性表（Schema）**只随 full 帧**下发（不单独发消息），客户端据此把属性 ID 还原成名字与 Kind；**不认识的属性照常存下、只是不渲染**（这就是前后端可独立演进的原因）。`replication.Store` **不 import `ecs`**，耦合全部集中在 `sim/replicate.go`。帧内实体/属性按 ID **升序**输出（字节稳定、可测试）。上行 route 三段式 `server.service.method`（`match.match.join` / `game.game.cmd` / `game.game.resync`）。
+   属性名是扁平字符串（约定 `组件.字段`，如 `Body.Mat` / `Player.Idx` / `Player.Kills`）。属性表（Schema）**只随 full 帧**下发（不单独发消息），客户端据此把属性 ID 还原成名字与 Kind；**不认识的属性照常存下、只是不渲染**（这就是前后端可独立演进的原因）。`replication.Store` **不 import `ecs`**，耦合全部集中在 `sim/replicate.go`。帧内实体/属性按 ID **升序**输出（字节稳定、可测试）。上行 route 三段式 `server.service.method`（`match.match.join` / `game.game.cmd` / `game.game.resync`）。
 6. **并发/锁（核心变化）**：`sim.Simulation` **无锁**——由对局实例 goroutine（`game/instance.go`）独占驱动，输入经命令 channel 投递、同一 goroutine 顺序执行，不需要任何互斥。`replication.Store` 与 `sim.Simulation` 一样由该 goroutine 独占，**非并发安全**（package 注释已声明）。`game.Component` 的实例注册表（uid→实例）用一把 `sync.Mutex` 保护（跨 RPC handler 共享）。`ecs.World` 自身不加锁。
 7. **ECS 使用约束**：`Each` / `QueryEach*` 回调内**禁止** Add/Remove/Destroy（swap-remove 打乱迭代），需要增删时"先收集再处理"；`Get` 返回的指针仅本次调用有效；物理实体 Destroy 后彻底注销（id 不复用），逻辑实体 id 走 free list 复用。
-8. **地图是对称的**：`sim/map.go` 的部件表在绕 Y 轴旋转 180°（`(x,y,z) → (-x,y,-z)`）下自映射——带 `mirror` 的部件由代码自动补孪生体，两个出生点必须完全等价。改图只写半边；`sim/map_test.go` 会验证对称性、出生点不卡掩体、刷怪不刷进掩体。舷梯参数有硬约束（单级抬升 ≤ 0.4、进深 ≥ 0.5，均为角色半径/`WalkStairs` 决定），改动前先看 `map_test.go` 里的说明。
+8. **地图是对称的**：`sim/map.go` 的部件表在绕 Y 轴旋转 180°（`(x,y,z) → (-x,y,-z)`）下自映射——带 `mirror` 的部件由代码自动补孪生体，两个出生点（也就是死亡后的复活点）必须完全等价。改图只写半边；`sim/map_test.go` 会验证对称性、出生点与开局命中盒都不卡掩体。舷梯参数有硬约束（单级抬升 ≤ 0.4、进深 ≥ 0.5，均为角色半径/`WalkStairs` 决定），改动前先看 `map_test.go` 里的说明。
+9. **玩家命中盒**：玩家是 `CharacterVirtual`（不是刚体），弹丸（动态 + CCD）既看不见它也打不中它——Jolt 的 CCD **明确忽略传感器**，所以「把玩家做成 sensor」也走不通。每个玩家因此额外配一个与角色同形状的**静态胶囊刚体**（`PlayerHitbox`），每 tick 用 `SetBodyPosition` 贴到角色身上（`jolt_set_body_position`），弹丸靠最普通的刚体接触命中它。配套不变量：
+   - **命中盒不进渲染路径**：它没有 `Body` 组件，`syncSystem` 跳过没有 `Body` 的刚体，因此不产生同步流量、客户端不渲染、`declareAttributes` 里也没有它的属性。`replicate_test.go` 的反向断言（store 里不许有世界里不存在的实体）会挡住「给命中盒加 rep.Set」。
+   - **两个角色都必须忽略两个命中盒**（`CharacterIgnoreBody` → Jolt `OnContactValidate` 返回 false）。注意**共位**的静态刚体本身并不挡人（CharacterVirtual 的扫掠忽略 fraction = 0 的初始重叠，实测见 `physics/pvp_hit_integration_test.go`）；真正需要忽略的是命中盒**落在角色前方**的情形 —— 对方玩家的命中盒对本地角色就是一堵隐形墙，自己的命中盒每 tick 才跟随一次、会被角色甩到身前（跑动 0.7 m/tick，下落更快）。
+   - **死亡复活时命中盒要一起搬回出生点**（`respawn`）：它要到下一 tick 的 `hitboxFollowSystem` 才跟随角色，留在旧位置会让之后飞来的弹丸打中一个「已经复活在别处的人」。
+   - **枪口不能落在自己的命中盒里**：命中盒是实体刚体、会挡住弹丸，而第三人称的枪口正好在角色中轴上。`shoot` 会把出生点沿射向推到盒外（`pushOutsideOwnHitbox`），并且「弹丸 vs 自己的命中盒」的接触被忽略（不扣血、也不吃掉弹丸）。
+   - **每个对局各建一份**：命中盒在 `init()` 里随场景创建（**排在场景几何之后**，让场景刚体 id 仍从 1 开始），`reset()` 走 `physics.Destroy()` + 重建，`CharacterIgnoreBody` 的忽略表也随之重建。
 
 ## 4. 数据流（分布式链路）
 
@@ -137,7 +144,8 @@ PATH="$PWD:$PATH" go test -count=1 ./ecs ./sim ./replication
 # 全部包（含 cgo 编译检查与 ./game ./match，需已构建出 libjolt_c.dll）
 PATH="$PWD:$PATH" go test -count=1 ./...
 
-# 地图可玩性集成测试（跑真 Jolt：验证舷梯真能走上去、静态几何不漂移）
+# 真 Jolt 集成测试：地图可玩性（舷梯真能走上去、静态几何不漂移）
+# + PVP 命中链路（CCD 弹丸真能打中静态胶囊、角色忽略表真的有阻挡差异）
 PATH="$PWD:$PATH" go test -count=1 -tags joltdll ./physics
 ```
 
@@ -171,7 +179,7 @@ Godot_..._console.exe --headless --path godot_client --script res://tests/rejoin
   涉及"走不走得上去"这类几何手感，再跑 `go test -tags joltdll ./physics`。
   新增材质号同时改 `godot_client/scripts/body_entity.gd` 的 `MATS` 表（只能追加编号）。
 - 改 ECS 核心 → 只动 `joltgo/ecs/`（必须零依赖、可单测）。
-- 改物理接口 → 动 `joltgo/wrapper/` + `joltgo/physics/`（`sim.Physics` 接口同步），重跑 `build.ps1`。
+- 改物理接口 → 动 `joltgo/wrapper/` + `joltgo/physics/`（`sim.Physics` 接口同步），重跑 `build.ps1`，再跑 `go test -tags joltdll ./physics`（命中盒/忽略表这类结论只有真 Jolt 能验证）。
 - 改**协议结构**（新增/删除消息或 route、改 Frame/Schema 字段号）→ 动 `joltgo/game/protos/game.proto`（重跑 `protoc --go_out`）+ `joltgo/game/` + `joltgo/match/` + `docs/API.md` + `godot_client/scripts/fps_client.gd`（protobuf 编解码同步改）。只加同步**属性**不走这条路（见上）。
 - 改服务路由/匹配 → 动 `joltgo/gate/` / `joltgo/match/`。
 - 改客户端渲染/输入 → 只动 `godot_client/`，Godot 直接 F5。
