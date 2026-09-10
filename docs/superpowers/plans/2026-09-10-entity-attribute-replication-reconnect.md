@@ -2854,6 +2854,9 @@ func (i *Instance) Stop() {
 				if i.onExit != nil {
 					i.onExit()
 				}
+				// 关掉 stop：退出后没有 goroutine 再消费 cmds，正在并发的
+				// RPC handler 若还持有实例指针，enqueue 会卡在写满的 channel 上。
+				i.Stop()
 				return
 			}
 ```
