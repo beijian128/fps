@@ -91,6 +91,7 @@ fps/
 - **Godot 4**：材质属性用 `metallic`（不是 Godot 3 的 `metalness`）；命令行运行用 `preload` 而非 `class_name`；typed for 循环需 4.2+。
 - **多进程部署**：单二进制 `joltgo.exe -type gate|match|game` 三角色，先起 etcd+nats（`deploy/start-all.ps1`）。
 - **服务端 20Hz tick 无条件运行**（实例创建后无论客户端是否在线都推进）。
+- **Git 流程：本仓库直接提交到 `main`**，不要开 feature branch、不要走 PR——`main` 就是集成分支，历史保持线性（`git push origin main` 即可）。提交信息用 `<type>: <subject>` 前缀（`feat` / `fix` / `docs` / `refactor` / `test`），AI 提交在结尾加 `Co-Authored-By` 尾注；提交前先把 §6 里对应的测试跑绿。
 
 ## 6. 构建 / 测试命令
 
