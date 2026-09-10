@@ -2852,9 +2852,6 @@ func (i *Instance) Stop() {
 			i.broadcast()
 			if i.idleExpired() {
 				log.Printf("instance %s: %v 无玩家上行，结束对局", i.matchID, instanceIdleTimeout)
-				if i.onExit != nil {
-					i.onExit()
-				}
 				// 关掉 stop：退出后没有 goroutine 再消费 cmds，正在并发的
 				// RPC handler 若还持有实例指针，enqueue 会卡在写满的 channel 上。
 				// 用 defer 而不是直接调用，是为了 onExit 万一 panic 也一定会关。
