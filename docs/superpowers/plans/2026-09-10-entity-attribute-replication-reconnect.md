@@ -2795,6 +2795,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 **Files:**
 - Modify: `joltgo/game/instance.go`
 - Modify: `joltgo/game/component.go`
+- Create: `joltgo/game/component_test.go`
 
 **Interfaces:**
 - Consumes: 现有 `Instance.run` / `enqueue`
@@ -2915,31 +2916,91 @@ func (i *Instance) RequestFull(slot int) {
 
 > `Shoot`/`Reset` 不知道槽位，不需要 `touch` —— 它们的同行 `ApplyInput` 每渲染帧（60 Hz）都会刷新在线时间，够用。
 
+7. 把 `instance.go` 顶部的生命周期注释补一句：`Stop` 除了由 `Component.Shutdown`
+   调用，也会在**空闲自退**时由实例自己调用，`stopOnce` 保证两条路径都安全。
+
 - [ ] **Step 2: `Component` 设置回调并在退出时摘除注册表**
 
 `joltgo/game/component.go`：
 
-1. `Create` 里设置回调：
+1. `Create` 里设置回调（闭包捕获 `inst` 本身，`forget` 要用它做归属守卫）：
 
 ```go
 	inst := NewInstance(c.app, msg.MatchId, msg.Uids)
-	inst.onExit = func() { c.forget(msg.MatchId, msg.Uids) }
+	inst.onExit = func() { c.forget(inst, msg.MatchId, msg.Uids) }
 	inst.Start()
 ```
 
 2. 加方法：
 
 ```go
-// forget 把已结束的实例从注册表摘掉（幂等：只在仍指向同一实例时删除）。
-func (c *Component) forget(matchID string, uids []string) {
+// forget 把已结束的实例从注册表摘掉。
+//
+// uid 的条目必须**确认还指向这个实例**才删：玩家离开旧对局后可能已经匹配进了新
+// 对局，新实例刚把 uidToInst[uid] 改写成自己；旧实例 60 秒后回收时若无脑删，
+// 就会把新对局的映射一起抹掉，玩家之后的 game.cmd 会全部被忽略。
+func (c *Component) forget(inst *Instance, matchID string, uids []string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	delete(c.instances, matchID)
+	delete(c.instances, matchID) // matchId 由 nuid 生成，不会重复，无需守卫
 	for _, uid := range uids {
+		if c.uidToInst[uid] != inst {
+			continue // 该 uid 已经归新对局所有
+		}
 		delete(c.uidToInst, uid)
 		delete(c.uidToIndex, uid)
 	}
 	log.Printf("game: instance %s 已回收", matchID)
+}
+```
+
+   `Create` 里捕获 `inst` 的写法见上面第 1 条。
+
+3. 新增 `joltgo/game/component_test.go`，钉住上面那条守卫（`forget` 不碰 `c.app`，
+   所以 `New(nil)` 就能构造）：
+
+```go
+package game
+
+import "testing"
+
+func TestForgetKeepsUIDsOwnedByAnotherInstance(t *testing.T) {
+	c := New(nil)
+	old := &Instance{matchID: "m1"}
+	fresh := &Instance{matchID: "m2"}
+	c.instances = map[string]*Instance{"m1": old, "m2": fresh}
+	c.uidToInst = map[string]*Instance{"u": fresh} // 玩家已经匹配进新对局
+	c.uidToIndex = map[string]int{"u": 1}
+
+	c.forget(old, "m1", []string{"u"})
+
+	if c.uidToInst["u"] != fresh {
+		t.Fatal("旧实例回收不应抹掉新对局的 uid 映射")
+	}
+	if _, ok := c.instances["m1"]; ok {
+		t.Fatal("旧实例应从 instances 里摘掉")
+	}
+	if _, ok := c.instances["m2"]; !ok {
+		t.Fatal("新实例不应受影响")
+	}
+}
+
+// 正常情况（uid 仍归本实例）必须照常清掉，否则注册表会泄漏。
+func TestForgetRemovesOwnUIDs(t *testing.T) {
+	c := New(nil)
+	inst := &Instance{matchID: "m1"}
+	c.instances = map[string]*Instance{"m1": inst}
+	c.uidToInst = map[string]*Instance{"u": inst}
+	c.uidToIndex = map[string]int{"u": 0}
+
+	c.forget(inst, "m1", []string{"u"})
+
+	if _, ok := c.uidToInst["u"]; ok {
+		t.Fatal("属于本实例的 uid 应被摘掉")
+	}
+	if _, ok := c.uidToIndex["u"]; ok {
+		t.Fatal("属于本实例的 uid 索引应被摘掉")
+	}
 }
 ```
 
