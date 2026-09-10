@@ -354,7 +354,7 @@ func TestSetSameValueIsNotDirty(t *testing.T) {
 	if ids, _ := dirtyOf(s, 7); len(ids) != 1 {
 		t.Fatal("首次 Set 应标脏")
 	}
-	s.ClearDirtyForTest()
+	s.Drain() // 本帧已下发 → 10 成为基线
 	s.Set(7, "Health", F32(10)) // 与已下发值相同
 	if ids, _ := dirtyOf(s, 7); len(ids) != 0 {
 		t.Fatalf("写入相同的值不应标脏，得到 %v", ids)
@@ -364,7 +364,7 @@ func TestSetSameValueIsNotDirty(t *testing.T) {
 func TestSetBackToSentValueCancelsDirty(t *testing.T) {
 	s := newTestStore()
 	s.Set(7, "Health", F32(10))
-	s.ClearDirtyForTest() // 模拟这一帧已经下发过 10
+	s.Drain() // 模拟这一帧已经下发过 10
 
 	s.Set(7, "Health", F32(20))
 	s.Set(7, "Health", F32(10)) // 改回已下发值 → 撤销
@@ -377,7 +377,7 @@ func TestSetBackToSentValueCancelsDirty(t *testing.T) {
 func TestDestroyClearsValues(t *testing.T) {
 	s := newTestStore()
 	s.Set(7, "Health", F32(10))
-	s.ClearDirtyForTest()
+	s.Drain()
 
 	s.Destroy(7)
 	if _, ok := s.Get(7, "Health"); ok {
@@ -391,7 +391,7 @@ func TestDestroyClearsValues(t *testing.T) {
 func TestRemoveDropsValue(t *testing.T) {
 	s := newTestStore()
 	s.Set(7, "Enemy", Bool(true))
-	s.ClearDirtyForTest()
+	s.Drain()
 
 	s.Remove(7, "Enemy")
 	if _, ok := s.Get(7, "Enemy"); ok {
@@ -460,7 +460,7 @@ func mustAttrID(t *testing.T, s *Store, name string) uint32 {
 }
 ```
 
-> 注：`AttrValue` 与 `ClearDirtyForTest` 在这一步还不存在，测试会编译失败 —— 这是预期的「先失败」。Step 3 里除了 `store.go` 还要补一个测试专用的清脏方法（见下）。
+> 注：测试用 `s.Drain()` 来构造「上一帧已下发」的前置状态 —— 它本来就把脏集搬进基线，不需要额外的测试专用方法。
 
 - [ ] **Step 2: 跑测试确认失败**
 
@@ -631,31 +631,6 @@ func (s *Store) Get(id uint32, attr string) (Value, bool) {
 	}
 	v, ok := m[s.attrOf(attr)]
 	return v, ok
-}
-
-// ClearDirtyForTest 模拟「这一帧已经下发过」：把当前终值记为已下发基线并清空脏集。
-// 仅供测试构造「上一帧已同步」的前置状态。
-func (s *Store) ClearDirtyForTest() {
-	for id, d := range s.dirty {
-		sm := s.sent[id]
-		if sm == nil {
-			sm = map[uint32]Value{}
-			s.sent[id] = sm
-		}
-		for cid := range d {
-			sm[cid] = s.values[id][cid]
-		}
-	}
-	for id, g := range s.gone {
-		for cid := range g {
-			if sm := s.sent[id]; sm != nil {
-				delete(sm, cid)
-			}
-		}
-	}
-	s.dirty = map[uint32]map[uint32]bool{}
-	s.gone = map[uint32]map[uint32]bool{}
-	s.dead = map[uint32]bool{}
 }
 
 // schemaVersion 是属性表的 FNV-1a 哈希（名字 + 类型），客户端据此检测
@@ -1309,43 +1284,53 @@ func TestStoreMatchesWorldThroughoutMatch(t *testing.T) {
 
 	// 玩家拾取金币
 	coin := uint32(snapshotWorld(s).Resources[0].ID)
-	p.queueStickyContact(coin)
+	p.queueCharacterContact(coin)
 	s.ApplyInput(0, [2]float32{0, 0}, 0, false)
 	s.Step()
 	assertStoreMatchesWorld(t, s)
 
 	// 敌人贴身伤害 + 复活
 	enemy := enemiesOf(snapshotWorld(s))[0]
-	p.queueStickyContact(enemy)
+	p.queueCharacterContact(enemy)
 	for i := 0; i < 300; i++ {
 		s.Step()
 	}
 	assertStoreMatchesWorld(t, s)
 
-	// 波次推进（场上清空 2 秒后刷下一波）
-	for _, e := range enemiesOf(snapshotWorld(s)) {
-		s.Shoot(shoot0(), [3]float32{1, 0, 0})
-		_ = e
+	// 波次推进：击杀全场敌人，等 2 秒（waveDelayTicks=40）应刷出新的一波
+	// —— 这会新建实体，必须同样被同步到。
+	for round := 0; round < 2; round++ {
+		for _, e := range enemiesOf(snapshotWorld(s)) {
+			proj := s.Shoot(shoot0(), [3]float32{1, 0, 0})
+			p.queueContact(proj, e)
+			s.Step()
+			assertStoreMatchesWorld(t, s)
+		}
+		for i := 0; i < 50; i++ {
+			s.Step()
+			assertStoreMatchesWorld(t, s)
+		}
 	}
-	for i := 0; i < 60; i++ {
-		s.Step()
+	if len(enemiesOf(snapshotWorld(s))) == 0 {
+		t.Fatal("清波 2 秒后应刷出下一波敌人（否则这个用例没覆盖到新建实体）")
 	}
-	assertStoreMatchesWorld(t, s)
 }
 
 // 需求 3：把增量流喂给一个「客户端 store」，重建结果必须等于直接取全量。
 func TestDeltaStreamRebuildsFullState(t *testing.T) {
 	s, _ := newTestSim(t)
+
+	// 客户端从服务端 schema 建立同一套属性表。注意增量帧不带 schema
+	// （只有 full 帧带），所以名字表要在循环外建好。
+	schema := s.FullFrame().Schema
+	name := map[uint32]string{}
 	client := replication.New()
-	for _, a := range s.FullFrame().Schema.Fields {
+	for _, a := range schema.Fields {
+		name[a.ID] = a.Name
 		client.Declare(a.Name, a.Kind)
 	}
 
 	applyFrame := func(f replication.Frame) {
-		name := map[uint32]string{}
-		for _, a := range f.Schema.Fields {
-			name[a.ID] = a.Name
-		}
 		for _, ed := range f.Entities {
 			if ed.Destroy {
 				client.Destroy(ed.ID)
@@ -1365,8 +1350,7 @@ func TestDeltaStreamRebuildsFullState(t *testing.T) {
 		applyFrame(s.DrainFrame())
 	}
 
-	// 重置客户端的「已下发基线」到与 store 一致，使两边可比。
-	client.ClearDirtyForTest()
+	// 客户端 store 从零开始，只吃增量流；跑完应与服务端的全量逐项相等。
 	got := storeAttrsOf(client)
 	want := expectedAttrs(s)
 	if !reflect.DeepEqual(normalize(got), normalize(want)) {
@@ -1414,12 +1398,7 @@ func normalize(m map[uint32]map[string]replication.Value) map[uint32]map[string]
 func snapshotWorld(s *Simulation) State { return s.snapshot() }
 ```
 
-> 另外 `fakePhysics` 目前只有 `queueContact(a, b)` 与 `sticky`（固定作用于 0 号角色）。`queueStickyContact(id)` 需要新增到 `sim_test.go` 的 fake 上：
-
-```go
-// queueStickyContact 让 0 号角色每 tick 都接触到指定刚体（模拟贴身接触）。
-func (f *fakePhysics) queueStickyContact(id uint32) { f.sticky = append(f.sticky, id) }
-```
+> 另外 `fakePhysics` 已经有一个测试钩子 `queueCharacterContact(id uint32)`（`sim_test.go` 里，「注入一个持续存在的 0 号角色接触」），上面的接触注入直接用它，不要新加同义方法。
 
 - [ ] **Step 2: 跑测试确认失败**
 
