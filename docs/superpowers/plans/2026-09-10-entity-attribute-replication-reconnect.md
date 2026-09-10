@@ -712,7 +712,8 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 **Files:**
 - Create: `joltgo/replication/frame.go`
 - Test: `joltgo/replication/frame_test.go`
-- Modify: `joltgo/replication/store.go`（追加 `Schema()` 方法）
+
+（`Store.Schema()` 也在 `frame.go` 里定义 —— 它与 `Frame`/`Schema` 类型是一组，`store.go` 不需要改动。）
 
 **Interfaces:**
 - Consumes: `Store`（Task 2）、`Value`（Task 1）
@@ -890,6 +891,24 @@ func TestDestroyAndRebuildInSameFrameEmitsBoth(t *testing.T) {
 		t.Fatalf("重建后不应重复下发，得到 %+v", n.Entities)
 	}
 }
+
+// removed 下发时必须一并清掉基线，否则之后写回同一个值会被抑制、客户端再也收不到。
+func TestRemovedAttrCanBeReSetAndIsSentAgain(t *testing.T) {
+	s := newTestStore()
+	s.Set(7, "Enemy", Bool(true))
+	s.Drain()
+
+	s.Remove(7, "Enemy")
+	if f := s.Drain(); len(f.Entities) != 1 || len(f.Entities[0].Removed) != 1 {
+		t.Fatalf("移除应下发 1 条 removed，得到 %+v", f.Entities)
+	}
+
+	s.Set(7, "Enemy", Bool(true)) // 写回完全相同的值
+	f := s.Drain()
+	if len(f.Entities) != 1 || len(f.Entities[0].Set) != 1 {
+		t.Fatalf("移除后写回同一个值也必须重新下发，得到 %+v", f.Entities)
+	}
+}
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -1007,6 +1026,9 @@ func (s *Store) Full() Frame {
 		ed := EntityDelta{ID: id}
 		for _, cid := range sortedIDs(vals) {
 			ed.Set = append(ed.Set, AttrValue{Attr: cid, Value: vals[cid]})
+		}
+		if len(ed.Set) == 0 {
+			continue // 没有任何属性可说的实体不进全量（与 Drain 的跳过规则保持对称）
 		}
 		f.Entities = append(f.Entities, ed)
 	}
