@@ -788,6 +788,31 @@ func TestInitIsIdempotent(t *testing.T) {
 	}
 }
 
+// 全局状态单例在 init 之后必须立刻与 Go 侧计数一致（组件是用零值建的，
+// 漏掉这次同步会让 Wave 停在 0 直到首次清波）。
+func TestGameStateSyncedAtInit(t *testing.T) {
+	s, _ := newTestSim(t)
+	gs, ok := ecs.Get[GameState](s.world, s.GameEntity())
+	if !ok {
+		t.Fatal("init 后应有全局状态单例实体")
+	}
+	if gs.Score != int32(s.score) || gs.Wave != int32(s.wave) || gs.Gold != int32(s.gold) {
+		t.Fatalf("init 后组件应与 Go 侧计数一致：组件 %+v，Go 侧 score=%d wave=%d gold=%d",
+			*gs, s.score, s.wave, s.gold)
+	}
+
+	// Reset 重建世界后同样要立刻同步：单例是新实体、组件又回到零值。
+	s.Reset()
+	gs, ok = ecs.Get[GameState](s.world, s.GameEntity())
+	if !ok {
+		t.Fatal("Reset 后应有全局状态单例实体")
+	}
+	if gs.Score != int32(s.score) || gs.Wave != int32(s.wave) || gs.Gold != int32(s.gold) {
+		t.Fatalf("Reset 后组件应与 Go 侧计数一致：组件 %+v，Go 侧 score=%d wave=%d gold=%d",
+			*gs, s.score, s.wave, s.gold)
+	}
+}
+
 // TestTwoPlayersIndependentInputs 验证两名玩家有独立输入与位置。
 func TestTwoPlayersIndependentInputs(t *testing.T) {
 	s, p := newTestSim(t)

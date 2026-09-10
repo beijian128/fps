@@ -253,6 +253,7 @@ func (s *Simulation) init() {
 
 	// PVE 初始波次 + 金币资源。
 	s.wave = 1
+	s.syncGameState() // 让组件立刻与 Go 侧计数一致，否则它会停在零值直到首次计数变化
 	for i := 0; i < initialEnemies; i++ {
 		s.spawnEnemy()
 	}
