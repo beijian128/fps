@@ -3383,6 +3383,10 @@ const FpsClient := preload("res://scripts/fps_client.gd")
 
 var _failures := 0
 var _c: Node
+# 跑完的用例标记。GDScript 没有 try/catch：某个测试函数内部一旦抛错（比如解码器
+# 挂掉），函数会中途返回、_failures 还是 0，整个用例就会"假绿"—— 所以每个函数
+# 末尾打一个完成标记，_init 逐个核对。
+var _done := {}
 
 func _init() -> void:
 	_c = FpsClient.new()
@@ -3390,6 +3394,10 @@ func _init() -> void:
 	_test_full_frame_with_schema()
 	_test_delta_frame()
 	_test_command_encoding()
+	for name: String in ["schema", "full", "delta", "command"]:
+		if not _done.has(name):
+			_failures += 1
+			printerr("FAIL: 用例 %s 没跑完（中途抛错了？）" % name)
 	if _failures > 0:
 		printerr("frame_decode_test: %d 项失败" % _failures)
 		quit(1)
@@ -3433,6 +3441,16 @@ func _f_bytes(field: int, payload: PackedByteArray) -> PackedByteArray:
 	out.append_array(payload)
 	return out
 
+## packed repeated varint（proto3 对 repeated uint32 的默认编码）。
+func _f_varints_packed(field: int, vals: Array) -> PackedByteArray:
+	var payload := PackedByteArray()
+	for v in vals:
+		payload.append_array(_c._varint(int(v)))
+	var out := _tag(field, 2)
+	out.append_array(_c._varint(payload.size()))
+	out.append_array(payload)
+	return out
+
 # ---- 用例 ----
 
 func _schema_field(id: int, name: String, kind: int) -> PackedByteArray:
@@ -3458,6 +3476,7 @@ func _test_schema() -> void:
 	_check(fields.size() == 2, "schema 应有 2 个字段，得到 %d" % fields.size())
 	_check(String(fields[0]["name"]) == "Pos" and int(fields[0]["kind"]) == 5, "第一个字段应是 Pos/Vec3")
 	_check(int(d["schema"]["version"]) == 12345, "schema version 应解出 12345")
+	_done["schema"] = true
 
 func _test_full_frame_with_schema() -> void:
 	var av := _f_varint(1, 1)                       # id = 1 (Pos)
@@ -3481,15 +3500,17 @@ func _test_full_frame_with_schema() -> void:
 	_check((e["set"][0]["f"] as Array).size() == 3, "Pos 应有 3 个分量")
 	_check(float((e["set"][0]["f"] as Array)[2]) == 3.0, "Pos.z 应为 3")
 	_check(bool(e["set"][1]["b"]) == true, "Enemy 应为 true")
+	_done["full"] = true
 
 func _test_delta_frame() -> void:
 	var ed := _f_varint(1, 5)
 	ed.append_array(_f_varint(2, 1))                # destroy
 	ed.append_array(_f_varint(3, 2))                # removed: [2]
 
+	# 实体 6 用 **packed** 形式 —— 服务端 proto3 对 repeated uint32 默认就是 packed，
+	# 上面实体 5 的非 packed 形式只是兼容分支，真正跑在线上的是这一条。
 	var ed2 := _f_varint(1, 6)
-	ed2.append_array(_f_varint(3, 4))               # removed: [4]
-	ed2.append_array(_f_varint(3, 5))               # removed: [4, 5]
+	ed2.append_array(_f_varints_packed(3, [4, 5]))  # removed: [4, 5]
 
 	var frame := _f_varint(1, 9)
 	frame.append_array(_f_bytes(3, ed))
@@ -3498,7 +3519,8 @@ func _test_delta_frame() -> void:
 	var d: Dictionary = _c._decode_frame(frame)
 	_check(bool(d["full"]) == false, "默认应是增量帧")
 	_check(bool(d["entities"][0]["destroy"]) == true, "实体 5 应是 destroy")
-	_check((d["entities"][1]["removed"] as Array) == [4, 5], "实体 6 的 removed 应为 [4,5]")
+	_check((d["entities"][1]["removed"] as Array) == [4, 5], "实体 6 的 packed removed 应为 [4,5]")
+	_done["delta"] = true
 
 # 上行字段号必须与 CommandMsg 一致。`reset` 是最容易写错的一个：它在服务端生成码里
 # 叫 Reset_（与生成方法重名），但线上字段号仍是 7。
@@ -3533,6 +3555,7 @@ func _test_command_encoding() -> void:
 	_check(seen.get(5, -1) == _c.WIRE_LEN, "origin 应是字段 5")
 	_check(seen.get(6, -1) == _c.WIRE_LEN, "dir 应是字段 6")
 	_check(seen.get(7, -1) == _c.WIRE_VARINT, "reset 应是字段 7")
+	_done["command"] = true
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
