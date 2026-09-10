@@ -2482,6 +2482,21 @@ func TestFirstFound(t *testing.T) {
 		t.Fatalf("应命中 g2 的实例，得到 %+v", got)
 	}
 }
+
+// 排队期间断线重连会带着同一个 token 再 Join 一次，队列里必须只留最新那条。
+func TestRemoveQueued(t *testing.T) {
+	q := []queuedPlayer{{uid: "a"}, {uid: "b"}, {uid: "a"}}
+	got := removeQueued(q, "a")
+	if len(got) != 1 || got[0].uid != "b" {
+		t.Fatalf("应只留下 b，得到 %+v", got)
+	}
+	if len(q) != 3 || q[0].uid != "a" {
+		t.Fatalf("removeQueued 不应改动入参，得到 %+v", q)
+	}
+	if got := removeQueued(q, "zzz"); len(got) != 3 {
+		t.Fatalf("没有匹配项时队列应原样返回，得到 %+v", got)
+	}
+}
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -2506,7 +2521,7 @@ type RejoinResult struct {
 	GameServerID string
 }
 
-// firstFound 从各 game 节点的应答里挑出第一个命中的。nodes 是节点 id。
+// firstFound 从各 game 节点的应答里挑出第一个命中的。replies 的键是 game 节点 id。
 // 抽成纯函数是为了能脱离 pitaya 直接单测。
 func firstFound(replies map[string]*RejoinResult) (*RejoinResult, bool) {
 	for _, r := range replies {
@@ -2530,7 +2545,8 @@ func firstFound(replies map[string]*RejoinResult) (*RejoinResult, bool) {
 func (c *Component) Join(ctx context.Context, msg *protos.JoinMsg) {
 	s := c.app.GetSessionFromCtx(ctx)
 	uid := msg.Token
-	if uid == "" {
+	persisted := uid != ""
+	if !persisted {
 		uid = nuid.New().Next() // 未带 token 的旧客户端：退化成一次性身份
 	}
 	if err := s.Bind(ctx, uid); err != nil {
@@ -2538,15 +2554,34 @@ func (c *Component) Join(ctx context.Context, msg *protos.JoinMsg) {
 		return
 	}
 
-	if c.tryRejoin(ctx, s, uid) {
+	// 只有带 token 的客户端才可能回局；一次性身份去问一定是白跑一趟。
+	if persisted && c.tryRejoin(ctx, s, uid) {
 		return // 已回到存量对局，不入匹配队列
 	}
 
 	c.mu.Lock()
+	// 同一个 token 在**排队等待期间**断线重连会再走一次 Join。不去重的话队列
+	// 里会留下两条同 uid 的记录：`tryMatch` 可能把它们俩配成一对
+	// （game.create 的 Uids 变成 [T, T]，一个人占满两个槽位），单人兜底时更会
+	// 给同一个人先后开两局、推两条 onMatched。旧实现不会暴露这个问题，
+	// 因为每次的 uid 都是新的 nuid。
+	c.queue = removeQueued(c.queue, uid)
 	c.queue = append(c.queue, queuedPlayer{uid: uid, session: s, joinedAt: time.Now()})
 	c.mu.Unlock()
 
 	c.tryMatch()
+}
+
+// removeQueued 返回去掉 uid 相同记录后的新队列（不改动入参）。重连时用它把
+// 断线前残留的那条排队项挤掉，保证一个 token 在队列里最多一条。
+func removeQueued(queue []queuedPlayer, uid string) []queuedPlayer {
+	out := make([]queuedPlayer, 0, len(queue))
+	for _, p := range queue {
+		if p.uid != uid {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // tryRejoin 询问所有 game 节点是否托管着该 token 的存量实例。命中则把它当作
