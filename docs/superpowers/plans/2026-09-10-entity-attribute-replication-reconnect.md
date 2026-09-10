@@ -348,6 +348,7 @@ func TestSetStoresFinalValueOnly(t *testing.T) {
 func TestDestroyClearsValues(t *testing.T) {
 	s := newTestStore()
 	s.Set(7, "Health", F32(10))
+	s.sent[7] = map[uint32]Value{s.attrOf("Health"): F32(10)} // 模拟已下发过
 
 	s.Destroy(7)
 	if _, ok := s.Get(7, "Health"); ok {
@@ -356,6 +357,32 @@ func TestDestroyClearsValues(t *testing.T) {
 	if !s.dead[7] {
 		t.Fatal("销毁应记录 dead 标记")
 	}
+	if _, ok := s.sent[7]; ok {
+		t.Fatal("销毁应同时清掉已下发基线，否则 id 被复用时新实体会因为值相同而发不出去")
+	}
+}
+
+// id 被回收后立刻重建：新实体必须重新下发，即便它的值和旧实体的相同。
+func TestSetAfterDestroyIsDirtyAgain(t *testing.T) {
+	s := newTestStore()
+	s.Set(7, "Health", F32(10))
+	s.sent[7] = map[uint32]Value{s.attrOf("Health"): F32(10)} // 旧实体已下发过 10
+
+	s.Destroy(7)
+	s.Set(7, "Health", F32(10)) // 新实体，值恰好相同
+
+	if got := dirtyIDs(s, 7); len(got) != 1 {
+		t.Fatalf("重建的实体必须重新标脏，得到 %v", got)
+	}
+}
+
+func TestSetKindMismatchPanics(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("值与声明的 Kind 不一致应 panic")
+		}
+	}()
+	newTestStore().Set(1, "Health", Vec3(1, 2, 3)) // Health 声明为 KindF32
 }
 
 func TestRemoveDropsValue(t *testing.T) {
@@ -371,13 +398,20 @@ func TestRemoveDropsValue(t *testing.T) {
 	}
 }
 
-func TestRemoveUndeclaredAttrPanics(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("Set/Remove 未声明属性应 panic")
-		}
-	}()
-	newTestStore().Set(1, "Nope", F32(1))
+func TestUndeclaredAttrPanics(t *testing.T) {
+	assertPanics := func(name string, fn func()) {
+		t.Helper()
+		defer func() {
+			if recover() == nil {
+				t.Fatalf("%s 未声明属性应 panic", name)
+			}
+		}()
+		fn()
+	}
+	s := newTestStore()
+	assertPanics("Set", func() { s.Set(1, "Nope", F32(1)) })
+	assertPanics("Remove", func() { s.Remove(1, "Nope") })
+	assertPanics("Get", func() { s.Get(1, "Nope") })
 }
 
 func TestDeclareTwicePanics(t *testing.T) {
@@ -398,6 +432,9 @@ func TestResetKeepsDeclarations(t *testing.T) {
 
 	if _, ok := s.Get(7, "Health"); ok {
 		t.Fatal("Reset 后应清空终值表")
+	}
+	if !s.dead[7] {
+		t.Fatal("Reset 应保留一条待发的 destroy，否则场景重建后客户端会残留旧实体")
 	}
 	s.Set(7, "Health", F32(1)) // 声明还在，不应 panic
 }
@@ -441,6 +478,8 @@ Expected: FAIL —— `undefined: Store`、`undefined: New`、`undefined: dirtyI
 //
 // 非并发安全：与 sim.Simulation 一样，由对局实例 goroutine 独占。
 package replication
+
+import "strconv"
 
 // Attr 是一个属性的声明：ID 从 1 起，0 保留为无效。
 type Attr struct {
@@ -500,8 +539,15 @@ func (s *Store) attrOf(name string) uint32 {
 //
 // 标脏规则：与「上一次下发给客户端的值」不同才标脏。同一帧内多次 Set 只留终值；
 // 改回已下发过的值会撤销本帧的脏标记（A → B → A 不产生任何流量）。
+//
+// 类型必须与 Declare 时声明的 Kind 一致：不一致说明调用点写错了属性名或值的
+// 构造器，会让客户端按错误的 Kind 解码（静默数据损坏），所以在 dev/test 直接 panic。
 func (s *Store) Set(id uint32, attr string, v Value) {
 	cid := s.attrOf(attr)
+	if want := s.attrs[cid-1].Kind; want != v.Kind() {
+		panic("replication: 属性 " + attr + " 声明为 Kind " + strconv.Itoa(int(want)) +
+			"，却写入了 Kind " + strconv.Itoa(int(v.Kind())))
+	}
 
 	m := s.values[id]
 	if m == nil {
@@ -562,30 +608,40 @@ func (s *Store) Remove(id uint32, attr string) {
 }
 
 // Destroy 销毁实体：清空它的全部属性并记一条销毁下发。
+//
+// `sent`（已下发基线）也必须一并清掉：实体 id 可能被回收后立刻复用，若基线还在，
+// 新实体的 Set 会因为「与旧实体的值相同」而撤销脏标记，客户端再也收不到它。
 func (s *Store) Destroy(id uint32) {
 	delete(s.values, id)
 	delete(s.dirty, id)
 	delete(s.gone, id)
+	delete(s.sent, id)
 	s.dead[id] = true
 }
 
-// Reset 清空全部实体与脏集，保留属性声明（对局 Reset 用）。
+// Reset 丢弃全部实体与脏集，保留属性声明（对局 Reset 用）。
+//
+// 已下发过的实体各自保留一条待发的 destroy：场景重建后刚体 id 会从头发放，
+// 不显式销毁的话客户端会残留旧实体（新实体的 set 只会覆盖同 id 的那些）。
 func (s *Store) Reset() {
+	for id := range s.values {
+		s.dead[id] = true
+	}
 	s.values = map[uint32]map[uint32]Value{}
-	s.sent = map[uint32]map[uint32]Value{}
 	s.dirty = map[uint32]map[uint32]bool{}
 	s.gone = map[uint32]map[uint32]bool{}
-	s.dead = map[uint32]bool{}
 }
 
 // Get 返回实体 id 的属性 attr 的终值；不存在时返回 (Value{}, false)。
-// 供测试与调试使用，不参与同步路径。
+// 供测试与调试使用，不参与同步路径。属性名未声明时与 Set 一样 panic
+// （先校验名字再查实体，避免同一个错误在实体不存在时被静默吞掉）。
 func (s *Store) Get(id uint32, attr string) (Value, bool) {
+	cid := s.attrOf(attr)
 	m := s.values[id]
 	if m == nil {
 		return Value{}, false
 	}
-	v, ok := m[s.attrOf(attr)]
+	v, ok := m[cid]
 	return v, ok
 }
 
@@ -779,6 +835,33 @@ func TestSetBackToSentValueCancelsDirty(t *testing.T) {
 		t.Fatalf("改回已下发值应不产生增量，得到 %+v", f.Entities)
 	}
 }
+
+// id 被回收后同帧重建：destroy 与 set 必须一起下发，客户端才不会漏掉新实体。
+func TestDestroyAndRebuildInSameFrameEmitsBoth(t *testing.T) {
+	s := newTestStore()
+	s.Set(7, "Health", F32(10))
+	s.Drain()
+
+	s.Destroy(7)
+	s.Set(7, "Health", F32(10)) // 新实体，值恰好与旧实体相同
+
+	f := s.Drain()
+	if len(f.Entities) != 1 {
+		t.Fatalf("应产出 1 个实体条目，得到 %d", len(f.Entities))
+	}
+	ed := f.Entities[0]
+	if !ed.Destroy {
+		t.Fatal("应带 destroy")
+	}
+	if len(ed.Set) != 1 {
+		t.Fatalf("应同时带新实体的 set，得到 %+v", ed.Set)
+	}
+
+	// 基线已按新值重建，下一帧不应重复下发。
+	if n := s.Drain(); len(n.Entities) != 0 {
+		t.Fatalf("重建后不应重复下发，得到 %+v", n.Entities)
+	}
+}
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -841,8 +924,6 @@ func (s *Store) Drain() Frame {
 		ed := EntityDelta{ID: id}
 		if s.dead[id] {
 			ed.Destroy = true
-			f.Entities = append(f.Entities, ed)
-			continue
 		}
 		for _, cid := range sortedIDs(s.gone[id]) {
 			ed.Removed = append(ed.Removed, cid)
@@ -851,7 +932,9 @@ func (s *Store) Drain() Frame {
 		for _, cid := range sortedIDs(s.dirty[id]) {
 			ed.Set = append(ed.Set, AttrValue{Attr: cid, Value: vals[cid]})
 		}
-		if len(ed.Removed) == 0 && len(ed.Set) == 0 {
+		// 销毁与重建可以同帧发生（id 被回收后立刻新建）：destroy 与 set 一起发，
+		// 客户端先清掉旧实体、再按 set 重建。所以销毁时不能直接 continue。
+		if !ed.Destroy && len(ed.Removed) == 0 && len(ed.Set) == 0 {
 			continue
 		}
 		f.Entities = append(f.Entities, ed)
@@ -861,6 +944,8 @@ func (s *Store) Drain() Frame {
 		if ed.Destroy {
 			delete(s.sent, ed.ID)
 			delete(s.dead, ed.ID)
+		}
+		if len(ed.Set) == 0 && len(ed.Removed) == 0 {
 			continue
 		}
 		sm := s.sent[ed.ID]
