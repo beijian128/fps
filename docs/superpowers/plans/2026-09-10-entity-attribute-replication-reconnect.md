@@ -3894,12 +3894,28 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 **Files:**
 - Modify: `godot_client/scripts/main.gd`
 - Delete: `godot_client/tests/snapshot_same_step_test.gd`
+- Modify: `godot_client/tests/ws_smoke.gd`（旧信号 `state_received`）
+- Modify: `godot_client/tests/reconnect_cleanup_test.gd`（引用了已删除的字段，且列在 `AGENTS.md` 的回归命令里）
 
 **Interfaces:**
 - Consumes: `WorldStore`（Task 11）、`frame_received` 信号（Task 12）
 - Produces: `main.gd` 内部新函数 `_on_frame` / `_reconcile_scene` / `_build_body_dict` / `_refresh_derived`
 
 **现有字段名对照（改动前务必核对）**：`_entities`（id → BodyEntity 节点，**不是** `_bodies`）、`_res_nodes`（id → 金币节点）、`_place_body(id, b, pos, quat)`、`_remove_body(id)`、`_player_pos` / `_remote_pos` / `_remote_yaw`、`_hud_score` / `_hud_wave` / `_hud_gold` / `_hud_targets` / `_hud_enemies`、`_last_score` / `_last_health`、`_prev_projectiles`、`_render_resources(resources)`、`_update_hud(s)`、`_detect_impacts(bodies)`、`_pop(point, color, size, ttl)`、`_snap_sig`、`_prev_snap` / `_next_snap`。
+
+> **实施时发现的四处 brief 缺陷（已按下面的写法落地，改代码时以这里为准）：**
+>
+> 1. **`_refresh_derived` 必须整体重建 `_body_xform`，不能只做增改。** 否则消失的 id 会一直留在
+>    映射里，`_reconcile_scene` 的「删掉不在 `_body_xform` 里的节点」那条永远不会触发 ——
+>    实体被销毁后渲染节点不会消失。正确写法是每帧先 `_body_xform.clear()` 再按 store 重建。
+> 2. **`_body_xform` 必须排除带 `Resource.Kind` 的实体。** 金币在 store 里是普通刚体，
+>    不排除的话每一枚金币都会额外长出一个灰色的刚体球。
+> 3. **销毁特效的位置要从 `attrs["Pos"]` 取**，不能从 `_body_xform` 取 —— 触发时实体已经从
+>    store 里删掉了，查不到就永远在世界原点爆闪。
+> 4. **`reset` 要上报真实的按键边沿**，不要像 brief 那样写死 `false`（否则重置键失效）。
+
+> **另外要改的（不在文件清单里但会挂）：** `godot_client/tests/reconnect_cleanup_test.gd`
+> 引用了已删除的字段，且它列在 `AGENTS.md` 的回归命令里，必须一并改到新 API。
 
 - [ ] **Step 1: 换信号、换状态变量**
 
