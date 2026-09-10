@@ -1156,6 +1156,17 @@ type GameState struct {
 	ecs.Add(s.world, s.game, GameState{})
 ```
 
+   紧接着在 `s.wave = 1` 那一行之后补一次 `s.syncGameState()`：
+
+```go
+	s.wave = 1
+	s.syncGameState() // 让组件立刻与 Go 侧计数一致，否则它会停在零值直到首次计数变化
+```
+
+   **这一步不能省**：单例是用零值 `GameState{}` 建的，而 `s.wave` 此时是 1。
+   不补这一次同步，组件里的 `Wave` 会一直是 0，直到第一次清波才刷新；Task 5 的
+   oracle 测试会拿组件当基准去比对同步 store，首次比对就会失败。
+
 5. `reset()` 里把 `s.game = ecs.InvalidEntity` 与 `for i := range s.players` 一起重置。
 
 6. 新增公开访问器：
