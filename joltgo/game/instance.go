@@ -10,7 +10,8 @@ package game
 //     增量取走（DrainFrame，恰好调用一次、负责清脏），再按槽位下发：登记了重连 /
 //     resync 的槽位（pendingFull）收全量帧，其余槽位收增量帧。
 //
-// 生命周期：Create（remote RPC）构造并 Start → Stop 在 game 组件 Shutdown 时调用。
+// 生命周期：Create（remote RPC）构造并 Start → Stop 由 game 组件 Shutdown 调用，
+// 也会在**空闲自退**时由实例自己调用；stopOnce 保证两条路径都安全。
 
 import (
 	"log"

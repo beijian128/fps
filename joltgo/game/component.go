@@ -62,7 +62,7 @@ func (c *Component) Create(ctx context.Context, msg *protos.CreateGameMsg) (*pro
 	}
 
 	inst := NewInstance(c.app, msg.MatchId, msg.Uids)
-	inst.onExit = func() { c.forget(msg.MatchId, msg.Uids) }
+	inst.onExit = func() { c.forget(inst, msg.MatchId, msg.Uids) }
 	inst.Start()
 
 	c.mu.Lock()
@@ -148,12 +148,19 @@ func (c *Component) lookup(ctx context.Context) (*Instance, int, bool) {
 	return inst, idx, inst != nil
 }
 
-// forget 把已结束的实例从注册表摘掉（幂等：只在仍指向同一实例时删除）。
-func (c *Component) forget(matchID string, uids []string) {
+// forget 把已结束的实例从注册表摘掉。
+//
+// uid 的条目必须**确认还指向这个实例**才删：玩家离开旧对局后可能已经匹配进了新
+// 对局，新实例刚把 uidToInst[uid] 改写成自己；旧实例 60 秒后回收时若无脑删，
+// 就会把新对局的映射一起抹掉，玩家之后的 game.cmd 会全部被忽略。
+func (c *Component) forget(inst *Instance, matchID string, uids []string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	delete(c.instances, matchID)
+	delete(c.instances, matchID) // matchId 由 nuid 生成，不会重复，无需守卫
 	for _, uid := range uids {
+		if c.uidToInst[uid] != inst {
+			continue // 该 uid 已经归新对局所有
+		}
 		delete(c.uidToInst, uid)
 		delete(c.uidToIndex, uid)
 	}
