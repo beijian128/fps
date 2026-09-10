@@ -4185,6 +4185,14 @@ func _update_hud() -> void:
 git rm godot_client/tests/snapshot_same_step_test.gd
 ```
 
+**同时修 `godot_client/tests/ws_smoke.gd`**（它连着旧信号，不修就会报错）：
+
+- `_initialize()` 里 `_client.state_received.connect(_on_state)` → `_client.frame_received.connect(_on_frame)`。
+- `_on_state(s)` → `_on_frame(f)`，里面 `s.get("step", -1)` 改成 `f.get("step", -1)`，其余统计逻辑不变。
+- 文件头的注释把 `onSnapshot` 快照改成 `onFrame` 帧。
+
+> `ws_smoke.gd` 需要真实集群才跑得起来，所以它是 Step 8 的手动验证工具，不参与无头回归 —— 但正因为它是**唯一**走真实 pomelo/WS/protobuf 全链路的测试，Step 8 一定要跑它。
+
 （`AGENTS.md` 里引用该测试命令行的地方在 Task 14 一并清理。）
 
 - [ ] **Step 7: 跑客户端单测**
