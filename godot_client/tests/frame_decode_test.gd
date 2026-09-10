@@ -11,6 +11,7 @@ func _init() -> void:
 	_test_schema()
 	_test_full_frame_with_schema()
 	_test_delta_frame()
+	_test_command_encoding()
 	if _failures > 0:
 		printerr("frame_decode_test: %d 项失败" % _failures)
 		quit(1)
@@ -120,3 +121,37 @@ func _test_delta_frame() -> void:
 	_check(bool(d["full"]) == false, "默认应是增量帧")
 	_check(bool(d["entities"][0]["destroy"]) == true, "实体 5 应是 destroy")
 	_check((d["entities"][1]["removed"] as Array) == [4, 5], "实体 6 的 removed 应为 [4,5]")
+
+# 上行字段号必须与 CommandMsg 一致。`reset` 是最容易写错的一个：它在服务端生成码里
+# 叫 Reset_（与生成方法重名），但线上字段号仍是 7。
+func _test_command_encoding() -> void:
+	var buf: PackedByteArray = _c._encode_command(
+		Vector2(1.0, 2.0), 0.5, true, true, Vector3(3, 4, 5), Vector3(0, 0, 1), true)
+
+	var seen := {}
+	var i := 0
+	while i < buf.size():
+		var t: Array = _c._read_varint(buf, i)
+		i = int(t[1])
+		var field: int = int(t[0]) >> 3
+		var wire: int = int(t[0]) & 0x07
+		seen[field] = wire
+		match wire:
+			_c.WIRE_VARINT:
+				var r: Array = _c._read_varint(buf, i)
+				i = int(r[1])
+			_c.WIRE_FIXED32:
+				i += 4
+			_c.WIRE_LEN:
+				var rl: Array = _c._read_varint(buf, i)
+				i = int(rl[1]) + int(rl[0])
+			_:
+				break
+
+	_check(seen.get(1, -1) == _c.WIRE_LEN, "move 应是字段 1（packed float）")
+	_check(seen.get(2, -1) == _c.WIRE_FIXED32, "yaw 应是字段 2（fixed32）")
+	_check(seen.get(3, -1) == _c.WIRE_VARINT, "jump 应是字段 3")
+	_check(seen.get(4, -1) == _c.WIRE_VARINT, "shoot 应是字段 4")
+	_check(seen.get(5, -1) == _c.WIRE_LEN, "origin 应是字段 5")
+	_check(seen.get(6, -1) == _c.WIRE_LEN, "dir 应是字段 6")
+	_check(seen.get(7, -1) == _c.WIRE_VARINT, "reset 应是字段 7")

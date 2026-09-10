@@ -138,8 +138,16 @@ func send_match_join() -> void:
 	_send_notify("match.match.join", payload)
 
 ## CommandMsg：把一帧的上行命令合并成一条消息发送（帧是最小发送单位）。
+## 编码拆成 _encode_command 是为了能脱离 WebSocket 单测字段号 —— `reset` 在服务端
+## 生成码里叫 Reset_（与生成方法重名），线上字段号仍是 7，是最容易写错的一处。
 func send_command(move: Vector2, yaw: float, jump: bool, shoot: bool,
 		origin: Vector3, dir: Vector3, reset: bool) -> void:
+	_send_notify("game.game.cmd", _encode_command(move, yaw, jump, shoot, origin, dir, reset))
+
+## _encode_command 生成 CommandMsg 的 protobuf 载荷。
+## 字段号取自 game/protos/game.proto：move=1 yaw=2 jump=3 shoot=4 origin=5 dir=6 reset=7。
+func _encode_command(move: Vector2, yaw: float, jump: bool, shoot: bool,
+		origin: Vector3, dir: Vector3, reset: bool) -> PackedByteArray:
 	var msg := _packed_floats(1, [move.x, move.y])
 	msg.append_array(_field_fixed32(2, yaw))
 	if jump:
@@ -150,7 +158,7 @@ func send_command(move: Vector2, yaw: float, jump: bool, shoot: bool,
 		msg.append_array(_packed_floats(6, [dir.x, dir.y, dir.z]))
 	if reset:
 		msg.append_array(_field_varint(7, 1))
-	_send_notify("game.game.cmd", msg)
+	return msg
 
 ## 请求服务端下一帧下发全量（full 帧自带 schema）。收到 full 之前忽略一切增量。
 func send_resync() -> void:
