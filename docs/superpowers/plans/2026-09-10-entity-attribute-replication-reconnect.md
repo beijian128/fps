@@ -1967,6 +1967,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 - Modify: `joltgo/sim/state.go`（删除）
 - Modify: `joltgo/sim/simulation.go`（删除 `Snapshot()` 与 `snapshot()`）
 - Modify: `joltgo/sim/sim_test.go`（接管 `State` 族与 `snapshotWorld`）
+- Modify: `joltgo/physics/map_integration_test.go`（`-tags joltdll`；它也用了 `s.Snapshot()` 与 `sim.BodyInfo`，同样要迁到 `sim.FullFrame()`）
 
 **Interfaces:**
 - Consumes: `replication.Frame`/`Schema`/`AttrValue`/`EntityDelta`（Task 3）、`Simulation.DrainFrame`/`FullFrame`（Task 5）
@@ -2172,6 +2173,9 @@ func snapshotWorld(s *Simulation) State {
 	}
 
 	ecs.Each(s.world, func(e ecs.Entity, b *Body) {
+		if ecs.Has[Resource](s.world, e) {
+			return // 金币是传感器球，不属于刚体列表（对应原 snapshot() 的 Without[Resource]）
+		}
 		bi := BodyInfo{
 			ID:         uint32(e),
 			Type:       int(b.Kind),
@@ -2336,8 +2340,21 @@ func (i *Instance) MatchID() string { return i.matchID }
 
 - [ ] **Step 7: 编译并跑全部测试**
 
-Run: `cd joltgo && gofmt -l . && go vet ./... 2>&1 | head -20 && go test ./ecs ./sim ./replication`
-Expected: PASS
+```bash
+cd joltgo
+gofmt -l sim game/component.go game/instance.go   # 只检查动过的文件（存量 CRLF 文件会被整文件标记，那不是本次问题）
+go build ./...
+go vet ./gate ./match ./game ./sim ./replication ./ecs
+go vet -tags joltdll ./physics    # map_integration_test.go 也迁到了 FullFrame，必须一并检查
+go test -count=1 ./ecs ./sim ./replication
+grep -rn 'protos.Snapshot\|protos.BodyInfo\|protos.PlayerState\|protos.ResourceInfo' .   # 应无输出
+grep -rn '\.Snapshot()' sim/                                                             # 应无输出
+grep -rn 'func snapshotWorld' sim/                                                       # 应恰好 1 处
+```
+
+Expected: 全部通过 / 无输出。`go test ./...` 需要已构建的 `libjolt_c.dll`，本步不必跑。
+
+> **注意**：`joltgo/physics/map_integration_test.go`（`-tags joltdll`）也用了 `s.Snapshot()` 与 `sim.BodyInfo`，同样要迁移 —— 它的断言只关心角色能否走上舷梯，所以直接用 `sim.FullFrame()` 读刚体位置即可（这也顺带让这个集成测试跑在真实的同步路径上）。
 
 - [ ] **Step 8: 提交**
 
