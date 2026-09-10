@@ -125,6 +125,17 @@ func (c *Component) Cmd(ctx context.Context, msg *protos.CommandMsg) {
 	}
 }
 
+// Resync 是远端 RPC handler（route "game.resync"）：把该玩家的下一帧标为全量。
+// 客户端在收到 onMatched 之后主动调用 —— 由客户端驱动就没有「onMatched 与
+// 全量帧谁先到」的竞态：客户端在收到 full 帧之前会丢弃一切增量。
+func (c *Component) Resync(ctx context.Context) {
+	inst, idx, ok := c.lookup(ctx)
+	if !ok {
+		return
+	}
+	inst.RequestFull(idx)
+}
+
 // lookup 按会话 UID 找到实例与玩家槽位。
 func (c *Component) lookup(ctx context.Context) (*Instance, int, bool) {
 	s := c.app.GetSessionFromCtx(ctx)
