@@ -1,6 +1,15 @@
 package match
 
-import "testing"
+import (
+	"context"
+	"errors"
+	"testing"
+
+	pitaya "github.com/topfreegames/pitaya/v3/pkg"
+	"github.com/topfreegames/pitaya/v3/pkg/cluster"
+	"github.com/topfreegames/pitaya/v3/pkg/session"
+	"joltgo/game/protos"
+)
 
 func TestFirstFound(t *testing.T) {
 	if _, ok := firstFound(map[string]*RejoinResult{}); ok {
@@ -35,5 +44,48 @@ func TestRemoveQueued(t *testing.T) {
 	}
 	if got := removeQueued(q, "zzz"); len(got) != 3 {
 		t.Fatalf("没有匹配项时队列应原样返回，得到 %+v", got)
+	}
+}
+
+// Component 只需要 pitaya.Pitaya 接口，所以「嵌入接口 + 覆盖用得到的两个方法」
+// 就够驱动 Join 了 —— 不必引入 gomock。
+type joinTestApp struct {
+	pitaya.Pitaya
+	sess session.Session
+}
+
+func (a *joinTestApp) GetSessionFromCtx(context.Context) session.Session { return a.sess }
+
+func (a *joinTestApp) GetServersByType(string) (map[string]*cluster.Server, error) {
+	return nil, errors.New("no game server") // 回局查询必然是 miss
+}
+
+// joinTestSession 只实现 Join 用到的 Bind。
+type joinTestSession struct {
+	session.Session
+	uid string
+}
+
+func (s *joinTestSession) Bind(_ context.Context, uid string) error {
+	s.uid = uid
+	return nil
+}
+
+// 排队等待期间断线重连：同一个 token 再 Join 一次，队列里必须还是只有一条
+// （不去重的话这里会是 2 条，进而可能自己跟自己配对、或单人兜底时开两局）。
+func TestJoinDedupsQueuedToken(t *testing.T) {
+	c := New(&joinTestApp{sess: &joinTestSession{}})
+	ctx := context.Background()
+
+	c.Join(ctx, &protos.JoinMsg{Token: "T"})
+	if len(c.queue) != 1 {
+		t.Fatalf("首次 Join 应入队一条，得到 %d", len(c.queue))
+	}
+	c.Join(ctx, &protos.JoinMsg{Token: "T"})
+	if len(c.queue) != 1 {
+		t.Fatalf("同 token 重连不应重复入队，得到 %d", len(c.queue))
+	}
+	if c.queue[0].uid != "T" {
+		t.Fatalf("队列里应是最新那条会话，得到 %q", c.queue[0].uid)
 	}
 }
