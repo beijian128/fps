@@ -14,12 +14,17 @@ package game
 
 import (
 	"log"
+	"sync"
 	"time"
 
 	pitaya "github.com/topfreegames/pitaya/v3/pkg"
 	"joltgo/physics"
 	"joltgo/sim"
 )
+
+// instanceIdleTimeout 是「所有槽位都无上行消息」多久之后结束实例。
+// 远大于客户端 1s 重连 + 2.5s 看门狗，正常重连不会误杀。
+const instanceIdleTimeout = 60 * time.Second
 
 // Instance 对局实例。
 type Instance struct {
@@ -30,6 +35,10 @@ type Instance struct {
 
 	pendingFull [sim.MaxPlayers]bool // 本 tick 需要下发全量的槽位（重连 / resync）
 	startedAt   time.Time
+
+	lastSeen [sim.MaxPlayers]time.Time // 各槽位最近一次上行时间（仅 run goroutine 读写）
+	onExit   func()                    // 实例自行退出时的回调（由 game 组件设置）
+	stopOnce sync.Once
 
 	cmds chan func() // 命令队列：输入/射击/重置（由 run goroutine 顺序消费）
 	stop chan struct{}
@@ -50,13 +59,16 @@ func NewInstance(app pitaya.Pitaya, matchID string, uids []string) *Instance {
 // Start 创建物理世界并启动对局 goroutine。
 func (i *Instance) Start() {
 	i.startedAt = time.Now()
+	for slot := range i.lastSeen {
+		i.lastSeen[slot] = i.startedAt
+	}
 	i.sim.Init()
 	go i.run()
 }
 
 // Stop 停止对局 goroutine 并释放物理世界。
 func (i *Instance) Stop() {
-	close(i.stop)
+	i.stopOnce.Do(func() { close(i.stop) })
 }
 
 // run 是实例唯一的执行 goroutine：顺序消费命令 + 20 Hz tick + 广播快照。
@@ -71,9 +83,38 @@ func (i *Instance) run() {
 		case <-ticker.C:
 			i.sim.Step()
 			i.broadcast()
+			if i.idleExpired() {
+				log.Printf("instance %s: %v 无玩家上行，结束对局", i.matchID, instanceIdleTimeout)
+				if i.onExit != nil {
+					i.onExit()
+				}
+				// 关掉 stop：退出后没有 goroutine 再消费 cmds，正在并发的
+				// RPC handler 若还持有实例指针，enqueue 会卡在写满的 channel 上。
+				i.Stop()
+				return
+			}
 		case <-i.stop:
 			return
 		}
+	}
+}
+
+// idleExpired 报告所有槽位是否都已超过 instanceIdleTimeout 没有上行消息。
+// 用「最近一次收到上行」而不是 pitaya 的会话状态判断在线：后者跨服务不可见，
+// 前者是实例本就持有的信息。
+func (i *Instance) idleExpired() bool {
+	for slot := range i.uids {
+		if time.Since(i.lastSeen[slot]) < instanceIdleTimeout {
+			return false
+		}
+	}
+	return true
+}
+
+// touch 刷新某个槽位的在线时间（由 run goroutine 调用）。
+func (i *Instance) touch(slot int) {
+	if slot >= 0 && slot < len(i.lastSeen) {
+		i.lastSeen[slot] = time.Now()
 	}
 }
 
@@ -119,7 +160,10 @@ func (i *Instance) RequestFull(slot int) {
 	if slot < 0 || slot >= len(i.uids) {
 		return
 	}
-	i.enqueue(func() { i.pendingFull[slot] = true })
+	i.enqueue(func() {
+		i.touch(slot)
+		i.pendingFull[slot] = true
+	})
 }
 
 // MatchID 返回对局 id（match 服务回局查询时用）。
@@ -127,7 +171,10 @@ func (i *Instance) MatchID() string { return i.matchID }
 
 // ApplyInput 玩家输入（playerIdx 由 game 组件按 uid 映射，yaw 为水平朝向弧度）。
 func (i *Instance) ApplyInput(playerIdx int, move [2]float32, yaw float32, jump bool) {
-	i.enqueue(func() { i.sim.ApplyInput(playerIdx, move, yaw, jump) })
+	i.enqueue(func() {
+		i.touch(playerIdx)
+		i.sim.ApplyInput(playerIdx, move, yaw, jump)
+	})
 }
 
 // Shoot 发射弹丸（origin/dir 为枪口与朝向，归一化在 sim 内完成）。

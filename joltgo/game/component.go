@@ -62,6 +62,7 @@ func (c *Component) Create(ctx context.Context, msg *protos.CreateGameMsg) (*pro
 	}
 
 	inst := NewInstance(c.app, msg.MatchId, msg.Uids)
+	inst.onExit = func() { c.forget(msg.MatchId, msg.Uids) }
 	inst.Start()
 
 	c.mu.Lock()
@@ -145,6 +146,18 @@ func (c *Component) lookup(ctx context.Context) (*Instance, int, bool) {
 	idx := c.uidToIndex[uid]
 	c.mu.Unlock()
 	return inst, idx, inst != nil
+}
+
+// forget 把已结束的实例从注册表摘掉（幂等：只在仍指向同一实例时删除）。
+func (c *Component) forget(matchID string, uids []string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.instances, matchID)
+	for _, uid := range uids {
+		delete(c.uidToInst, uid)
+		delete(c.uidToIndex, uid)
+	}
+	log.Printf("game: instance %s 已回收", matchID)
 }
 
 // Shutdown 停止所有对局实例并释放物理世界。
