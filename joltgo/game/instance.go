@@ -26,6 +26,9 @@ type Instance struct {
 	matchID string
 	uids    []string // 玩家 uid，下标即 player_idx（槽位 0/1）
 
+	pendingFull [sim.MaxPlayers]bool // 本 tick 需要下发全量的槽位（重连 / resync）
+	startedAt   time.Time
+
 	cmds chan func() // 命令队列：输入/射击/重置（由 run goroutine 顺序消费）
 	stop chan struct{}
 }
@@ -44,6 +47,7 @@ func NewInstance(app pitaya.Pitaya, matchID string, uids []string) *Instance {
 
 // Start 创建物理世界并启动对局 goroutine。
 func (i *Instance) Start() {
+	i.startedAt = time.Now()
 	i.sim.Init()
 	go i.run()
 }
@@ -80,13 +84,44 @@ func (i *Instance) enqueue(cmd func()) {
 	}
 }
 
-// broadcast 把当前快照（转成 protobuf）推给局内所有玩家（经 gate 前端）。
+// broadcast 把本 tick 的增量推给局内玩家；被标记为待全量的槽位改推全量帧。
+// DrainFrame 每 tick 必须恰好调用一次（它负责清脏），所以先取帧再决定收件人。
 func (i *Instance) broadcast() {
-	snap := toSnapshot(i.sim.Snapshot())
-	if _, err := i.app.SendPushToUsers(snapRoute, snap, i.uids, frontendType); err != nil {
-		log.Printf("instance %s broadcast: %v", i.matchID, err)
+	delta := i.sim.DrainFrame()
+
+	var deltaUIDs, fullUIDs []string
+	for slot, uid := range i.uids {
+		if i.pendingFull[slot] {
+			i.pendingFull[slot] = false
+			fullUIDs = append(fullUIDs, uid)
+		} else {
+			deltaUIDs = append(deltaUIDs, uid)
+		}
+	}
+
+	if len(deltaUIDs) > 0 {
+		if _, err := i.app.SendPushToUsers(frameRoute, toFrame(delta), deltaUIDs, frontendType); err != nil {
+			log.Printf("instance %s 广播增量: %v", i.matchID, err)
+		}
+	}
+	if len(fullUIDs) > 0 {
+		full := i.sim.FullFrame()
+		if _, err := i.app.SendPushToUsers(frameRoute, toFrame(full), fullUIDs, frontendType); err != nil {
+			log.Printf("instance %s 下发全量: %v", i.matchID, err)
+		}
 	}
 }
+
+// RequestFull 把某个槽位的下一帧标为全量（客户端 resync / 重连时调用）。
+func (i *Instance) RequestFull(slot int) {
+	if slot < 0 || slot >= len(i.uids) {
+		return
+	}
+	i.enqueue(func() { i.pendingFull[slot] = true })
+}
+
+// MatchID 返回对局 id（match 服务回局查询时用）。
+func (i *Instance) MatchID() string { return i.matchID }
 
 // ApplyInput 玩家输入（playerIdx 由 game 组件按 uid 映射，yaw 为水平朝向弧度）。
 func (i *Instance) ApplyInput(playerIdx int, move [2]float32, yaw float32, jump bool) {

@@ -1,9 +1,12 @@
 // 游戏协议消息（wire 契约）。gate / match / game 三服务与 Godot 客户端都遵守：
 //   - 客户端 → gate → match：match.join（JoinMsg，Notify）
 //   - match → 客户端：onMatched（MatchResult，Push）
-//   - match → game（RPC）：game.create（CreateGameMsg）
-//   - 客户端 → gate → game：game.input（InputMsg）/ game.shoot（ShootMsg）/ game.reset（空，Notify）
-//   - game → 客户端：onSnapshot（Snapshot，Push）
+//   - match → game（RPC）：game.create（CreateGameMsg）/ game.rejoin（RejoinMsg）
+//   - 客户端 → gate → game：game.cmd（CommandMsg）/ game.resync（空，Notify）
+//   - game → 客户端：onFrame（Frame，Push）
+//
+// 同步不走手写快照，走通用「实体-属性」增量：属性表（Schema）在 full 帧里下发一次，
+// 之后所有帧都是 (实体, 属性, 终值) 的 op。新增属性不需要改动本文件的字段定义。
 //
 // 序列化用 pitaya 的 protobuf serializer。
 
@@ -12,6 +15,10 @@ syntax = "proto3";
 package game;
 
 option go_package = "joltgo/game/protos";
+
+// InputMsg / ShootMsg 是旧的上行消息（game.input / game.shoot）。本步保留：
+// game.Component 的 Input / Shoot handler 仍在用它们，删了编译不过；
+// 等到把 handler 合并成 Cmd（CommandMsg）时再一并删除。
 
 // InputMsg 是玩家移动输入（世界空间水平速度 + 跳跃边沿）。
 message InputMsg {
@@ -26,8 +33,23 @@ message ShootMsg {
   repeated float dir = 2;    // [x, y, z]
 }
 
-// JoinMsg 是加入匹配队列的空消息（无字段）。
-message JoinMsg {}
+// CommandMsg 是一帧的上行命令：把输入、射击、重置合并成一条消息发送
+// （帧是最小发送单位）。shoot/reset 是边沿触发，未触发时为 false。
+message CommandMsg {
+  repeated float move = 1;   // [wx, wz]，世界空间水平期望速度（m/s）
+  float yaw = 2;             // 水平朝向（弧度，绕 Y 轴）
+  bool jump = 3;             // 跳跃边沿触发（服务端下一 tick 消费）
+  bool shoot = 4;            // 射击边沿触发
+  repeated float origin = 5; // [x, y, z] 枪口位置（shoot 为 true 时有效）
+  repeated float dir = 6;    // [x, y, z] 射击方向（服务端会归一化）
+  bool reset = 7;            // 重建场景边沿触发
+}
+
+// JoinMsg 是加入匹配的请求。token 是客户端持久化的身份（首次运行生成并存储），
+// 服务端把它当作会话 UID：重连时同一个 token 能找回原来的对局实例。
+message JoinMsg {
+  string token = 1;
+}
 
 // MatchResult 是匹配成功结果（match → 客户端 push route "onMatched"）。
 message MatchResult {
@@ -48,47 +70,54 @@ message CreateGameReply {
   int32 code = 1;
 }
 
-// BodyInfo 是单个刚体的快照。
-message BodyInfo {
+// RejoinMsg 是 match → game 的回局查询（route "game.rejoin"）：问这个 game 节点
+// 是否托管着该 token 的存量实例。
+message RejoinMsg {
+  string token = 1;
+}
+
+// RejoinReply 是 game.rejoin 的应答。
+message RejoinReply {
+  bool found = 1;
+  string match_id = 2;
+  int32 player_idx = 3; // 原本的玩家槽位（0/1）
+}
+
+// SchemaField 是一个同步属性的声明。
+message SchemaField {
+  uint32 id = 1;   // 属性 ID（Frame 里的 AttrValue.id）
+  string name = 2; // 属性名，客户端按名字取值
+  int32 kind = 3;  // 值类型，与 replication.Kind 取值一致
+}
+
+// Schema 是属性表，随 full 帧下发。
+message Schema {
+  repeated SchemaField fields = 1;
+  uint32 version = 2; // 属性表哈希，客户端据此检测前后端不一致
+}
+
+// AttrValue 是一个属性的取值。按 schema 声明的 kind 取用其中一个字段。
+message AttrValue {
   uint32 id = 1;
-  int32 type = 2;          // 0 = box, 1 = sphere, 2 = enemy capsule
-  bool static = 3;
-  bool target = 4;
-  bool enemy = 5;
-  bool projectile = 6;
-  repeated float pos = 7;  // [x, y, z] 质心位置
-  repeated float quat = 8; // [x, y, z, w] 旋转四元数
-  repeated float size = 9; // box 半边长；sphere 半径在 [0]；capsule 半径在 [0]、半高在 [1]
-  float health = 10;       // 敌人血量（其他刚体为 0）
-  bool active = 11;        // 是否仍在模拟（未休眠）
-  int32 mat = 12;          // 视觉材质（场景配色，见 sim/map.go Material）：
-                           //   0 默认 1 甲板 2 船体 3-6 集装箱 7 走道 8 栏杆
-                           //   9 木箱 10 桅杆/烟囱 11 舷梯踏步
-                           // 标记类刚体（靶球/敌人/弹丸）由客户端的标志位优先决定外观。
+  repeated float f = 2; // KindF32(1 项) / KindVec2(2) / KindVec3(3) / KindVec4(4)
+  int32 i = 3;          // KindI32
+  bool b = 4;           // KindBool
+  string s = 5;         // KindStr
 }
 
-// ResourceInfo 是可拾取资源快照。
-message ResourceInfo {
-  int32 id = 1;
-  repeated float pos = 2; // [x, y, z] 悬浮位置
-  int32 kind = 3;         // 0 = 金币
+// EntityDelta 是一个实体在本帧的变化。应用顺序：destroy → removed → set。
+message EntityDelta {
+  uint32 id = 1;
+  bool destroy = 2;
+  repeated uint32 removed = 3;
+  repeated AttrValue set = 4;
 }
 
-// PlayerState 是单个玩家快照（pos 为脚底位置）。
-message PlayerState {
-  repeated float pos = 1; // [x, y, z]
-  float health = 2;
-  float yaw = 3;          // 水平朝向（弧度，绕 Y 轴）
-}
-
-// Snapshot 是每 tick 广播给客户端的完整状态快照。计分/金币/波次是共享团队状态，
-// players 按玩家槽位 0/1 顺序。
-message Snapshot {
-  repeated BodyInfo bodies = 1;
-  repeated ResourceInfo resources = 2;
-  repeated PlayerState players = 3;
-  int32 step = 4;  // 模拟 tick 计数（20 Hz）
-  int32 score = 5;
-  int32 wave = 6;
-  int32 gold = 7;
+// Frame 是一帧同步消息。full=true 表示全量帧（重连 / 首次进入），客户端应先
+// 清空本地状态再整体覆盖；此时 schema 一并携带。
+message Frame {
+  int32 step = 1; // 帧号（= 服务端 tick 计数）
+  bool full = 2;
+  repeated EntityDelta entities = 3;
+  Schema schema = 4;
 }

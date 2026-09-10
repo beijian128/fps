@@ -187,11 +187,11 @@ func TestShipMapEnemiesSpawnInClearDeck(t *testing.T) {
 	seen := 0
 	for round := 0; round < 60; round++ {
 		before := map[uint32]bool{}
-		for _, id := range enemiesOf(s.Snapshot()) {
+		for _, id := range enemiesOf(snapshotWorld(s)) {
 			before[id] = true
 		}
 		s.spawnEnemy()
-		st := s.Snapshot()
+		st := snapshotWorld(s)
 		for _, id := range enemiesOf(st) {
 			if before[id] {
 				continue // 本波已有的敌人，只看这次新刷出来的
@@ -225,7 +225,7 @@ func TestShipMapEnemiesSpawnInClearDeck(t *testing.T) {
 func TestShipMapResourcesNotInsideCover(t *testing.T) {
 	for round := 0; round < 30; round++ {
 		s, _ := newTestSim(t)
-		for _, r := range s.Snapshot().Resources {
+		for _, r := range snapshotWorld(s).Resources {
 			if mapBlocks(r.Pos[0], r.Pos[1], r.Pos[2], resourceSensorRadius) {
 				t.Fatalf("金币刷进了掩体（拾取不到）：%v", r.Pos)
 			}

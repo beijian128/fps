@@ -12,7 +12,6 @@ import (
 	"joltgo/replication"
 	"math"
 	"math/rand/v2"
-	"sort"
 )
 
 // TickDT 是模拟 tick 时长（20 Hz）。
@@ -125,12 +124,8 @@ type Simulation struct {
 	physics Physics
 	world   *ecs.World
 	players [MaxPlayers]ecs.Entity
-	game    ecs.Entity // 全局状态单例实体（GameState），在 init 里创建
-	// bodyQuery 是快照刚体循环的缓存查询（有 Body/Position/Rotation 且无
-	// Resource）：排除过滤在 archetype 粒度完成、传感器球整表跳过，三列
-	// 行内直取（registerBody 保证每个 Body 实体都有 Position/Rotation）。
-	bodyQuery ecs.Query
-	rep       *replication.Store // 给客户端同步的属性终值表（见 replicate.go）
+	game    ecs.Entity         // 全局状态单例实体（GameState），在 init 里创建
+	rep     *replication.Store // 给客户端同步的属性终值表（见 replicate.go）
 
 	step          int
 	score         int
@@ -144,11 +139,10 @@ func New(p Physics) *Simulation {
 	rep := replication.New()
 	declareAttributes(rep)
 	return &Simulation{
-		physics:   p,
-		world:     ecs.New(),
-		rep:       rep,
-		game:      ecs.InvalidEntity,
-		bodyQuery: ecs.Without[Resource](ecs.NewQuery3[Body, Position, Rotation]()),
+		physics: p,
+		world:   ecs.New(),
+		rep:     rep,
+		game:    ecs.InvalidEntity,
 	}
 }
 
@@ -162,7 +156,7 @@ func (s *Simulation) Init() {
 	s.init()
 }
 
-// Shutdown 释放物理世界资源（进程退出前调用一次；调用后不应再 Step/Shoot/Snapshot）。
+// Shutdown 释放物理世界资源（进程退出前调用一次；调用后不应再 Step/Shoot/DrainFrame）。
 func (s *Simulation) Shutdown() {
 	s.physics.Destroy()
 }
@@ -198,11 +192,6 @@ func (s *Simulation) Reset() {
 // Step 推进一个模拟 tick（1/20 秒），按固定顺序运行各系统。
 func (s *Simulation) Step() {
 	s.stepOne()
-}
-
-// Snapshot 返回当前完整状态（序列化由调用方负责）。
-func (s *Simulation) Snapshot() State {
-	return s.snapshot()
 }
 
 // GameEntity 返回全局状态单例实体的 id。
@@ -421,67 +410,6 @@ func (s *Simulation) dropResource(at [3]float32) {
 		resourceY,
 		at[2] + randRange(-0.4, 0.4),
 	})
-}
-
-// snapshot 从组件构建完整状态快照。刚体与资源按 id 排序，输出稳定
-// （swap-remove 会让 archetype 行序变化，客户端按 id 匹配、与顺序无关）。
-// 刚体循环用缓存查询（有 Body/Position/Rotation 且无 Resource）：排除过滤
-// 在 archetype 粒度完成、传感器球整表跳过；三列行内直取，Position/Rotation
-// 无需逐行查找，只有 Health 与标记组件走行视图。
-func (s *Simulation) snapshot() State {
-	st := State{
-		Bodies:    []BodyInfo{},
-		Resources: []ResourceInfo{},
-		Players:   make([]PlayerState, 0, MaxPlayers),
-		Step:      s.step,
-		Score:     s.score,
-		Wave:      s.wave,
-		Gold:      s.gold,
-	}
-	for i := 0; i < MaxPlayers; i++ {
-		ps := PlayerState{Health: 100}
-		if p, ok := ecs.Get[Position](s.world, s.players[i]); ok {
-			ps.Pos = *p
-		}
-		if h, ok := ecs.Get[Health](s.world, s.players[i]); ok {
-			ps.Health = float32(*h)
-		}
-		if in, ok := ecs.Get[Input](s.world, s.players[i]); ok {
-			ps.Yaw = in.Yaw
-		}
-		st.Players = append(st.Players, ps)
-	}
-
-	ecs.QueryEach3(s.world, &s.bodyQuery, func(e ecs.Entity, b *Body, p *Position, rot *Rotation, row ecs.Row) {
-		bi := BodyInfo{
-			ID:         uint32(e),
-			Type:       int(b.Kind),
-			Static:     b.Static,
-			Target:     ecs.RowHas[Target](row),
-			Enemy:      ecs.RowHas[Enemy](row),
-			Projectile: ecs.RowHas[Projectile](row),
-			Pos:        *p,
-			Quat:       *rot,
-			Size:       b.Size,
-			Active:     b.Active,
-			Mat:        int(b.Mat),
-		}
-		if h, ok := ecs.RowGet[Health](row); ok {
-			bi.Health = float32(*h)
-		}
-		st.Bodies = append(st.Bodies, bi)
-	})
-	ecs.Each(s.world, func(e ecs.Entity, r *Resource) {
-		ri := ResourceInfo{ID: int(e), Kind: r.Kind}
-		if p, ok := ecs.Get[Position](s.world, e); ok {
-			ri.Pos = *p
-		}
-		st.Resources = append(st.Resources, ri)
-	})
-
-	sort.Slice(st.Bodies, func(i, j int) bool { return st.Bodies[i].ID < st.Bodies[j].ID })
-	sort.Slice(st.Resources, func(i, j int) bool { return st.Resources[i].ID < st.Resources[j].ID })
-	return st
 }
 
 func randRange(a, b float32) float32 {

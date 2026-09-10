@@ -14,12 +14,12 @@ import (
 	pitaya "github.com/topfreegames/pitaya/v3/pkg"
 	"github.com/topfreegames/pitaya/v3/pkg/component"
 	"joltgo/game/protos"
-	"joltgo/sim"
+	"joltgo/replication"
 )
 
 const (
-	snapRoute    = "onSnapshot" // game → 客户端快照 push 的 route
-	frontendType = "gate"       // 前端服务类型（与 gate 服务的 serverType 一致）
+	frameRoute   = "onFrame" // game → 客户端同步帧 push 的 route
+	frontendType = "gate"    // 前端服务类型（与 gate 服务的 serverType 一致）
 )
 
 // Component 是 game 服务的 pitaya 组件：持有实例注册表。
@@ -128,39 +128,48 @@ func (c *Component) Shutdown() {
 	}
 }
 
-// toSnapshot 把 sim 层的纯 Go 快照转成 protobuf 快照（wire 契约在 game/protos/game.proto）。
-func toSnapshot(s sim.State) *protos.Snapshot {
-	snap := &protos.Snapshot{
-		Step:  int32(s.Step),
-		Score: int32(s.Score),
-		Wave:  int32(s.Wave),
-		Gold:  int32(s.Gold),
+// toFrame 把 sim 层的同步帧转成 protobuf。帧是通用「实体-属性」结构，
+// 新增同步属性不需要改动这里。
+func toFrame(f replication.Frame) *protos.Frame {
+	pf := &protos.Frame{Step: int32(f.Step), Full: f.Full}
+	if f.Full {
+		pf.Schema = toSchema(f.Schema)
 	}
-	for _, ps := range s.Players {
-		snap.Players = append(snap.Players, &protos.PlayerState{Pos: ps.Pos[:], Health: ps.Health, Yaw: ps.Yaw})
+	for _, ed := range f.Entities {
+		pe := &protos.EntityDelta{Id: ed.ID, Destroy: ed.Destroy, Removed: ed.Removed}
+		for _, av := range ed.Set {
+			pe.Set = append(pe.Set, toAttrValue(av))
+		}
+		pf.Entities = append(pf.Entities, pe)
 	}
-	for _, b := range s.Bodies {
-		snap.Bodies = append(snap.Bodies, &protos.BodyInfo{
-			Id:         b.ID,
-			Type:       int32(b.Type),
-			Static:     b.Static,
-			Target:     b.Target,
-			Enemy:      b.Enemy,
-			Projectile: b.Projectile,
-			Pos:        b.Pos[:],
-			Quat:       b.Quat[:],
-			Size:       b.Size[:],
-			Health:     b.Health,
-			Active:     b.Active,
-			Mat:        int32(b.Mat),
+	return pf
+}
+
+// toSchema 把属性表转成 protobuf。
+func toSchema(sc replication.Schema) *protos.Schema {
+	ps := &protos.Schema{Version: sc.Version}
+	for _, a := range sc.Fields {
+		ps.Fields = append(ps.Fields, &protos.SchemaField{
+			Id:   a.ID,
+			Name: a.Name,
+			Kind: int32(a.Kind),
 		})
 	}
-	for _, r := range s.Resources {
-		snap.Resources = append(snap.Resources, &protos.ResourceInfo{
-			Id:   int32(r.ID),
-			Pos:  r.Pos[:],
-			Kind: int32(r.Kind),
-		})
+	return ps
+}
+
+// toAttrValue 按值的类型标签把值放进对应的字段。
+func toAttrValue(av replication.AttrValue) *protos.AttrValue {
+	pv := &protos.AttrValue{Id: av.Attr}
+	switch av.Value.Kind() {
+	case replication.KindF32, replication.KindVec2, replication.KindVec3, replication.KindVec4:
+		pv.F = av.Value.Floats()
+	case replication.KindI32:
+		pv.I = av.Value.Int()
+	case replication.KindBool:
+		pv.B = av.Value.Boolean()
+	case replication.KindStr:
+		pv.S = av.Value.Text()
 	}
-	return snap
+	return pv
 }

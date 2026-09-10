@@ -20,14 +20,82 @@ import (
 	"joltgo/sim"
 )
 
-// snapshotBody 返回快照里指定 id 的刚体。
-func snapshotBody(s *sim.Simulation, id uint32) (sim.BodyInfo, bool) {
-	for _, b := range s.Snapshot().Bodies {
+// bodyView 是集成测试用到的刚体字段子集。生产路径已改为通用的实体-属性增量
+// 同步（见 sim/replicate.go），旧的 sim.Snapshot()/sim.BodyInfo 已删除，
+// 这里改为直接从全量帧（FullFrame）按 schema 的属性名取值。
+type bodyView struct {
+	ID     uint32
+	Pos    [3]float32
+	Size   [3]float32
+	Mat    int
+	Static bool
+}
+
+// frameBodies 从全量帧里读出所有刚体（带 Body.Kind 属性的实体）。
+func frameBodies(s *sim.Simulation) []bodyView {
+	f := s.FullFrame()
+	name := map[uint32]string{}
+	for _, a := range f.Schema.Fields {
+		name[a.ID] = a.Name
+	}
+	var out []bodyView
+	for _, ed := range f.Entities {
+		b := bodyView{ID: ed.ID}
+		isBody := false
+		for _, av := range ed.Set {
+			switch name[av.Attr] {
+			case "Body.Kind":
+				isBody = true
+			case "Pos":
+				copy(b.Pos[:], av.Value.Floats())
+			case "Body.Size":
+				copy(b.Size[:], av.Value.Floats())
+			case "Body.Mat":
+				b.Mat = int(av.Value.Int())
+			case "Body.Static":
+				b.Static = av.Value.Boolean()
+			}
+		}
+		if isBody {
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
+// framePlayerPos 从全量帧里按玩家槽位（Player.Idx）取脚底位置。
+func framePlayerPos(s *sim.Simulation, idx int) [3]float32 {
+	f := s.FullFrame()
+	name := map[uint32]string{}
+	for _, a := range f.Schema.Fields {
+		name[a.ID] = a.Name
+	}
+	for _, ed := range f.Entities {
+		pidx := int32(-1)
+		var pos [3]float32
+		for _, av := range ed.Set {
+			switch name[av.Attr] {
+			case "Player.Idx":
+				pidx = av.Value.Int()
+			case "Pos":
+				copy(pos[:], av.Value.Floats())
+			}
+		}
+		if pidx == int32(idx) {
+			return pos
+		}
+	}
+	return [3]float32{}
+}
+
+// snapshotBody 返回指定 id 的刚体视图。
+func snapshotBody(s *sim.Simulation, id uint32) (bodyView, bool) {
+	for _, b := range frameBodies(s) {
 		if b.ID == id {
 			return b, true
 		}
 	}
-	return sim.BodyInfo{}, false
+	return bodyView{}, false
 }
 
 // drive 按世界空间水平速度推进若干 tick（与客户端每帧上报输入等价）。
@@ -46,9 +114,9 @@ func TestMapCatwalkIsWalkable(t *testing.T) {
 	defer s.Shutdown()
 
 	// 从快照里认出右舷高架走道（材质号 MatCatwalk = 7）：x、面高、z 范围。
-	var cw sim.BodyInfo
+	var cw bodyView
 	found := false
-	for _, b := range s.Snapshot().Bodies {
+	for _, b := range frameBodies(s) {
 		if b.Mat == 7 && b.Pos[0] > 0 { // int(sim.MatCatwalk)
 			cw, found = b, true
 		}
@@ -60,19 +128,19 @@ func TestMapCatwalkIsWalkable(t *testing.T) {
 	cwTop := cw.Pos[1] + cw.Size[1]
 
 	// 腿 1：从出生点横向走到走道正下方。
-	start := s.Snapshot().Players[0].Pos
+	start := framePlayerPos(s, 0)
 	targetX := cwX
 	stepX := float32(8)
 	if start[0] > targetX {
 		stepX = -8
 	}
 	for i := 0; i < 400; i++ {
-		if math.Abs(float64(s.Snapshot().Players[0].Pos[0]-targetX)) < 0.3 {
+		if math.Abs(float64(framePlayerPos(s, 0)[0]-targetX)) < 0.3 {
 			break
 		}
 		drive(s, stepX, 0, 1)
 	}
-	if p := s.Snapshot().Players[0].Pos; math.Abs(float64(p[0]-targetX)) >= 0.3 {
+	if p := framePlayerPos(s, 0); math.Abs(float64(p[0]-targetX)) >= 0.3 {
 		t.Fatalf("没能走到走道正下方：x=%.2f，目标 %.2f", p[0], targetX)
 	}
 
@@ -84,7 +152,7 @@ func TestMapCatwalkIsWalkable(t *testing.T) {
 	climbed := false
 	for i := 0; i < 400; i++ {
 		drive(s, 0, dirZ*8, 1)
-		if p := s.Snapshot().Players[0].Pos; p[1] >= cwTop-0.15 {
+		if p := framePlayerPos(s, 0); p[1] >= cwTop-0.15 {
 			climbed = true
 			t.Logf("登上走道：pos=%v（走道面 %.2f）", p, cwTop)
 			break
@@ -92,7 +160,7 @@ func TestMapCatwalkIsWalkable(t *testing.T) {
 	}
 	if !climbed {
 		t.Fatalf("玩家走不上高架走道，最后位置 %v（走道面 %.2f）",
-			s.Snapshot().Players[0].Pos, cwTop)
+			framePlayerPos(s, 0), cwTop)
 	}
 }
 
@@ -106,7 +174,7 @@ func TestMapStaticGeometryIsStable(t *testing.T) {
 	drive(s, 0, 0, 40)
 
 	before := map[uint32][3]float32{}
-	for _, b := range s.Snapshot().Bodies {
+	for _, b := range frameBodies(s) {
 		for i, v := range b.Pos {
 			if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
 				t.Fatalf("刚体 %d 位置出现非有限值：%v", b.ID, b.Pos)

@@ -10,9 +10,6 @@ import (
 	"joltgo/replication"
 )
 
-// snapshotWorld 的临时副本（Task 6 移入 sim_test.go 并删除此处）。
-func snapshotWorld(s *Simulation) State { return s.snapshot() }
-
 // expectedAttrs 是「世界应有属性集」的独立实现 —— 它是 oracle：
 // 不看 replicate.go 怎么写，只从 ECS 世界直接读出应有的 (实体, 属性, 终值)。
 // 任何漏写的 rep.Set 都会在 assertStoreMatchesWorld 里失败。
