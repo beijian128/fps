@@ -57,6 +57,14 @@ func _run() -> void:
 		quit(1)
 		return
 	print("REJOIN first match_id=", _first_match_id, " idx=", _first_idx)
+	# 解析失败时拿到的就是默认值（"" / -1），与「真值」无从区分。若两边都解析失败，
+	# 末尾的 match_id/idx 比较会因为「等于对方」而假通过 —— 而这是全计划唯一端到端
+	# 验证「重连回同一局」的证据，必须显式判失败。
+	if _first_match_id == "" or _first_idx < 0:
+		printerr("FAIL: 首次 onMatched 载荷未解出 match_id/player_idx（match_id=%s idx=%d）"
+			% [_first_match_id, _first_idx])
+		quit(1)
+		return
 	await _wait_until(func() -> bool: return first_full[0] >= 1, 5000)
 	if first_full[0] < 1:
 		printerr("FAIL: 首次进入也应收到一帧 full（resync），得到 %d" % first_full[0])
@@ -92,6 +100,12 @@ func _run() -> void:
 		quit(1)
 		return
 	print("REJOIN second match_id=", _second_match_id, " idx=", _second_idx)
+	# 同上：比较前先确认第二次载荷真的解析出了值，否则两边的默认值相同会假通过。
+	if _second_match_id == "" or _second_idx < 0:
+		printerr("FAIL: 重连 onMatched 载荷未解出 match_id/player_idx（match_id=%s idx=%d）"
+			% [_second_match_id, _second_idx])
+		quit(1)
+		return
 
 	# 客户端收到 onMatched 后会发 resync，服务端下一帧回 full。
 	await _wait_until(func() -> bool: return _frames >= 20, 8000)

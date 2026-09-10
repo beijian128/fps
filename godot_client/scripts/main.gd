@@ -134,6 +134,15 @@ func _reset_interp() -> void:
 	_body_xform.clear()
 	_prev_body_xform.clear()
 	_frame_time = 0.0
+	# 玩家/远端的三对 prev/target 也要一并复位：它们经修正 #2 后由 _render_interpolated
+	# 独占写入，若不在此对齐到当前显示值，上一局残留的「插值中」状态会被带进新一局，
+	# 首帧就表现为相机/远端 avatar 从旧位置滑向新出生点，而不是直接落位。
+	_prev_player_pos = _player_pos
+	_player_pos_target = _player_pos
+	_prev_remote_pos = _remote_pos
+	_remote_pos_target = _remote_pos
+	_prev_remote_yaw = _remote_yaw
+	_remote_yaw_target = _remote_yaw
 
 func _process(delta: float) -> void:
 	if delta > 0.0:
@@ -370,9 +379,17 @@ func _build_body_dict(eid: int) -> Dictionary:
 
 ## 影子跟随：alpha = 距本帧到达的时间 / TICK，在「上一帧变换 → 本帧变换」之间插值。
 func _render_interpolated() -> void:
+	var alpha := clampf((Time.get_ticks_msec() / 1000.0 - _frame_time) / TICK, 0.0, 1.0)
+	# 本地玩家位置与远端位置/朝向同样在 prev→target 之间插值：直接赋 raw 值会让
+	# 第一人称相机与 avatar 按 20 Hz 跳步。yaw 是角度，用最短角插值避免 180° 附近跳变。
+	# **必须放在下面的刚体守卫之前**：重连后经修正 #2 这三个字段只有本函数一个写者，
+	# 若被 `_body_xform` 为空的守卫提前 return 挡掉，在没有静态刚体的地图上相机就冻住了。
+	_player_pos = _prev_player_pos.lerp(_player_pos_target, alpha)
+	_remote_pos = _prev_remote_pos.lerp(_remote_pos_target, alpha)
+	_remote_yaw = lerp_angle(_prev_remote_yaw, _remote_yaw_target, alpha)
+	# 刚体节点只在与 store 对齐（有 `_body_xform` 条目）时才需要写；空表时下面无事可做。
 	if _body_xform.is_empty():
 		return
-	var alpha := clampf((Time.get_ticks_msec() / 1000.0 - _frame_time) / TICK, 0.0, 1.0)
 	for id: Variant in _body_xform:
 		var eid := int(id)
 		var node: Node3D = _entities.get(eid)
@@ -382,11 +399,6 @@ func _render_interpolated() -> void:
 		var prev: Dictionary = _prev_body_xform.get(eid, cur)
 		node.global_position = (prev["pos"] as Vector3).lerp(cur["pos"] as Vector3, alpha)
 		node.quaternion = (prev["quat"] as Quaternion).slerp(cur["quat"] as Quaternion, alpha)
-	# 本地玩家位置与远端位置/朝向同样在 prev→target 之间插值：直接赋 raw 值会让
-	# 第一人称相机与 avatar 按 20 Hz 跳步。yaw 是角度，用最短角插值避免 180° 附近跳变。
-	_player_pos = _prev_player_pos.lerp(_player_pos_target, alpha)
-	_remote_pos = _prev_remote_pos.lerp(_remote_pos_target, alpha)
-	_remote_yaw = lerp_angle(_prev_remote_yaw, _remote_yaw_target, alpha)
 
 func _place_body(id: int, b: Dictionary, pos: Vector3, quat: Quaternion) -> void:
 	if not _entities.has(id):

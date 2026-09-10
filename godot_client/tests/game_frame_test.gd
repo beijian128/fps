@@ -45,9 +45,10 @@ func _run() -> void:
 	_test_delta_updates_and_destroys()
 	_test_last_write_in_frame_is_interpolated()
 	_test_local_player_and_remote_yaw_interpolated()
+	_test_render_interpolated_is_idempotent()
 	_test_coin_has_no_extra_body()
 	_test_destroy_for_unknown_id_is_safe()
-	for name: String in ["full", "delta", "interp_node", "interp_player", "coin", "unknown"]:
+	for name: String in ["full", "delta", "interp_node", "interp_player", "idempotent", "coin", "unknown"]:
 		if not _done.has(name):
 			_failures += 1
 			printerr("FAIL: 用例 %s 没跑完（中途抛错了？）" % name)
@@ -167,11 +168,44 @@ func _test_local_player_and_remote_yaw_interpolated() -> void:
 		"本地玩家位置应是插值结果（更接近上一帧 %s 而非 raw %s）；实际 %s"
 		% [local_a, local_b, _main._player_pos])
 	# 远端朝向必须走 lerp_angle：raw 赋值会让它从 0 直接硬跳到 PI。
+	# 断言的真正意图是「更接近上一帧 0 而不是 raw 新值 PI」，故容忍度取 PI/2（两者
+	# 的中点）。原来写 < 0.1 只有约 1 ms 余量 —— _frame_time 是整数毫秒、alpha 只能以
+	# 0.02 步进量化，机器一忙就会 flaky。
 	var remote_yaw: float = _main._remote_yaw
 	var yaw_err: float = absf(angle_difference(0.0, remote_yaw))
-	_check(yaw_err < 0.1,
-		"远端朝向应是插值结果（≈上一帧 0），而不是 raw 值 PI；实际 %s" % remote_yaw)
+	_check(yaw_err < PI * 0.5,
+		"远端朝向应是插值结果（更接近上一帧 0，而不是 raw 值 PI）；实际 %s" % remote_yaw)
 	_done["interp_player"] = true
+
+## 钉住修正 #2 的 target/display 拆分（幂等）：_render_interpolated 一帧内会被调两次
+## （_process 一次、_on_frame 收尾一次）。若像就地 lerp（`_player_pos = _player_pos.lerp(target)`）
+## 那样让显示值同时充当插值输入，第二次调用会拿「结果」再插一次，位置继续漂移。
+## 其它断言都在 alpha≈0 跑 —— 就地 lerp 在那种情形下也照样通过，只有本条能区分两种实现。
+func _test_render_interpolated_is_idempotent() -> void:
+	# 先造出 prev≠target 的插值中状态：一帧落在 18，下一帧落在 10。
+	# 显式给 _player_pos 赋值，避免依赖前序用例留下的显示值。
+	_main._player_pos = Vector3(0, 0.2, 18)
+	_main._on_frame({"full": false, "entities": [
+		{"id": 300, "set": [_attr(1, {"f": [0.0, 0.2, 18.0]})]},
+	]})
+	_main._on_frame({"full": false, "entities": [
+		{"id": 300, "set": [_attr(1, {"f": [0.0, 0.2, 10.0]})]},
+	]})
+	# 把 _frame_time 回拨半个 TICK（TICK=0.05 → 0.025），使 alpha≈0.5。
+	# 只有 alpha 明显落在 0/1 之间，二次插值造成的漂移才看得出来。
+	_main._frame_time = Time.get_ticks_msec() / 1000.0 - 0.025
+	_main._render_interpolated()
+	var first: Vector3 = _main._player_pos
+	_main._render_interpolated()
+	var second: Vector3 = _main._player_pos
+	# 幂等：第二次调用必须与第一次完全一致（显示值不能又当插值输入）。
+	_check(first.is_equal_approx(second),
+		"连续两次 _render_interpolated 必须幂等（target/display 拆分）；第一次 %s 第二次 %s"
+		% [first, second])
+	# 反向保护：alpha≈0.5 时结果确实落在 prev 与 target 之间，证明上面不是恒等式。
+	_check(first.distance_to(Vector3(0, 0.2, 10.0)) > 0.1,
+		"alpha≈0.5 时玩家位置应离开 raw target (0,0.2,10)；实际 %s" % first)
+	_done["idempotent"] = true
 
 ## 金币在 store 里是普通刚体，但**不该**额外长出一个灰色的刚体球。
 func _test_coin_has_no_extra_body() -> void:
