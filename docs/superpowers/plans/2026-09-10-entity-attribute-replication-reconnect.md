@@ -2823,6 +2823,8 @@ const instanceIdleTimeout = 60 * time.Second
 	stopOnce sync.Once
 ```
 
+> `instance.go` 需要补 `"sync"` import。
+
 2. `Start()` 里初始化 `lastSeen`：
 
 ```go
