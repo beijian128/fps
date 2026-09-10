@@ -104,6 +104,9 @@ func (s *Store) Full() Frame {
 		for _, cid := range sortedIDs(vals) {
 			ed.Set = append(ed.Set, AttrValue{Attr: cid, Value: vals[cid]})
 		}
+		if len(ed.Set) == 0 {
+			continue // 没有任何属性可说的实体不进全量（与 Drain 的跳过规则保持对称）
+		}
 		f.Entities = append(f.Entities, ed)
 	}
 	return f

@@ -156,3 +156,21 @@ func TestDestroyAndRebuildInSameFrameEmitsBoth(t *testing.T) {
 		t.Fatalf("重建后不应重复下发，得到 %+v", n.Entities)
 	}
 }
+
+// removed 下发时必须一并清掉基线，否则之后写回同一个值会被抑制、客户端再也收不到。
+func TestRemovedAttrCanBeReSetAndIsSentAgain(t *testing.T) {
+	s := newTestStore()
+	s.Set(7, "Enemy", Bool(true))
+	s.Drain()
+
+	s.Remove(7, "Enemy")
+	if f := s.Drain(); len(f.Entities) != 1 || len(f.Entities[0].Removed) != 1 {
+		t.Fatalf("移除应下发 1 条 removed，得到 %+v", f.Entities)
+	}
+
+	s.Set(7, "Enemy", Bool(true)) // 写回完全相同的值
+	f := s.Drain()
+	if len(f.Entities) != 1 || len(f.Entities[0].Set) != 1 {
+		t.Fatalf("移除后写回同一个值也必须重新下发，得到 %+v", f.Entities)
+	}
+}
