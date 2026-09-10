@@ -4420,6 +4420,8 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 - Modify: `docs/ARCHITECTURE.md`
 - Modify: `docs/API.md`
 - Modify: `README.md`（特性列表里的措辞）
+- Modify: `godot_client/README.md`（第 48 行附近仍写着 `state_received` 信号）
+- Modify: `joltgo/main.go`（注册 game 组件那段注释仍写着 `game.input/shoot/reset`）
 
 **背景：** `AGENTS.md` 开头写着「改动代码时同步更新对应文档与本文件（过期文档比没有更糟）」。
 
@@ -4461,17 +4463,42 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 - [ ] **Step 5: 跑一遍完整测试**
 
-Run: `cd joltgo && gofmt -l . && go vet ./gate ./match ./game ./physics ./sim ./replication && go test ./ecs ./sim ./replication`
-Expected: PASS
+```bash
+cd joltgo
+gofmt -l gate match game physics sim replication ecs   # 只检查代码目录（存量 CRLF 文件会被整文件标记）
+go vet ./gate ./match ./game ./physics ./sim ./replication ./ecs
+PATH="$PWD:$PATH" go test -count=1 ./game ./match ./ecs ./sim ./replication
+PATH="$PWD:$PATH" go test -tags joltdll ./physics
+```
+
+Expected: PASS。`./game` 与 `./physics` 需要 `libjolt_c.dll` 在 PATH（`joltgo/` 下已构建）。
+
+客户端三个无头测试（`world_store_test.gd` / `frame_decode_test.gd` / `game_frame_test.gd`）与需要集群的 `ws_smoke.gd` / `rejoin_smoke.gd` 一并确认能跑。
 
 - [ ] **Step 6: 提交**
 
 ```bash
-git add AGENTS.md docs/ARCHITECTURE.md docs/API.md README.md
+git add AGENTS.md README.md docs/ARCHITECTURE.md docs/API.md godot_client/README.md joltgo/main.go
 git commit -m "docs: 同步协议改为实体-属性帧，补重连回局说明
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ```
+
+> `joltgo/main.go` 只有一行注释要改（不是代码），和文档放同一个提交最省事。
+
+- [ ] **Step 7: 更新 `AGENTS.md` §6 的客户端测试清单**
+
+删掉 `snapshot_same_step_test.gd`（已删除），补上：
+
+```
+Godot_..._console.exe --headless --path godot_client --script res://tests/world_store_test.gd     # 世界存储语义
+Godot_..._console.exe --headless --path godot_client --script res://tests/frame_decode_test.gd    # 帧/Schema 解码
+Godot_..._console.exe --headless --path godot_client --script res://tests/game_frame_test.gd      # 渲染路径（合成帧）
+Godot_..._console.exe --headless --path godot_client --script res://tests/rejoin_smoke.gd         # 断线回局（需集群）
+```
+
+> **`rejoin_smoke.gd` 是新协议下唯一端到端验证「重连回同一局」的测试**，
+> 改匹配/回局/resync 链路后必跑。它的断言在载荷解析失败时会显式判失败（不会假通过）。
 
 ---
 
