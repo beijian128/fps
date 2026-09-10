@@ -57,11 +57,12 @@ const (
 	BodyCapsule BodyKind = 2 // 胶囊（敌人）
 )
 
-// Body 是物理刚体实体的渲染元数据。Static 与 Size 在创建时确定；
+// Body 是物理刚体实体的渲染元数据。Static/Size/Mat 在创建时确定；
 // Active（是否仍在模拟、未休眠）由物理同步系统每 tick 刷新。
 type Body struct {
 	Kind   BodyKind
 	Size   [3]float32 // box: 半边长；sphere: 半径在 [0]；capsule: 半径在 [0]、半高在 [1]
 	Static bool
 	Active bool
+	Mat    Material // 视觉材质（见 map.go），随快照下发供客户端配色
 }

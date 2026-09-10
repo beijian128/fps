@@ -70,6 +70,11 @@
 - 快照协议（`sim/state.go`）是服务端内部契约；wire 契约在 `game/protos/game.proto`
   （protobuf），改动 proto 字段需重新生成 Go 码并同步改 Godot 客户端；
   上行消息的 route/字段契约见 [API.md](API.md)（改动 `joltgo/game/`、`joltgo/match/` 时同步更新）
+- 场景地图只写 `sim/map.go` 的部件表：**只写半边**（带 `mirror: true` 的部件会自动
+  补上绕 Y 轴旋转 180° 的孪生体），对称性由 `sim/map_test.go` 验证。舷梯参数
+  （单级抬升 ≤ 0.4、进深 ≥ 0.5）是角色控制器决定的下限，改前先读 `map_test.go`
+  里的说明并跑 `go test -tags joltdll ./physics` 确认真的走得上去。新增视觉材质号
+  时同步改 `godot_client/scripts/body_entity.gd` 的 `MATS` 表（编号只能追加）
 - 客户端 GDScript：避免从 Variant 推断类型（默认告警会被当错误处理）；
   节点实例化用 `preload` 而非 `class_name`（纯命令行运行不依赖编辑器导入的全局类缓存）
 - 新增 gitignored 的产物时，同步更新根目录 `.gitignore`
@@ -92,6 +97,16 @@
   ```bash
   go vet ./game && go test ./...
   ```
+
+- 地图集成测试（跑真 Jolt；需 `libjolt_c.dll` 在 PATH 或与测试二进制同目录）：
+
+  ```bash
+  cd joltgo && go test -tags joltdll ./physics
+  ```
+
+  验证的是 fake 物理测不出来的东西：角色真的能从出生点沿舷梯走上高架走道
+  （舷梯单级抬升/进深改坏了会失败），以及整张图搭出来后静态几何不漂移、
+  位置无 NaN。默认构建不含这些文件，没装 DLL 的机器 `go test ./...` 依然全绿。
 
 - 端到端冒烟测试（需要服务端已启动，见下文「客户端」小节）
 

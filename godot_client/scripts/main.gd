@@ -49,8 +49,8 @@ var _next_snap := {}
 var _entities := {}
 var _res_nodes := {}
 
-var _player_pos := Vector3(0, 0.2, 12)
-var _remote_pos := Vector3(3, 0.2, 12)
+var _player_pos := Vector3(0, 0.2, 18)
+var _remote_pos := Vector3(0, 0.2, -18)
 var _remote_yaw := 0.0
 var _my_player_idx := 0
 var _matched := false
@@ -87,6 +87,8 @@ func _ready() -> void:
 func _on_matched(result: Dictionary) -> void:
 	_my_player_idx = int(result.get("player_idx", 0))
 	_matched = true
+	# 出生在船的艏/艉两端，开局朝向船中（与服务端 playerSpawnYaw 一致）。
+	_yaw = PI if _my_player_idx == 1 else 0.0
 	conn_label.visible = false
 
 func _on_connection(connected: bool) -> void:
@@ -275,17 +277,17 @@ func _parse_snapshot(s: Dictionary, t: float) -> Dictionary:
 			"kind": int(rd.get("kind", 0)),
 		}
 	var players: Array = s.get("players", [])
-	var my_feet := Vector3(0, 0.2, 12)
-	var remote_feet := Vector3(3, 0.2, 12)
+	var my_feet := Vector3(0, 0.2, 18)
+	var remote_feet := Vector3(0, 0.2, -18)
 	var remote_yaw := 0.0
 	if players.size() > _my_player_idx:
 		var mp: Dictionary = players[_my_player_idx]
-		var mpos: Array = mp.get("pos", [0.0, 0.2, 12.0])
+		var mpos: Array = mp.get("pos", [0.0, 0.2, 18.0])
 		my_feet = Vector3(float(mpos[0]), float(mpos[1]), float(mpos[2]))
 	var other_idx := 1 - _my_player_idx
 	if players.size() > other_idx:
 		var rp: Dictionary = players[other_idx]
-		var rpos: Array = rp.get("pos", [3.0, 0.2, 12.0])
+		var rpos: Array = rp.get("pos", [0.0, 0.2, -18.0])
 		remote_feet = Vector3(float(rpos[0]), float(rpos[1]), float(rpos[2]))
 		remote_yaw = float(rp.get("yaw", 0.0))
 	return {
@@ -582,7 +584,21 @@ func _build_world() -> void:
 	sun.look_at_from_position(Vector3(12, 24, 10), Vector3.ZERO, Vector3.UP)
 	add_child(sun)
 
-	# 地面网格参考线。
+	# 海面：船外的深色水面（纯装饰，无碰撞，碰撞几何全在服务端）。
+	var sea := MeshInstance3D.new()
+	sea.name = "Sea"
+	var pm := PlaneMesh.new()
+	pm.size = Vector2(600, 600)
+	sea.mesh = pm
+	var sea_mat := StandardMaterial3D.new()
+	sea_mat.albedo_color = Color("0a1b2a")
+	sea_mat.roughness = 0.18
+	sea_mat.metallic = 0.55
+	sea.material_override = sea_mat
+	sea.position = Vector3(0, -1.4, 0)
+	add_child(sea)
+
+	# 甲板钢板拼缝参考线（与 map.go 的甲板尺寸一致）。
 	var grid := MeshInstance3D.new()
 	grid.name = "Grid"
 	grid.mesh = _grid_mesh()
@@ -595,12 +611,17 @@ func _build_world() -> void:
 
 func _grid_mesh() -> ArrayMesh:
 	var verts := PackedVector3Array()
-	for i in range(-20, 21):
-		var v := float(i)
-		verts.append(Vector3(v, 0.0, -20.0))
-		verts.append(Vector3(v, 0.0, 20.0))
-		verts.append(Vector3(-20.0, 0.0, v))
-		verts.append(Vector3(20.0, 0.0, v))
+	var step := 2.0
+	var x := -13.0
+	while x <= 13.0:
+		verts.append(Vector3(x, 0.0, -22.0))
+		verts.append(Vector3(x, 0.0, 22.0))
+		x += step
+	var z := -22.0
+	while z <= 22.0:
+		verts.append(Vector3(-13.0, 0.0, z))
+		verts.append(Vector3(13.0, 0.0, z))
+		z += step
 	var arrays := []
 	arrays.resize(Mesh.ARRAY_MAX)
 	arrays[Mesh.ARRAY_VERTEX] = verts
@@ -859,7 +880,7 @@ func _build_hud() -> void:
 	conn_label.visible = false
 	vbox.add_child(conn_label)
 
-	for t in ["点击进入游戏并锁定鼠标", "PVE 打怪：清空怪物自动刷下一波，击杀掉落金币，靠近自动拾取", "W A S D 移动 · Space 跳跃 · Shift 奔跑 · V 切换第一/第三人称 · Reset 重开", "匹配机制：凑齐 2 名玩家开局，10 秒无人加入则单人开局"]:
+	for t in ["点击进入游戏并锁定鼠标", "运输船 PVE：艏艉两个出生区，中部集装箱堆可跳上去，两舷高架走道可俯瞰全船", "清空怪物自动刷下一波，击杀掉落金币，靠近自动拾取", "W A S D 移动 · Space 跳跃 · Shift 奔跑 · V 切换第一/第三人称 · Reset 重开", "匹配机制：凑齐 2 名玩家开局，10 秒无人加入则单人开局"]:
 		var l := Label.new()
 		l.text = t
 		l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER

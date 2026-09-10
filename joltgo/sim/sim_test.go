@@ -276,6 +276,25 @@ func projectilesOf(st State) []uint32 {
 
 func near(a, b, tol float32) bool { return math.Abs(float64(a-b)) <= float64(tol) }
 
+// 出生点/射击起点一律从地图取，不写死坐标——地图改了测试不用跟着改。
+func spawn0X() float32 { x, _ := playerSpawnXZ(0); return x }
+func spawn0Z() float32 { _, z := playerSpawnXZ(0); return z }
+
+// near0 返回 0 号玩家出生点偏移 (dx, y, dz) 处的位置。
+func near0(dx, y, dz float32) [3]float32 {
+	x, z := playerSpawnXZ(0)
+	return [3]float32{x + dx, y, z + dz}
+}
+
+// shoot0 是 0 号玩家胸口高度的射击起点。
+func shoot0() [3]float32 { return near0(0, 1, 0) }
+
+// sceneBodyCount 是初始快照里的刚体总数：场景静态部件 + 木箱 + 靶球 + 初始敌人。
+// 从 map.go 的部件表算出，改地图时测试自动跟随。
+func sceneBodyCount() int {
+	return len(shipBoxParts) + len(shipCapsuleParts) + len(deckCratePositions) + len(shipTargets) + initialEnemies
+}
+
 // player0 返回快照里 0 号玩家状态（Players[0]）。
 func player0(st State) PlayerState { return st.Players[0] }
 
@@ -285,15 +304,17 @@ func TestInitialSnapshot(t *testing.T) {
 	s, p := newTestSim(t)
 	st := s.Snapshot()
 
-	// 场景：5 静态（地板+四墙）+ 18 箱子 + 8 靶球 + 3 敌人 + 6 金币传感器球。
-	if p.bodyCount() != 34+initialResource {
-		t.Fatalf("初始物理刚体数应为 %d（含金币传感器球），得到 %d", 34+initialResource, p.bodyCount())
+	// 场景：map.go 的部件表（船体/集装箱/走道/舷梯/桅杆）+ 木箱 + 靶球 + 初始敌人，
+	// 外加 initialResource 个不上屏的金币传感器球。
+	want := sceneBodyCount()
+	if p.bodyCount() != want+initialResource {
+		t.Fatalf("初始物理刚体数应为 %d（含金币传感器球），得到 %d", want+initialResource, p.bodyCount())
 	}
 	if len(p.sensors) != initialResource {
 		t.Fatalf("金币传感器球应为 %d 个，得到 %d", initialResource, len(p.sensors))
 	}
-	if len(st.Bodies) != 34 {
-		t.Fatalf("快照刚体数应为 34（传感器球不上屏），得到 %d", len(st.Bodies))
+	if len(st.Bodies) != want {
+		t.Fatalf("快照刚体数应为 %d（传感器球不上屏），得到 %d", want, len(st.Bodies))
 	}
 	// 快照 bodies 里不能出现金币的 id（客户端只渲染 resources 列表）。
 	resIDs := map[int]bool{}
@@ -308,8 +329,8 @@ func TestInitialSnapshot(t *testing.T) {
 	if got := len(enemiesOf(st)); got != initialEnemies {
 		t.Fatalf("初始敌人应为 %d，得到 %d", initialEnemies, got)
 	}
-	if len(targetsOf(st)) != 8 {
-		t.Fatalf("初始靶球应为 8，得到 %d", len(targetsOf(st)))
+	if len(targetsOf(st)) != len(shipTargets) {
+		t.Fatalf("初始靶球应为 %d，得到 %d", len(shipTargets), len(targetsOf(st)))
 	}
 	if len(st.Resources) != initialResource {
 		t.Fatalf("初始金币应为 %d，得到 %d", initialResource, len(st.Resources))
@@ -350,7 +371,7 @@ func TestInitialSnapshot(t *testing.T) {
 		t.Fatalf("两个角色形状都应由 sim 传入（0.5/0.4/0.9），得到 created=%d %v/%v/%v",
 			p.charCreated, p.charHalfHeight, p.charRadius, p.charOffsetY)
 	}
-	if p.charSpawn[0] != [3]float32{0, 0, 12} {
+	if p.charSpawn[0] != near0(0, 0, 0) {
 		t.Fatalf("0 号角色出生点应由 sim 传入，得到 %v", p.charSpawn[0])
 	}
 	if p.dynamicPush {
@@ -364,11 +385,11 @@ func TestInitialSnapshot(t *testing.T) {
 func TestShootValidatesDirection(t *testing.T) {
 	s, p := newTestSim(t)
 
-	if id := s.Shoot([3]float32{0, 1, 12}, [3]float32{0, 0, 0}); id != 0 {
+	if id := s.Shoot(shoot0(), [3]float32{0, 0, 0}); id != 0 {
 		t.Fatalf("零向量方向应拒绝，得到 id=%d", id)
 	}
 
-	id := s.Shoot([3]float32{0, 1, 12}, [3]float32{2, 0, 0})
+	id := s.Shoot(shoot0(), [3]float32{2, 0, 0})
 	if id == 0 {
 		t.Fatal("有效射击应返回非零 id")
 	}
@@ -385,7 +406,7 @@ func TestShootValidatesDirection(t *testing.T) {
 	}
 	// 弹丸立即可见于快照（两次 tick 之间创建的实体也有初始位置）。
 	for _, b := range s.Snapshot().Bodies {
-		if b.ID == id && b.Pos != [3]float32{0, 1, 12} {
+		if b.ID == id && b.Pos != shoot0() {
 			t.Fatalf("新弹丸应带初始位置，得到 %v", b.Pos)
 		}
 	}
@@ -394,7 +415,7 @@ func TestShootValidatesDirection(t *testing.T) {
 func TestProjectileHitsTargetScores(t *testing.T) {
 	s, p := newTestSim(t)
 	target := targetsOf(s.Snapshot())[0]
-	proj := s.Shoot([3]float32{0, 1, 12}, [3]float32{1, 0, 0})
+	proj := s.Shoot(shoot0(), [3]float32{1, 0, 0})
 	p.queueContact(proj, target)
 
 	s.Step()
@@ -413,7 +434,7 @@ func TestProjectileHitsTargetScores(t *testing.T) {
 func TestProjectileAsSecondContactSide(t *testing.T) {
 	s, p := newTestSim(t)
 	target := targetsOf(s.Snapshot())[0]
-	proj := s.Shoot([3]float32{0, 1, 12}, [3]float32{1, 0, 0})
+	proj := s.Shoot(shoot0(), [3]float32{1, 0, 0})
 	p.queueContact(target, proj) // 弹丸是接触对的第二方
 
 	s.Step()
@@ -442,7 +463,7 @@ func TestNonProjectileContactsIgnored(t *testing.T) {
 	if st.Score != 0 {
 		t.Fatalf("无关接触不应得分，得到 %d", st.Score)
 	}
-	if len(enemiesOf(st)) != initialEnemies || len(targetsOf(st)) != 8 {
+	if len(enemiesOf(st)) != initialEnemies || len(targetsOf(st)) != len(shipTargets) {
 		t.Fatal("无关接触不应移除任何实体")
 	}
 }
@@ -450,7 +471,7 @@ func TestNonProjectileContactsIgnored(t *testing.T) {
 func TestSensorDoesNotBlockProjectile(t *testing.T) {
 	s, p := newTestSim(t)
 	coin := uint32(s.Snapshot().Resources[0].ID)
-	proj := s.Shoot([3]float32{0, 1, 12}, [3]float32{1, 0, 0})
+	proj := s.Shoot(shoot0(), [3]float32{1, 0, 0})
 	p.queueContact(proj, coin) // 弹丸撞上金币传感器球
 
 	s.Step()
@@ -489,10 +510,10 @@ func TestNonEnemyContactsNoDamage(t *testing.T) {
 func TestProjectileKillsEnemyAndDropsResource(t *testing.T) {
 	s, p := newTestSim(t)
 	enemy := enemiesOf(s.Snapshot())[0]
-	p.moveBody(enemy, [3]float32{2, 1, 12}) // 玩家附近但不贴身（无接触伤害）
+	p.moveBody(enemy, near0(2, 1, 0)) // 玩家附近但不贴身（无接触伤害）
 
 	for i := 0; i < 3; i++ {
-		proj := s.Shoot([3]float32{0, 1, 12}, [3]float32{1, 0, 0})
+		proj := s.Shoot(shoot0(), [3]float32{1, 0, 0})
 		p.queueContact(proj, enemy)
 	}
 	s.Step()
@@ -512,7 +533,7 @@ func TestProjectileKillsEnemyAndDropsResource(t *testing.T) {
 func TestPlayerContactDamageAndRespawn(t *testing.T) {
 	s, p := newTestSim(t)
 	enemy := enemiesOf(s.Snapshot())[0]
-	p.moveBody(enemy, [3]float32{0, 0, 12}) // 贴到 0 号玩家身上
+	p.moveBody(enemy, near0(0, 0, 0)) // 贴到 0 号玩家身上
 
 	for i := 0; i < 10; i++ {
 		s.Step()
@@ -530,7 +551,7 @@ func TestPlayerContactDamageAndRespawn(t *testing.T) {
 	if h := player0(s.Snapshot()).Health; h <= 0 || h > 100 {
 		t.Fatalf("复活后血量应在 (0, 100]，得到 %v", h)
 	}
-	if p.characters[0].pos[0] != 0 || p.characters[0].pos[2] != 12 || p.characters[0].pos[1] > playerSpawnY+1e-3 {
+	if p.characters[0].pos[0] != spawn0X() || p.characters[0].pos[2] != spawn0Z() || p.characters[0].pos[1] > playerSpawnY+1e-3 {
 		t.Fatalf("复活后应回到出生点（着地），得到 %v", p.characters[0].pos)
 	}
 }
@@ -573,7 +594,7 @@ func TestWaveAdvance(t *testing.T) {
 	// 一次 tick 内击杀全部 3 只（每只 3 发弹丸）。
 	for _, enemy := range enemiesOf(s.Snapshot()) {
 		for i := 0; i < 3; i++ {
-			proj := s.Shoot([3]float32{0, 1, 12}, [3]float32{1, 0, 0})
+			proj := s.Shoot(shoot0(), [3]float32{1, 0, 0})
 			p.queueContact(proj, enemy)
 		}
 	}
@@ -605,7 +626,7 @@ func TestWaveAdvance(t *testing.T) {
 
 func TestProjectileExpiry(t *testing.T) {
 	s, _ := newTestSim(t)
-	s.Shoot([3]float32{0, 1, 12}, [3]float32{1, 0, 0})
+	s.Shoot(shoot0(), [3]float32{1, 0, 0})
 	if got := len(projectilesOf(s.Snapshot())); got != 1 {
 		t.Fatalf("应有 1 枚弹丸，得到 %d", got)
 	}
@@ -652,9 +673,9 @@ func TestApplyInputMovesPlayer(t *testing.T) {
 
 func TestResetRebuildsScene(t *testing.T) {
 	s, p := newTestSim(t)
-	s.Shoot([3]float32{0, 1, 12}, [3]float32{1, 0, 0})
+	s.Shoot(shoot0(), [3]float32{1, 0, 0})
 	enemy := enemiesOf(s.Snapshot())[0]
-	proj := s.Shoot([3]float32{0, 1, 12}, [3]float32{1, 0, 0})
+	proj := s.Shoot(shoot0(), [3]float32{1, 0, 0})
 	p.queueContact(proj, enemy)
 	for i := 0; i < 5; i++ {
 		s.Step()
@@ -669,12 +690,14 @@ func TestResetRebuildsScene(t *testing.T) {
 	if player0(st).Health != 100 {
 		t.Fatalf("Reset 后血量应为 100，得到 %v", player0(st).Health)
 	}
-	if len(st.Bodies) != 34 || len(st.Resources) != initialResource || len(enemiesOf(st)) != initialEnemies {
-		t.Fatalf("Reset 后场景应重建（34 刚体/6 金币/3 敌人），得到 %d/%d/%d",
+	want := sceneBodyCount()
+	if len(st.Bodies) != want || len(st.Resources) != initialResource || len(enemiesOf(st)) != initialEnemies {
+		t.Fatalf("Reset 后场景应重建（%d 刚体/%d 金币/%d 敌人），得到 %d/%d/%d",
+			want, initialResource, initialEnemies,
 			len(st.Bodies), len(st.Resources), len(enemiesOf(st)))
 	}
 	// 物理世界重建后刚体 id 从头开始分配。
-	if st.Bodies[0].ID != 1 || st.Bodies[len(st.Bodies)-1].ID != 34 {
+	if st.Bodies[0].ID != 1 || st.Bodies[len(st.Bodies)-1].ID != uint32(want) {
 		t.Fatalf("重建后刚体 id 应从 1 重新分配，得到 %d..%d",
 			st.Bodies[0].ID, st.Bodies[len(st.Bodies)-1].ID)
 	}
@@ -683,7 +706,7 @@ func TestResetRebuildsScene(t *testing.T) {
 func TestSnapshotStableAfterRemovals(t *testing.T) {
 	s, p := newTestSim(t)
 	target := targetsOf(s.Snapshot())[0]
-	proj := s.Shoot([3]float32{0, 1, 12}, [3]float32{1, 0, 0})
+	proj := s.Shoot(shoot0(), [3]float32{1, 0, 0})
 	p.queueContact(proj, target)
 	s.Step() // 触发 swap-remove 打乱存储顺序
 
@@ -704,7 +727,7 @@ func TestInputClampedToMaxSpeed(t *testing.T) {
 	s.ApplyInput(0, [2]float32{60, 80}, 0, false)
 	s.Step()
 	dx := p.characters[0].pos[0]
-	dz := p.characters[0].pos[2] - 12
+	dz := p.characters[0].pos[2] - spawn0Z()
 	d := float32(math.Sqrt(float64(dx*dx + dz*dz)))
 	if !near(d, maxPlayerSpeed*TickDT, 1e-3) {
 		t.Fatalf("水平位移应按 maxPlayerSpeed=%v 限幅，实测 %v", maxPlayerSpeed, d)
@@ -717,7 +740,7 @@ func TestInputClampedToMaxSpeed(t *testing.T) {
 func TestRespawnSameTickConsistent(t *testing.T) {
 	s, p := newTestSim(t)
 	enemy := enemiesOf(s.Snapshot())[0]
-	p.moveBody(enemy, [3]float32{0, 0, 12}) // 贴身 → 每 tick 持续伤害
+	p.moveBody(enemy, near0(0, 0, 0)) // 贴身 → 每 tick 持续伤害
 	for i := 0; i < 500 && p.respawns == 0; i++ {
 		s.Step()
 	}
@@ -728,10 +751,10 @@ func TestRespawnSameTickConsistent(t *testing.T) {
 	if player0(st).Health != 100 {
 		t.Fatalf("复活当 tick 血量应为 100，得到 %v", player0(st).Health)
 	}
-	if player0(st).Pos != (Position{0, playerSpawnY, 12}) {
+	if player0(st).Pos != (Position(near0(0, playerSpawnY, 0))) {
 		t.Fatalf("复活当 tick 快照位置应已是出生点（不再留在死亡点），得到 %v", player0(st).Pos)
 	}
-	if p.characters[0].pos != ([3]float32{0, playerSpawnY, 12}) {
+	if p.characters[0].pos != (near0(0, playerSpawnY, 0)) {
 		t.Fatalf("物理角色位置应立即回到出生点，得到 %v", p.characters[0].pos)
 	}
 	if p.characters[0].vel != ([3]float32{}) {
@@ -743,7 +766,7 @@ func TestInitIsIdempotent(t *testing.T) {
 	s, p := newTestSim(t)
 	before := p.bodyCount()
 	// 造点"噪音"：发弹、推进几 tick。
-	s.Shoot([3]float32{0, 1, 12}, [3]float32{1, 0, 0})
+	s.Shoot(shoot0(), [3]float32{1, 0, 0})
 	for i := 0; i < 3; i++ {
 		s.Step()
 	}
@@ -791,7 +814,7 @@ func TestTwoPlayersIndependentInputs(t *testing.T) {
 func TestTwoPlayerIndependentDamage(t *testing.T) {
 	s, p := newTestSim(t)
 	enemy := enemiesOf(s.Snapshot())[0]
-	p.moveBody(enemy, [3]float32{0, 0, 12}) // 贴到 0 号玩家
+	p.moveBody(enemy, near0(0, 0, 0)) // 贴到 0 号玩家
 
 	for i := 0; i < 10; i++ {
 		s.Step()

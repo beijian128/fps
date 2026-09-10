@@ -204,8 +204,9 @@ func (s *Simulation) waveSystem() {
 	s.waveClearStep = 0
 }
 
-// spawnEnemy 在离 0 号玩家 10m 外的随机位置刷一只怪物。怪物没有移动逻辑：
+// spawnEnemy 在离 0 号玩家 10m 外的随机甲板位置刷一只怪物。怪物没有移动逻辑：
 // 是静态刚体（固定哨兵），不可被推动、不参与重力结算，贴身才造成伤害。
+// 刷点必须避开掩体（mapBlocks）——否则怪物会卡在集装箱里，玩家打不到也碰不着。
 func (s *Simulation) spawnEnemy() {
 	var player [3]float32
 	if p, ok := ecs.Get[Position](s.world, s.players[0]); ok {
@@ -213,18 +214,22 @@ func (s *Simulation) spawnEnemy() {
 	}
 	spawn := func(x, z float32) {
 		id := s.physics.AddCapsule(x, enemySpawnY, z, enemyHalfHeight, enemyRadius, MotionStatic)
-		e := s.registerBody(id, BodyCapsule, [3]float32{enemyRadius, enemyHalfHeight, 0}, true, [3]float32{x, enemySpawnY, z})
+		e := s.registerBody(id, BodyCapsule, [3]float32{enemyRadius, enemyHalfHeight, 0}, true, [3]float32{x, enemySpawnY, z}, MatDefault)
 		ecs.Add2(s.world, e, Enemy{}, Health(enemyHealth))
 	}
-	for attempt := 0; attempt < 24; attempt++ {
-		x := randRange(-14, 14)
-		z := randRange(-14, 14)
+	for attempt := 0; attempt < 48; attempt++ {
+		x := randRange(-deckHalfX+1, deckHalfX-1)
+		z := randRange(-deckHalfZ+1, deckHalfZ-1)
 		dx := x - player[0]
 		dz := z - player[2]
-		if dx*dx+dz*dz >= 10*10 {
-			spawn(x, z)
-			return
+		if dx*dx+dz*dz < enemyFreeGap*enemyFreeGap {
+			continue
 		}
+		if mapBlocks(x, enemySpawnY, z, enemyRadius) {
+			continue
+		}
+		spawn(x, z)
+		return
 	}
-	spawn(-12, -12)
+	spawn(0, -12) // 兜底：甲板中央通道（该处无掩体）
 }

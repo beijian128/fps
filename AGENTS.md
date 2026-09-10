@@ -26,7 +26,12 @@ fps/
 │   │   ├── component.go     # game.create/input/shoot/reset handler + State→Snapshot 转换
 │   │   └── protos/          # protobuf 消息定义 + 生成码（wire 契约）
 │   ├── physics/             # ★ 唯一 cgo 包：sim.Physics 的 Jolt 实现 + id 翻译
-│   ├── sim/                 # ECS 玩法层（纯 Go，无 cgo，单线程所有）：components/systems/simulation/state
+│   ├── sim/                 # ECS 玩法层（纯 Go，无 cgo，单线程所有）
+│   │   ├── map.go           # ★ 运输船场景：部件表（甲板/船体/集装箱/走道/舷梯/桅杆）+ 材质号
+│   │   ├── simulation.go    # 组装世界、按部件表搭场景、快照构建
+│   │   ├── components.go    # 组件定义（Body 带 Kind/Size/Static/Mat）
+│   │   ├── systems.go       # 每 tick 系统（输入/同步/命中/伤害/拾取/波次）
+│   │   └── state.go         # 快照内部结构（wire 契约在 game/protos/game.proto）
 │   ├── ecs/                 # 零依赖 archetype ECS 核心（纯 Go，可单测）
 │   ├── wrapper/jolt_c.{h,cpp}  # 纯物理桥（extern "C"，无任何业务概念）
 │   ├── deploy/              # 本地集群基础设施：etcd/nats 二进制 + 启动脚本
@@ -58,6 +63,7 @@ fps/
 5. **快照协议是客户端契约**（`sim/state.go` 内部结构；wire 契约在 `game/protos/game.proto`，protobuf）：改动 proto 字段必须重生成 Go 码并同步改 Godot 客户端。快照 `players` 按槽位 0/1 顺序；刚体/金币按 id **升序**输出。上行 route 三段式 `server.service.method`（`match.match.join` / `game.game.*`）。
 6. **并发/锁（核心变化）**：`sim.Simulation` **无锁**——由对局实例 goroutine（`game/instance.go`）独占驱动，输入经命令 channel 投递、同一 goroutine 顺序执行，不需要任何互斥。`game.Component` 的实例注册表（uid→实例）用一把 `sync.Mutex` 保护（跨 RPC handler 共享）。`ecs.World` 自身不加锁。
 7. **ECS 使用约束**：`Each` / `QueryEach*` 回调内**禁止** Add/Remove/Destroy（swap-remove 打乱迭代），需要增删时"先收集再处理"；`Get` 返回的指针仅本次调用有效；物理实体 Destroy 后彻底注销（id 不复用），逻辑实体 id 走 free list 复用。
+8. **地图是对称的**：`sim/map.go` 的部件表在绕 Y 轴旋转 180°（`(x,y,z) → (-x,y,-z)`）下自映射——带 `mirror` 的部件由代码自动补孪生体，两个出生点必须完全等价。改图只写半边；`sim/map_test.go` 会验证对称性、出生点不卡掩体、刷怪不刷进掩体。舷梯参数有硬约束（单级抬升 ≤ 0.4、进深 ≥ 0.5，均为角色半径/`WalkStairs` 决定），改动前先看 `map_test.go` 里的说明。
 
 ## 4. 数据流（分布式链路）
 
@@ -98,6 +104,9 @@ cd joltgo; gofmt -l .; go vet ./gate ./match ./game ./physics ./sim; go test ./e
 # 全部包（含 cgo 编译检查，需已构建出 libjolt_c.dll 导入库）
 go test ./...
 
+# 地图可玩性集成测试（跑真 Jolt：验证舷梯真能走上去、静态几何不漂移；需 libjolt_c.dll 在 PATH）
+cd joltgo; go test -tags joltdll ./physics
+
 # 本地起分布式服务端（etcd + nats + gate/match/game 三进程）
 cd joltgo\deploy; .\start-all.ps1     # 停：.\stop-infra.ps1
 
@@ -113,6 +122,9 @@ Godot_..._console.exe --headless --path godot_client --script res://tests/reconn
 ## 7. 变更 runbook（改什么就动哪里）
 
 - 改玩法逻辑 → 只动 `joltgo/sim/`（组件 + 系统 + 调参），跑 `go test ./ecs ./sim`。
+- 改地图/场景 → 只动 `joltgo/sim/map.go`（部件表 + 材质号），跑 `go test ./sim`；
+  涉及"走不走得上去"这类几何手感，再跑 `go test -tags joltdll ./physics`。
+  新增材质号同时改 `godot_client/scripts/body_entity.gd` 的 `MATS` 表（只能追加编号）。
 - 改 ECS 核心 → 只动 `joltgo/ecs/`（必须零依赖、可单测）。
 - 改物理接口 → 动 `joltgo/wrapper/` + `joltgo/physics/`（`sim.Physics` 接口同步），重跑 `build.ps1`。
 - 改协议 → 动 `joltgo/game/protos/game.proto`（重跑 `protoc --go_out`）+ `joltgo/game/` + `joltgo/match/` + `docs/API.md` + `godot_client/scripts/`（protobuf 编解码同步改）。

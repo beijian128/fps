@@ -40,7 +40,7 @@ godot_client/
 ├── scripts/
 │   ├── main.gd           # 输入/相机(第一/第三人称)/插值渲染/持枪/HUD/金币/音效（Node3D）
 │   ├── fps_client.gd     # WebSocket 传输层：连接/重连/收发（Node）
-│   ├── body_entity.gd    # 每个服务端刚体一个渲染节点（卡通怪物/简单体）
+│   ├── body_entity.gd    # 每个服务端刚体一个渲染节点（卡通怪物/场景材质配色/简单体）
 │   └── sfx.gd            # 程序化音效（Node）
 └── tests/ws_smoke.gd     # 无头冒烟测试（20 Hz 推送速率）
 ```
@@ -49,6 +49,9 @@ godot_client/
   `connection_changed(connected)` 报连接变化（断线后自动每秒重连）
 - 场景、灯光、HUD 全部由代码构建（`main.gd`），没有外部资源依赖
 - 网格/材质管理在 `BodyEntity`：只在快照中形状签名变化时重建，位置/旋转每帧写入
+- 场景刚体按服务端快照里的 `mat` 材质号配色（`body_entity.gd` 的 `MATS` 表与
+  `sim/map.go` 的 `Material` 编号一一对应，**只能追加**）；靶球/怪物/弹丸由各自的
+  标志位优先决定外观。客户端遇到不认识的材质号会退回默认配色（静态钢灰/动态木色）
 - 快照插值在 `main.gd`：双缓冲 + alpha = 距新快照到达时间 / 0.05s；
   同一 tick 重复推送只保留首次到达时间，tick 跳号（重置/重连）时清空缓冲
 - 新生成 / 移除的刚体不参与插值：按最新快照创建或删除（弹丸消失有爆闪特效）
