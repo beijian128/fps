@@ -1414,12 +1414,14 @@ func TestStoreMatchesWorldThroughoutMatch(t *testing.T) {
 	s.Step()
 	assertStoreMatchesWorld(t, s)
 
-	// 玩家拾取金币
-	coin := uint32(snapshotWorld(s).Resources[0].ID)
-	p.queueCharacterContact(coin)
-	s.ApplyInput(0, [2]float32{0, 0}, 0, false)
-	s.Step()
-	assertStoreMatchesWorld(t, s)
+	// 玩家拾取金币。初始金币是随机撒的，理论上可能一枚都没撒上（既有随机性，
+	// 见 TestInitialSnapshot 的同源 flake），所以先判空再取下标。
+	if res := snapshotWorld(s).Resources; len(res) > 0 {
+		p.queueCharacterContact(uint32(res[0].ID))
+		s.ApplyInput(0, [2]float32{0, 0}, 0, false)
+		s.Step()
+		assertStoreMatchesWorld(t, s)
+	}
 
 	// 敌人贴身伤害 + 复活
 	enemy := enemiesOf(snapshotWorld(s))[0]
