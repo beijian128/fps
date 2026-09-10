@@ -54,7 +54,7 @@ func TestSetAfterDestroyIsDirtyAgain(t *testing.T) {
 	s.Destroy(7)
 	s.Set(7, "Health", F32(10)) // 新实体，值恰好相同
 
-	if got := dirtyIDs(s, 7); len(got) != 1 {
+	if got := dirtyIDs(s, 7); len(got) != 1 || got[0] != s.attrOf("Health") {
 		t.Fatalf("重建的实体必须重新标脏，得到 %v", got)
 	}
 }
@@ -111,6 +111,8 @@ func TestDeclareTwicePanics(t *testing.T) {
 func TestResetKeepsDeclarations(t *testing.T) {
 	s := newTestStore()
 	s.Set(7, "Health", F32(10))
+	s.sent[7] = map[uint32]Value{s.attrOf("Health"): F32(10)} // 模拟已下发过
+
 	s.Reset()
 
 	if _, ok := s.Get(7, "Health"); ok {
@@ -119,7 +121,24 @@ func TestResetKeepsDeclarations(t *testing.T) {
 	if !s.dead[7] {
 		t.Fatal("Reset 应保留一条待发的 destroy，否则场景重建后客户端会残留旧实体")
 	}
+	if _, ok := s.sent[7]; ok {
+		t.Fatal("Reset 应同时清掉已下发基线，否则 id 复用后新实体会被静默抑制")
+	}
 	s.Set(7, "Health", F32(1)) // 声明还在，不应 panic
+}
+
+// 场景重建：id 被复用且值恰好与重建前相同时，新实体仍必须重新下发。
+func TestSetAfterResetIsDirtyAgain(t *testing.T) {
+	s := newTestStore()
+	s.Set(7, "Health", F32(10))
+	s.sent[7] = map[uint32]Value{s.attrOf("Health"): F32(10)}
+
+	s.Reset()
+	s.Set(7, "Health", F32(10)) // 重建，值恰好相同
+
+	if got := dirtyIDs(s, 7); len(got) != 1 || got[0] != s.attrOf("Health") {
+		t.Fatalf("Reset 后重建的实体必须重新标脏，得到 %v", got)
+	}
 }
 
 // ---- 测试辅助（与 store.go 同包，可直接读内部字段） ----

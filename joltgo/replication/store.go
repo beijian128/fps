@@ -112,6 +112,9 @@ func (s *Store) Set(id uint32, attr string, v Value) {
 // Remove 移除实体 id 的属性 attr。曾经下发过的属性会产生一条 removed 下发，
 // 客户端据此删除本地副本。当前玩法没有「摘掉组件但保留实体」的路径，此 API
 // 为协议完整性保留（Destroy 内部不使用它）。
+//
+// 实体不存在或属性不存在时静默返回，但属性名未声明与 Set 一样 panic ——
+// 前者是正常时序（重复移除），后者是调用点写错了名字。
 func (s *Store) Remove(id uint32, attr string) {
 	cid := s.attrOf(attr)
 	m := s.values[id]
@@ -152,13 +155,19 @@ func (s *Store) Destroy(id uint32) {
 
 // Reset 丢弃全部实体与脏集，保留属性声明（对局 Reset 用）。
 //
-// 已下发过的实体各自保留一条待发的 destroy：场景重建后刚体 id 会从头发放，
-// 不显式销毁的话客户端会残留旧实体（新实体的 set 只会覆盖同 id 的那些）。
+// 两条都不能少：
+//   - 已下发过的实体各自保留一条待发的 destroy，否则场景重建后客户端会残留
+//     那些 id 不再被复用的旧实体。
+//   - 已下发基线（sent）必须一并清掉：重建后刚体 id 会从头发放，若基线还在，
+//     新实体的 Set 会因为「与旧实体的值相同」被静默抑制 —— 客户端收到 destroy
+//     却再也收不到重建，而那些只在创建时 Set 一次的属性（Body.*）就永久丢了。
+//     清掉基线的副作用正是我们想要的：重建后的世界整体重新下发一次。
 func (s *Store) Reset() {
 	for id := range s.values {
 		s.dead[id] = true
 	}
 	s.values = map[uint32]map[uint32]Value{}
+	s.sent = map[uint32]map[uint32]Value{}
 	s.dirty = map[uint32]map[uint32]bool{}
 	s.gone = map[uint32]map[uint32]bool{}
 }
