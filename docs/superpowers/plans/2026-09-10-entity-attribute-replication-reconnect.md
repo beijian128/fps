@@ -2346,6 +2346,7 @@ gofmt -l sim game/component.go game/instance.go   # 只检查动过的文件（�
 go build ./...
 go vet ./gate ./match ./game ./sim ./replication ./ecs
 go vet -tags joltdll ./physics    # map_integration_test.go 也迁到了 FullFrame，必须一并检查
+PATH="$PWD:$PATH" go test -tags joltdll ./physics   # 需要 libjolt_c.dll（已构建在 joltgo/ 下）
 go test -count=1 ./ecs ./sim ./replication
 grep -rn 'protos.Snapshot\|protos.BodyInfo\|protos.PlayerState\|protos.ResourceInfo' .   # 应无输出
 grep -rn '\.Snapshot()' sim/                                                             # 应无输出
@@ -2355,6 +2356,8 @@ grep -rn 'func snapshotWorld' sim/                                              
 Expected: 全部通过 / 无输出。`go test ./...` 需要已构建的 `libjolt_c.dll`，本步不必跑。
 
 > **注意**：`joltgo/physics/map_integration_test.go`（`-tags joltdll`）也用了 `s.Snapshot()` 与 `sim.BodyInfo`，同样要迁移 —— 它的断言只关心角色能否走上舷梯，所以直接用 `sim.FullFrame()` 读刚体位置即可（这也顺带让这个集成测试跑在真实的同步路径上）。
+>
+> 迁移时**必须排除携带 `Resource.Kind` 的实体**（金币传感器球）：它们在 store 里就是普通刚体（`Body.Static = true`、`Pos` 都在），而旧快照的 `Without[Resource]` 是把它们挡在 `bodies` 之外的。不排除的话 `TestMapStaticGeometryIsStable` 会把金币算进「静态几何」，角色一旦在 12 米的行走路径上顺手捡到一枚，用例就会以「静态刚体 N 在推进后消失了」**误报失败**。
 
 - [ ] **Step 8: 提交**
 
