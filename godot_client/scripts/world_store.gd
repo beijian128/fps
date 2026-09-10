@@ -22,14 +22,12 @@ var schema_version := 0
 var _entities := {}   # int -> Dictionary（属性名 -> 值；向量是 Array[float]）
 var _names := {}      # int(属性 ID) -> String(属性名)
 var _kinds := {}      # int(属性 ID) -> int(kind)
-var _by_name := {}    # String(属性名) -> int(属性 ID)
 
 ## apply_schema 应用 full 帧里携带的属性表。服务端每次下发 full 帧都会带一份，
 ## 重复应用是幂等的。
 func apply_schema(fields: Array) -> void:
 	_names.clear()
 	_kinds.clear()
-	_by_name.clear()
 	for f: Variant in fields:
 		var d: Dictionary = f
 		var id := int(d.get("id", 0))
@@ -38,7 +36,6 @@ func apply_schema(fields: Array) -> void:
 			continue
 		_names[id] = name
 		_kinds[id] = int(d.get("kind", KIND_F32))
-		_by_name[name] = id
 
 ## apply_frame 应用一帧同步消息。返回 {"destroyed": [{"id": int, "attrs": {...}}]} ——
 ## 带着消失前的属性，渲染层据此判断消失的是弹丸（爆闪）还是金币（拾取音）。
@@ -52,12 +49,15 @@ func apply_frame(frame: Dictionary) -> Dictionary:
 		var id := int(ed.get("id", 0))
 		if id == 0:
 			continue
-		if bool(ed.get("destroy", false)):
-			var attrs: Dictionary = _entities.get(id, {})
-			_entities.erase(id)
-			destroyed.append({"id": id, "attrs": attrs})
-			continue
 		var store: Dictionary = _entities.get(id, {})
+		if bool(ed.get("destroy", false)):
+			# 先把消失前的属性快照带出去，再丢掉本地副本。
+			destroyed.append({"id": id, "attrs": store})
+			store = {}
+			_entities.erase(id)
+		# 注意：destroy 之后**不能** continue。服务端在同一帧里销毁并重建（场景重置后
+		# 刚体 id 会从头复用）时，同一个 EntityDelta 里既有 destroy 也有新实体的 set；
+		# 丢掉 set 客户端就再也收不到重建，世界会一直空着。
 		for cid: Variant in ed.get("removed", []):
 			var rname: String = _names.get(int(cid), "")
 			if rname != "":
@@ -69,7 +69,12 @@ func apply_frame(frame: Dictionary) -> Dictionary:
 			if name == "":
 				continue # 未知属性：前后端 schema 不一致，忽略
 			store[name] = _decode_value(int(_kinds.get(cid, KIND_F32)), d)
-		_entities[id] = store
+		# 只写回真正有内容的条目：全是未知属性的 delta 或空 delta 不该在 store 里留下
+		# 一个空实体，否则 entity_ids() 会报出幻影 id、渲染层会建空节点。
+		if store.is_empty():
+			_entities.erase(id)
+		else:
+			_entities[id] = store
 	return {"destroyed": destroyed}
 
 ## attr 返回实体的属性值；实体或属性不存在时返回 null。

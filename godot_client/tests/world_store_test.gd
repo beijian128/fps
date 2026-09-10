@@ -12,10 +12,12 @@ const SCHEMA := [
 
 var _failures := 0
 
-func _init() -> void:
+func _initialize() -> void:
 	_test_full_replaces_everything()
 	_test_set_creates_and_updates()
 	_test_removed_and_destroy()
+	_test_destroy_then_rebuild_same_frame()
+	_test_unknown_attr_leaves_no_phantom()
 	_test_entities_with()
 	if _failures > 0:
 		printerr("world_store_test: %d 项失败" % _failures)
@@ -84,6 +86,7 @@ func _test_removed_and_destroy() -> void:
 	_check(ws.attr(3, "Health") == 5.0, "removed 不应影响其他属性")
 	_check(not ws.has_attr(4, "Health"), "destroy 应删掉整个实体")
 	_check(not ws.entity_ids().has(4), "destroy 后实体不应还在列表里")
+	_check(ws.entity_ids().has(3), "只被 removed 的实体应仍然存在")
 
 	var destroyed: Array = res["destroyed"]
 	_check(destroyed.size() == 1, "应只报告 1 个销毁事件，得到 %d" % destroyed.size())
@@ -101,3 +104,28 @@ func _test_entities_with() -> void:
 	var found := ws.entities_with("Enemy")
 	found.sort()
 	_check(found == [1, 2], "entities_with 应返回全部带该属性的实体")
+
+# 服务端会在同一帧里销毁并重建同一个 id（场景重置后刚体 id 从头复用），
+# 同一个 EntityDelta 里既有 destroy 也有新实体的 set —— 丢掉 set 世界就会一直空着。
+func _test_destroy_then_rebuild_same_frame() -> void:
+	var ws := _fresh()
+	ws.apply_frame({"full": false, "entities": [
+		{"id": 7, "set": [{"id": 2, "f": [10.0]}]},
+	]})
+	var res: Dictionary = ws.apply_frame({"full": false, "entities": [
+		{"id": 7, "destroy": true, "set": [{"id": 2, "f": [99.0]}]},
+	]})
+	_check(res["destroyed"].size() == 1, "应报告一次销毁")
+	_check(ws.attr(7, "Health") == 99.0, "同帧销毁+重建必须留下新实体的属性")
+	_check(ws.entity_ids().has(7), "重建后的实体应仍在列表里")
+
+# 全是未知属性的 delta 不该在 store 里留下空实体 —— 那会让渲染层建出空节点，
+# 而「服务端加属性不用改客户端」正是靠「不认识的属性直接跳过」成立的。
+func _test_unknown_attr_leaves_no_phantom() -> void:
+	var ws := _fresh()
+	ws.apply_frame({"full": false, "entities": [
+		{"id": 5, "set": [{"id": 999, "f": [1.0]}]},
+		{"id": 6, "removed": [999]},
+	]})
+	_check(ws.entity_ids().is_empty(),
+		"未知属性不应造出幻影实体，得到 %s" % str(ws.entity_ids()))
