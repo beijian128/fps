@@ -2409,11 +2409,15 @@ func (c *Component) Cmd(ctx context.Context, msg *protos.CommandMsg) {
 		}
 		inst.Shoot(origin, dir)
 	}
-	if msg.Reset {
+	if msg.Reset_ {
 		inst.Reset()
 	}
 }
 ```
+
+> **注意字段名**：proto 里的 `reset` 字段被 protoc-gen-go 生成为 **`Reset_`**（带下划线）——
+> `Reset` 与生成代码里的 `Reset()` 方法重名，protoc 会自动加下划线避让。线上字段号仍是 7，
+> 语义不变。**客户端（Task 11–13）必须按字段号 7 解析 `reset`，不能按名字找。**
 
 - [ ] **Step 2: 编译**
 
@@ -3950,6 +3954,8 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
    - **就近 `rep.Set` 漏写不会报错**，只会在 oracle 测试里失败 —— 加同步字段时先加 `rep.Set` 再加断言。
    - **full 帧不得修改增量基线**（`Store.Full()` 刻意不动 `sent`）—— 全量是发给单个客户端的。
    - **属性表必须在 `Simulation.New()` 里声明完整**，`Set` 未声明属性会 panic。
+   - **`main.go` 的过时注释**：`joltgo/main.go` 里注册 game 组件那段注释仍写着
+     `game.input/shoot/reset`，Task 7 之后已合并为 `game.cmd`，一并改掉。
 6. §6 测试命令：把 `go test ./ecs ./sim` 改成 `go test ./ecs ./sim ./replication`；删掉 `snapshot_same_step_test.gd` 那一行，补上 `world_store_test.gd` 与 `frame_decode_test.gd`。
 7. §7 变更 runbook：补一行「加一个同步字段 → `sim/replicate.go` 声明 + `rep.Set` + 在 `replicate_test.go` 的 `expectedAttrs` 里补一条」。
 
