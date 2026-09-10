@@ -4,9 +4,11 @@ package game
 // sim.Simulation。核心不变量：
 //
 //   - **单线程所有，无锁**：只有 run() 这条 goroutine 访问 sim（Step/ApplyInput/
-//     Shoot/Reset/Shapshot），输入经命令 channel 投递、由同一 goroutine 顺序执行，
-//     因此 sim 内部不需要任何互斥锁。
-//   - 20 Hz tick 由同一条 goroutine 驱动，每 tick 把快照经 pitaya 推给局内玩家。
+//     Shoot/Reset/DrainFrame/FullFrame），输入经命令 channel 投递、由同一 goroutine
+//     顺序执行，因此 sim 内部不需要任何互斥锁。
+//   - 20 Hz tick 由同一条 goroutine 驱动，每 tick 先把 replication store 里的本帧
+//     增量取走（DrainFrame，恰好调用一次、负责清脏），再按槽位下发：登记了重连 /
+//     resync 的槽位（pendingFull）收全量帧，其余槽位收增量帧。
 //
 // 生命周期：Create（remote RPC）构造并 Start → Stop 在 game 组件 Shutdown 时调用。
 

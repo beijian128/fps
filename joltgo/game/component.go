@@ -15,6 +15,7 @@ import (
 	"github.com/topfreegames/pitaya/v3/pkg/component"
 	"joltgo/game/protos"
 	"joltgo/replication"
+	"joltgo/sim"
 )
 
 const (
@@ -46,6 +47,15 @@ func New(app pitaya.Pitaya) *Component {
 // Create 是远端 RPC handler（route "game.create"）：match 服务在匹配成功后调用，
 // 用 uids（按槽位顺序）创建一个新对局实例。
 func (c *Component) Create(ctx context.Context, msg *protos.CreateGameMsg) (*protos.CreateGameReply, error) {
+	// broadcast 按槽位索引固定大小的 pendingFull[sim.MaxPlayers]，超过上限的名单
+	// 会在推进帧时越界 panic。match 目前只会发 1~2 个 uid，但这是外部 RPC 入口，
+	// 该 panic 路径是本任务新引入的，必须在建实例前就挡掉。
+	if len(msg.Uids) > sim.MaxPlayers {
+		log.Printf("game: create %s rejected: %d players exceeds max %d",
+			msg.MatchId, len(msg.Uids), sim.MaxPlayers)
+		return &protos.CreateGameReply{Code: 1}, nil
+	}
+
 	inst := NewInstance(c.app, msg.MatchId, msg.Uids)
 	inst.Start()
 

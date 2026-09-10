@@ -31,7 +31,12 @@ type bodyView struct {
 	Static bool
 }
 
-// frameBodies 从全量帧里读出所有刚体（带 Body.Kind 属性的实体）。
+// frameBodies 从全量帧里读出玩家可见的刚体（带 Body.Kind 属性的实体）。
+//
+// 金币传感器球也注册了 Body 且是静态的，但不上屏——旧快照用 Without[Resource]
+// 在 archetype 粒度排除了它们（sim_test 亦断言金币不得出现在 Bodies）。全量帧
+// 没有 archetype 概念，只能等价地按「同时带 Resource.Kind」跳过：否则金币会在
+// 推进中被拾取而消失，静态几何巡检会把它误判成「静态刚体消失了」。
 func frameBodies(s *sim.Simulation) []bodyView {
 	f := s.FullFrame()
 	name := map[uint32]string{}
@@ -42,10 +47,13 @@ func frameBodies(s *sim.Simulation) []bodyView {
 	for _, ed := range f.Entities {
 		b := bodyView{ID: ed.ID}
 		isBody := false
+		hasResource := false
 		for _, av := range ed.Set {
 			switch name[av.Attr] {
 			case "Body.Kind":
 				isBody = true
+			case "Resource.Kind":
+				hasResource = true
 			case "Pos":
 				copy(b.Pos[:], av.Value.Floats())
 			case "Body.Size":
@@ -56,7 +64,7 @@ func frameBodies(s *sim.Simulation) []bodyView {
 				b.Static = av.Value.Boolean()
 			}
 		}
-		if isBody {
+		if isBody && !hasResource {
 			out = append(out, b)
 		}
 	}
