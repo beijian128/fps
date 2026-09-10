@@ -1,7 +1,7 @@
 extends SceneTree
 ## 开发用冒烟测试（不进发布包）：
 ## 用真实的 FpsClient 节点走 pitaya/pomelo 握手 + 匹配 + protobuf 解码，验证服务端
-## 匹配成功（onMatched）后以 20 Hz 推送 onSnapshot 快照（4 秒约 80 帧）。
+## 匹配成功（onMatched）后以 20 Hz 推送 onFrame 帧（4 秒约 80 帧）。
 ##
 ## 运行：先起 etcd+nats + gate/match/game 三进程，再：
 ##   godot --headless --path <项目> --script res://tests/ws_smoke.gd
@@ -14,7 +14,7 @@ var _matched := false
 
 func _initialize() -> void:
 	_client = load("res://scripts/fps_client.gd").new()
-	_client.state_received.connect(_on_state)
+	_client.frame_received.connect(_on_frame)
 	_client.matched_received.connect(_on_matched)
 	root.add_child(_client)
 	_run()
@@ -22,8 +22,8 @@ func _initialize() -> void:
 func _on_matched(_r: Dictionary) -> void:
 	_matched = true
 
-func _on_state(s: Dictionary) -> void:
-	var step := int(s.get("step", -1))
+func _on_frame(f: Dictionary) -> void:
+	var step := int(f.get("step", -1))
 	if step >= 0:
 		_steps[step] = true
 		_min_step = mini(_min_step, step)

@@ -1,13 +1,15 @@
 extends Node3D
-## 游戏主场景：输入采集、相机（第一/第三人称切换）、快照插值渲染、HUD、音效。
+## 游戏主场景：输入采集、相机（第一/第三人称切换）、帧插值渲染、HUD、音效。
 ##
 ## 分层：
-##   FpsClient（子节点）— WebSocket 传输层，发 state_received / connection_changed 信号
+##   FpsClient（子节点）— WebSocket 传输层，发 frame_received / connection_changed 信号
+##   WorldStore — 本地世界状态（实体-属性增量累积成完整世界）
 ##   BodyEntity（class_name）— 每个服务端刚体一个渲染节点（卡通怪物/简单体）
 ##   Sfx（子节点）— 程序化音效
 ##
-## 渲染节奏：服务端 20 Hz 推送快照，本场景 60 Hz 渲染。对运动刚体和玩家位置做
-## 影子跟随插值——渲染时刻滞后一个 tick，在最近两帧快照之间 lerp / slerp。
+## 渲染节奏：服务端 20 Hz 推送增量帧，本场景 60 Hz 渲染。渲染层按「属性名」从
+## WorldStore 查询实体（不认识的新属性照常累积、只是不渲染），对运动刚体和玩家位置
+## 做影子跟随插值——在相邻两帧的变换之间 lerp / slerp。
 ##
 ## 卡通资源：金币（走近拾取，自转+浮动动画）；V 键切换第一人称（持枪 viewmodel）
 ## 与第三人称（玩家人形 Avatar）。
@@ -20,6 +22,7 @@ const LOOK_SPEED := 0.0022
 const PITCH_LIMIT := PI / 2.0 - 0.05
 # 用 preload 而不是 class_name：纯命令行运行时（未在编辑器里导入过）也能解析。
 const BodyEntityScript := preload("res://scripts/body_entity.gd")
+const WorldStore := preload("res://scripts/world_store.gd")
 
 @onready var fps_client: Node = $FpsClient
 @onready var sfx: Node = $Sfx
@@ -40,10 +43,14 @@ var _avatar: Node3D
 var _remote_avatar: Node3D
 var _third_person := false
 
-# 最近两帧快照（影子跟随）。每帧存 step、到达时间 t、{ id -> {info,pos,quat} }、
-# 玩家脚底位置、resources。同一 tick 的重复推送只保留首次到达时间。
-var _prev_snap := {}
-var _next_snap := {}
+# 本地世界状态：服务端推的是增量，这里累积成完整世界（见 world_store.gd）。
+var _store: WorldStore = WorldStore.new()
+# 渲染层自己的插值状态：id -> {"pos","quat"}（上一帧的变换），以及本帧到达时间。
+var _body_xform := {}      # id -> {"pos": Vector3, "quat": Quaternion}：服务端刚体的当前变换
+var _prev_body_xform := {} # id -> {"pos": Vector3, "quat": Quaternion}：插值起点
+var _prev_player_pos := Vector3(0, 0.2, 18)
+var _prev_remote_pos := Vector3(0, 0.2, -18)
+var _frame_time := 0.0     # 本帧到达时间（秒），插值 alpha 的基准
 
 # 实体缓存：id -> BodyEntity；金币：id -> {node, base}
 var _entities := {}
@@ -58,7 +65,9 @@ var _yaw := 0.0
 var _pitch := 0.0
 var _jump_held := false
 var _jump_queued := false
-var _was_captured := false
+# 本帧待上报的射击 / 重置：与输入合并成一条 game.cmd 发出，帧是最小发送单位。
+var _pending_shot := {}
+var _pending_reset := false
 
 var _fps_ema := 60.0
 var _hud_score := 0
@@ -68,8 +77,6 @@ var _hud_targets := 0
 var _hud_enemies := 0
 var _last_score := 0
 var _last_health := 100.0
-var _prev_projectiles := {}  # id -> Vector3
-var _snap_sig := ""  # 最近一次已接受快照的内容摘要（step 无关），同 step 帧去重用
 var _hit_flash: ColorRect
 # 自动化测试钩子：无头环境无法真正捕获鼠标，设置该环境变量后视作已捕获。
 var _capture_override := OS.get_environment("JOLT_FORCE_CAPTURE") != ""
@@ -80,7 +87,7 @@ func _ready() -> void:
 	_build_remote_avatar()
 	_build_viewmodel()
 	_build_hud()
-	fps_client.state_received.connect(_on_state)
+	fps_client.frame_received.connect(_on_frame)
 	fps_client.matched_received.connect(_on_matched)
 	fps_client.connection_changed.connect(_on_connection)
 
@@ -90,6 +97,10 @@ func _on_matched(result: Dictionary) -> void:
 	# 出生在船的艏/艉两端，开局朝向船中（与服务端 playerSpawnYaw 一致）。
 	_yaw = PI if _my_player_idx == 1 else 0.0
 	conn_label.visible = false
+	# 由客户端驱动全量补齐：收到 full 帧之前，WorldStore 之外的一切都不可信。
+	_store.clear()
+	_reset_interp()
+	fps_client.send_resync()
 
 func _on_connection(connected: bool) -> void:
 	if connected:
@@ -99,28 +110,31 @@ func _on_connection(connected: bool) -> void:
 		conn_label.text = "正在连接服务器…"
 		conn_label.visible = true
 		_matched = false
-		_prev_snap = {}
-		_next_snap = {}
-		_snap_sig = ""
+		_store.clear()
+		_reset_interp()
 		for id in _res_nodes:
 			_res_nodes[id]["node"].queue_free()
 		_res_nodes = {}
-		# 刚体渲染节点与"上一帧弹丸"一并清空：避免旧刚体以冻结姿势残留到被新
-		# 快照 diff 移除，也避免重连后旧弹丸的消失被误判成"命中"爆闪。
+		# 刚体渲染节点一并清空：重连前不知道哪些 id 还会复用，全部交给重连后的
+		# full 帧重新协调（_reset_interp 已清掉插值状态，首帧直接落位不跳变）。
 		for id in _entities:
 			_entities[id].queue_free()
 		_entities = {}
-		_prev_projectiles = {}
+
+## _reset_interp 清空插值状态。重连后第一帧没有「上一帧」，直接在当前位置落位。
+func _reset_interp() -> void:
+	_body_xform.clear()
+	_prev_body_xform.clear()
+	_frame_time = 0.0
 
 func _process(delta: float) -> void:
 	if delta > 0.0:
 		_fps_ema += (1.0 / delta - _fps_ema) * 0.08
 
-	# 仅锁定时上报移动输入（每渲染帧一次 ≈ 60 Hz）；释放时补一条静止输入，
-	# 避免服务端沿用上次的速度继续移动。
+	# 鼠标是否锁定（标题遮罩 / 按了 ESC 时未锁定）。
 	var captured := _capture_override or Input.mouse_mode == Input.MOUSE_MODE_CAPTURED
 
-	# 跳跃在按下瞬间排队，随下一帧输入上报给服务端。未锁定时（标题遮罩/鼠标
+	# 跳跃在按下瞬间排队，随下一帧命令上报给服务端。未锁定时（标题遮罩/鼠标
 	# 已释放）不排队也不播音效，避免把过期的跳跃误发出去或空播音效。
 	var space := Input.is_key_pressed(KEY_SPACE)
 	if space and not _jump_held:
@@ -139,13 +153,28 @@ func _process(delta: float) -> void:
 	]
 
 	overlay.visible = not captured
-	if captured:
-		if _matched:
-			fps_client.send_input(_wish_velocity(), _yaw, _jump_queued)
-		_jump_queued = false
-	elif _was_captured and _matched:
-		fps_client.send_input(Vector2.ZERO, _yaw, false)
-	_was_captured = captured
+
+	# 每渲染帧都上报一条命令（输入 + 射击 + 重置合并成一条，帧是最小发送单位），
+	# **包括鼠标未捕获（按了 ESC 暂停）时** —— 未捕获时 _wish_velocity() 返回零向量。
+	# 两个理由：
+	#   1. 服务端合并后的 Cmd 每帧都调 ApplyInput，客户端必须每帧都给出 move；
+	#   2. 服务端按「最近一次上行消息」判定实例空闲（60 s）。暂停时若停止上报，
+	#      玩家虽然仍连着却完全静默 —— 60 s 后服务端会在**在线**状态下把他回收，
+	#      画面停推 → 2.5 s 看门狗强制重连 → 重新匹配开新局 → 再次被回收，形成
+	#      每分钟一局的空转。每帧都发就从根上消除了这个窗口。
+	var move := _wish_velocity()
+	var jump := _jump_queued
+	_jump_queued = false
+	var origin := Vector3.ZERO
+	var dir := Vector3.ZERO
+	var shoot := not _pending_shot.is_empty()
+	if shoot:
+		origin = _pending_shot["origin"]
+		dir = _pending_shot["dir"]
+		_pending_shot = {}
+	var reset := _pending_reset
+	_pending_reset = false
+	fps_client.send_command(move, _yaw, jump, shoot, origin, dir, reset)
 
 func _input(event: InputEvent) -> void:
 	if Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
@@ -217,150 +246,124 @@ func _wish_velocity() -> Vector2:
 		wz = wz / l * speed
 	return Vector2(wx, wz)
 
-# ---- 快照 → 渲染 ----
+# ---- 帧 → 渲染 ----
 
-func _on_state(s: Dictionary) -> void:
-	_store_snapshot(s)
-
-## 推流时序维护：tick 连续则滚动双缓冲；跳号（重置/重连）清空插值缓冲。
+## _on_frame 应用一帧同步消息。full 帧在 WorldStore 内部会先清空再整体覆盖，
+## 所以「首次进入 / 重连 / 乱序」在这里没有区别 —— 应用完做一次场景协调即可。
 ##
-## 服务端在 shoot/reset 后会"立即补推"一帧：它与上一帧同 step，但内容可能已变
-## （例如刚发射的弹丸）。因此同 step 帧按「内容」而非逐字去重：
-##   - 内容未变（tick 广播与补推的重复帧）→ 忽略；
-##   - 内容新增/更新（且未删除当前帧已有的刚体）→ 原地刷新下一帧。保留原
-##     到达时间 t，避免高速刚体在插值中回跳；补推只增删弹丸，刚体位置不变。
-##   - 含删除的同 step 帧视为迟到的旧内容（补推帧只会新增），跳过以防回退。
-func _store_snapshot(s: Dictionary) -> void:
-	if _next_snap.is_empty():
-		_next_snap = _parse_snapshot(s, Time.get_ticks_msec() / 1000.0)
-		_snap_sig = _frame_sig(s)
-		_render_resources(_next_snap["resources"])
-		return
-	var last_step := int(_next_snap["step"])
-	var step := int(s.get("step", 0))
-	if step == last_step:
-		if _frame_sig(s) == _snap_sig or not _frame_keeps_bodies(s, _next_snap):
-			return
-		_next_snap = _parse_snapshot(s, float(_next_snap["t"]))
-		_snap_sig = _frame_sig(s)
-		_update_hud(s)
-		_detect_impacts(_next_snap["bodies"])
-		_render_resources(_next_snap["resources"])
-		return
-	if step == last_step + 1:
-		_prev_snap = _next_snap
-	else:
-		_prev_snap = {}
-	_next_snap = _parse_snapshot(s, Time.get_ticks_msec() / 1000.0)
-	_snap_sig = _frame_sig(s)
-	_update_hud(s)
-	_detect_impacts(_next_snap["bodies"])
-	_render_resources(_next_snap["resources"])
+## 旧的 _snap_sig / _frame_keeps_bodies 去重逻辑整块消失：增量协议下服务端
+## 不会重复推送，也不需要靠快照 diff 推断「谁消失了」。
+func _on_frame(frame: Dictionary) -> void:
+	if bool(frame.get("full", false)):
+		_store.apply_schema(frame.get("schema", {}).get("fields", []))
+	var res: Dictionary = _store.apply_frame(frame)
 
-func _parse_snapshot(s: Dictionary, t: float) -> Dictionary:
-	var bodies := {}
-	for b: Variant in s.get("bodies", []):
-		var bd: Dictionary = b
-		var pos: Array = bd.get("pos", [0.0, 0.0, 0.0])
-		var q: Array = bd.get("quat", [0.0, 0.0, 0.0, 1.0])
-		bodies[int(bd.get("id", 0))] = {
-			"info": bd,
-			"pos": Vector3(float(pos[0]), float(pos[1]), float(pos[2])),
-			"quat": Quaternion(float(q[0]), float(q[1]), float(q[2]), float(q[3])),
+	# 本帧到达即把各刚体的当前变换存进 prev，作为下一次插值的起点。
+	_frame_time = Time.get_ticks_msec() / 1000.0
+	_prev_body_xform = _body_xform.duplicate(true)
+	_refresh_derived()
+
+	_reconcile_scene()
+	for ev: Variant in res.get("destroyed", []):
+		_on_entity_destroyed(ev as Dictionary)
+	_render_resources_from_store()
+	_update_hud()
+
+## _refresh_derived 从 store 刷新刚体变换、玩家位置、远端朝向。必须在插值之前做，
+## 这样 prev/cur 才是相邻两帧。
+func _refresh_derived() -> void:
+	# 每帧从零重建：store 里已经没有的实体必须从 _body_xform 里消失，_reconcile_scene
+	# 才能据此删掉它的节点。不能假设「消失」都走 destroyed —— 实体的最后一个已知属性
+	# 被 removed 而没 destroy 时，它是静默地从 store 里淡出的。
+	var next := {}
+	for id: Variant in _store.entities_with("Body.Kind"):
+		var eid := int(id)
+		# 金币也是普通刚体（Body.Kind / Pos 都在 store 里），这里必须排除：金币由
+		# _res_nodes 单独渲染，不排除就会在金币上再叠一个灰色刚体球。
+		if _store.has_attr(eid, "Resource.Kind"):
+			continue
+		next[eid] = {
+			"pos": _vec3_of(_store.attr(eid, "Pos")),
+			"quat": _quat_of(_store.attr(eid, "Rot")),
 		}
-	var resources := {}
-	for r: Variant in s.get("resources", []):
-		var rd: Dictionary = r
-		var rp: Array = rd.get("pos", [0.0, 0.8, 0.0])
-		resources[int(rd.get("id", 0))] = {
-			"pos": Vector3(float(rp[0]), float(rp[1]), float(rp[2])),
-			"kind": int(rd.get("kind", 0)),
-		}
-	var players: Array = s.get("players", [])
-	var my_feet := Vector3(0, 0.2, 18)
-	var remote_feet := Vector3(0, 0.2, -18)
-	var remote_yaw := 0.0
-	if players.size() > _my_player_idx:
-		var mp: Dictionary = players[_my_player_idx]
-		var mpos: Array = mp.get("pos", [0.0, 0.2, 18.0])
-		my_feet = Vector3(float(mpos[0]), float(mpos[1]), float(mpos[2]))
-	var other_idx := 1 - _my_player_idx
-	if players.size() > other_idx:
-		var rp: Dictionary = players[other_idx]
-		var rpos: Array = rp.get("pos", [0.0, 0.2, -18.0])
-		remote_feet = Vector3(float(rpos[0]), float(rpos[1]), float(rpos[2]))
-		remote_yaw = float(rp.get("yaw", 0.0))
+	_body_xform = next
+	for id: Variant in _store.entities_with("Player.Idx"):
+		var eid := int(id)
+		var feet := _vec3_of(_store.attr(eid, "Pos"))
+		if int(_store.attr(eid, "Player.Idx")) == _my_player_idx:
+			_player_pos = feet
+		else:
+			_prev_remote_pos = _remote_pos
+			_remote_pos = feet
+			_remote_yaw = float(_store.attr(eid, "Facing"))
+
+## _on_entity_destroyed 消失的实体触发对应反馈。销毁事件带着消失前的属性，
+## 所以这里能分辨消失的是弹丸（爆闪 + 命中音）还是金币（拾取音）。
+func _on_entity_destroyed(ev: Dictionary) -> void:
+	var attrs: Dictionary = ev.get("attrs", {})
+	# 此刻实体已从 store 移除（_body_xform 里也没有它），爆闪位置只能取销毁事件带的
+	# 「消失前属性」。从未渲染过的 id（destroy 一个客户端没见过的实体）attrs 为空，
+	# 既没有 Projectile 也没有 Resource.Kind —— 这里自然落成 no-op，不会索引空节点。
+	var p: Vector3 = _vec3_of(attrs.get("Pos"))
+	if attrs.has("Projectile"):
+		_pop(p, Color("ffe066"), 0.06, 0.2)
+		sfx.play("hit")
+	if attrs.has("Resource.Kind"):
+		sfx.play("pickup")
+
+## _vec3_of / _quat_of 把 store 里的 Array 属性转成 Godot 类型。
+func _vec3_of(v: Variant) -> Vector3:
+	var a: Array = v if v is Array else [0.0, 0.0, 0.0]
+	return Vector3(float(a[0]), float(a[1]), float(a[2]))
+
+func _quat_of(v: Variant) -> Quaternion:
+	var a: Array = v if v is Array else [0.0, 0.0, 0.0, 1.0]
+	return Quaternion(float(a[0]), float(a[1]), float(a[2]), float(a[3]))
+
+## _reconcile_scene 把刚体渲染节点与 store 对齐：新 id 建节点、消失的删节点。
+## 场景同步放在「整帧应用之后」做，实体创建的先后顺序问题就自然消失了。
+func _reconcile_scene() -> void:
+	for id: Variant in _body_xform:
+		var eid := int(id)
+		_place_body(eid, _build_body_dict(eid), _body_xform[eid]["pos"], _body_xform[eid]["quat"])
+	for eid: Variant in _entities.keys():
+		if not _body_xform.has(int(eid)):
+			_remove_body(int(eid))
+
+## _build_body_dict 从 store 组装出 body_entity.gd 期望的字典 —— 形状与旧的快照
+## BodyInfo 完全一致，所以 body_entity.gd 的程序化建模代码零改动。
+func _build_body_dict(eid: int) -> Dictionary:
 	return {
-		"step": int(s.get("step", 0)), "t": t,
-		"bodies": bodies, "player": my_feet, "remote": remote_feet,
-		"remote_yaw": remote_yaw, "resources": resources,
+		"id": eid,
+		"type": int(_store.attr(eid, "Body.Kind")),
+		"static": bool(_store.attr(eid, "Body.Static")),
+		"target": _store.has_attr(eid, "Target"),
+		"enemy": _store.has_attr(eid, "Enemy"),
+		"projectile": _store.has_attr(eid, "Projectile"),
+		"pos": _store.attr(eid, "Pos"),
+		"quat": _store.attr(eid, "Rot"),
+		"size": _store.attr(eid, "Body.Size"),
+		"health": float(_store.attr(eid, "Health")) if _store.has_attr(eid, "Health") else 0.0,
+		"active": bool(_store.attr(eid, "Body.Active")),
+		"mat": int(_store.attr(eid, "Body.Mat")),
 	}
 
-## 内容摘要（与 step 无关）：刚体/金币按服务端的 id 升序取位置，附玩家位置。
-## 用于同 step 重复推送的快速比较；位置保留 3 位小数以容忍 JSON 往返浮点噪声。
-func _frame_sig(s: Dictionary) -> String:
-	var parts := PackedStringArray()
-	for b: Variant in s.get("bodies", []):
-		var bd: Dictionary = b
-		var p: Array = bd.get("pos", [0.0, 0.0, 0.0])
-		parts.append("%d@%.3f,%.3f,%.3f" % [int(bd.get("id", 0)), float(p[0]), float(p[1]), float(p[2])])
-	parts.append("|")
-	for r: Variant in s.get("resources", []):
-		var rd: Dictionary = r
-		var rp: Array = rd.get("pos", [0.0, 0.0, 0.0])
-		parts.append("%d@%.3f,%.3f,%.3f" % [int(rd.get("id", 0)), float(rp[0]), float(rp[1]), float(rp[2])])
-	var players: Array = s.get("players", [])
-	for pl: Variant in players:
-		var pd: Dictionary = pl
-		var pp: Array = pd.get("pos", [0.0, 0.0, 0.0])
-		parts.append("P%.3f,%.3f,%.3f" % [float(pp[0]), float(pp[1]), float(pp[2])])
-	return "\n".join(parts)
-
-## 新帧是否未删除当前帧里已有的刚体：同 step 的补推帧只会新增（弹丸）/更新位置
-## （Reset），删除只发生在 step 递增的 tick 广播里；含删除的同 step 帧当作迟到的
-## 旧内容跳过，避免把刚出现的新弹丸"冲掉"。
-func _frame_keeps_bodies(s: Dictionary, snap: Dictionary) -> bool:
-	var next_ids := {}
-	for b: Variant in s.get("bodies", []):
-		next_ids[int((b as Dictionary).get("id", 0))] = true
-	for id in (snap["bodies"] as Dictionary).keys():
-		if not next_ids.has(int(id)):
-			return false
-	return true
-
-## 影子跟随：alpha = 距新快照到达的时间 / TICK，在 prev/next 之间插值。
+## 影子跟随：alpha = 距本帧到达的时间 / TICK，在「上一帧变换 → 本帧变换」之间插值。
 func _render_interpolated() -> void:
-	if _next_snap.is_empty():
+	if _body_xform.is_empty():
 		return
-	if _prev_snap.is_empty():
-		_draw_bodies(_next_snap, _next_snap, 0.0)
-		_player_pos = _next_snap["player"]
-		_remote_pos = _next_snap["remote"]
-		_remote_yaw = _next_snap["remote_yaw"]
-		return
-	var alpha := clampf((Time.get_ticks_msec() / 1000.0 - float(_next_snap["t"])) / TICK, 0.0, 1.0)
-	_draw_bodies(_prev_snap, _next_snap, alpha)
-	_player_pos = (_prev_snap["player"] as Vector3).lerp(_next_snap["player"] as Vector3, alpha)
-	_remote_pos = (_prev_snap["remote"] as Vector3).lerp(_next_snap["remote"] as Vector3, alpha)
-	# yaw 是角度，用最短角插值避免 180° 附近跳变。
-	_remote_yaw = lerp_angle(float(_prev_snap["remote_yaw"]), float(_next_snap["remote_yaw"]), alpha)
-
-func _draw_bodies(from_snap: Dictionary, to_snap: Dictionary, alpha: float) -> void:
-	var from_bodies: Dictionary = from_snap["bodies"]
-	var to_bodies: Dictionary = to_snap["bodies"]
-	var seen := {}
-	for id in to_bodies.keys():
-		seen[id] = true
-		var bd: Dictionary = to_bodies[id]["info"]
-		if from_bodies.has(id):
-			_place_body(id, bd,
-				(from_bodies[id]["pos"] as Vector3).lerp(to_bodies[id]["pos"] as Vector3, alpha),
-				(from_bodies[id]["quat"] as Quaternion).slerp(to_bodies[id]["quat"] as Quaternion, alpha))
-		else:
-			_place_body(id, bd, to_bodies[id]["pos"], to_bodies[id]["quat"])
-	for id in from_bodies.keys():
-		if not seen.has(id):
-			_remove_body(id)
+	var alpha := clampf((Time.get_ticks_msec() / 1000.0 - _frame_time) / TICK, 0.0, 1.0)
+	for id: Variant in _body_xform:
+		var eid := int(id)
+		var node: Node3D = _entities.get(eid)
+		if node == null:
+			continue
+		var cur: Dictionary = _body_xform[eid]
+		var prev: Dictionary = _prev_body_xform.get(eid, cur)
+		node.global_position = (prev["pos"] as Vector3).lerp(cur["pos"] as Vector3, alpha)
+		node.quaternion = (prev["quat"] as Quaternion).slerp(cur["quat"] as Quaternion, alpha)
+	_player_pos = _player_pos  # 本地玩家位置由 _refresh_derived 直接给出（服务端权威）
+	_remote_pos = _prev_remote_pos.lerp(_remote_pos, alpha)
 
 func _place_body(id: int, b: Dictionary, pos: Vector3, quat: Quaternion) -> void:
 	if not _entities.has(id):
@@ -390,7 +393,14 @@ func _render_resources(resources: Dictionary) -> void:
 			var e = _res_nodes[id]
 			e.node.queue_free()
 			_res_nodes.erase(id)
-			sfx.play("pickup")
+
+## _render_resources_from_store 把 store 里的金币摊平成 _render_resources 期望的形状。
+func _render_resources_from_store() -> void:
+	var out := {}
+	for id: Variant in _store.entities_with("Resource.Kind"):
+		var eid := int(id)
+		out[eid] = {"pos": _vec3_of(_store.attr(eid, "Pos")), "kind": int(_store.attr(eid, "Resource.Kind"))}
+	_render_resources(out)
 
 func _spawn_coin(base: Vector3) -> Dictionary:
 	var root := Node3D.new()
@@ -443,22 +453,23 @@ func _anim_resources(delta: float) -> void:
 		e.node.rotation.y += delta * 2.2
 		e.node.position.y = e.base.y + sin(now * 2.6 + float(id)) * 0.06
 
-func _update_hud(s: Dictionary) -> void:
-	_hud_score = int(s.get("score", 0))
-	_hud_wave = int(s.get("wave", 1))
-	_hud_gold = int(s.get("gold", 0))
-	_hud_targets = 0
-	_hud_enemies = 0
-	for b: Variant in s.get("bodies", []):
-		var bd: Dictionary = b
-		if bd.get("target", false):
-			_hud_targets += 1
-		if bd.get("enemy", false):
-			_hud_enemies += 1
-	var players: Array = s.get("players", [])
+## _update_hud 从 store 读全局状态与本地玩家。全局状态是挂在单例实体上的
+## GameState 组件（属性名 Game.Score / Game.Wave / Game.Gold）。
+func _update_hud() -> void:
+	for id: Variant in _store.entities_with("Game.Score"):
+		var gid := int(id)
+		_hud_score = int(_store.attr(gid, "Game.Score"))
+		_hud_wave = int(_store.attr(gid, "Game.Wave"))
+		_hud_gold = int(_store.attr(gid, "Game.Gold"))
+		break
+	_hud_targets = _store.entities_with("Target").size()
+	_hud_enemies = _store.entities_with("Enemy").size()
+
 	var hp := 100.0
-	if players.size() > _my_player_idx:
-		hp = float((players[_my_player_idx] as Dictionary).get("health", 100.0))
+	for id: Variant in _store.entities_with("Player.Idx"):
+		var eid := int(id)
+		if int(_store.attr(eid, "Player.Idx")) == _my_player_idx:
+			hp = float(_store.attr(eid, "Health"))
 	health_bar.value = hp
 	if hp < _last_health - 0.001:
 		sfx.play("damage")
@@ -473,19 +484,6 @@ func _flash_hit() -> void:
 	var tw := _hit_flash.create_tween()
 	tw.tween_property(_hit_flash, "color:a", 0.28, 0.03)
 	tw.tween_property(_hit_flash, "color:a", 0.0, 0.35)
-
-## 弹丸从最新快照里消失即视为命中：在原位置播放爆闪效果。
-func _detect_impacts(to_bodies: Dictionary) -> void:
-	var current := {}
-	for id in to_bodies.keys():
-		var bd: Dictionary = to_bodies[id]["info"]
-		if bd.get("projectile", false):
-			current[id] = to_bodies[id]["pos"]
-	for id in _prev_projectiles:
-		if not current.has(id):
-			_pop(_prev_projectiles[id], Color("ffe066"), 0.06, 0.2)
-			sfx.play("hit")
-	_prev_projectiles = current
 
 func _shoot() -> void:
 	# 弹道从枪口/角色胸口出发，收敛到准星 60 m 处的目标点：
@@ -507,13 +505,14 @@ func _shoot() -> void:
 		var tw := create_tween()
 		tw.tween_property(_viewmodel, "position", _vm_base_pos, 0.08)
 		create_tween().tween_property(_muzzle_flash, "visible", false, 0.0).set_delay(0.05)
-	fps_client.send_shoot(origin, dir)
+	# 射击与移动/跳跃合并进本渲染帧的一条 game.cmd：这里只记下待上报的弹道。
+	_pending_shot = {"origin": origin, "dir": dir}
 
 func _on_reset_pressed() -> void:
 	_last_score = 0
 	_last_health = 100.0
-	_prev_projectiles = {}
-	fps_client.send_reset()
+	# reset 是一个边沿：下一渲染帧与输入合并成一条命令上报一次。
+	_pending_reset = true
 
 func _pop(point: Vector3, color: Color, size: float, ttl: float) -> void:
 	var m := SphereMesh.new()
