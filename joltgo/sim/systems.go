@@ -26,6 +26,9 @@ func (s *Simulation) inputSystem() {
 		if !ok {
 			continue
 		}
+		// 朝向与积分速度无关，只影响下发：从 Input 拆出来单独写一份，
+		// 好让同步层只下发 Facing 而不回灌客户端上行的 Input。
+		ecs.Add(s.world, s.players[i], Facing{Yaw: in.Yaw})
 		jump := in.Jump
 		if jump {
 			in.Jump = false // 跳跃边沿：只消费一次
@@ -101,6 +104,7 @@ func (s *Simulation) projectileSystem() {
 		case ecs.Has[Target](s.world, other):
 			s.destroyBody(other)
 			s.score++
+			s.syncGameState()
 		case ecs.Has[Enemy](s.world, other):
 			hp, ok := ecs.Get[Health](s.world, other)
 			if !ok {
@@ -113,6 +117,7 @@ func (s *Simulation) projectileSystem() {
 				}
 				s.destroyBody(other)
 				s.score++
+				s.syncGameState()
 			}
 		}
 	}
@@ -173,6 +178,7 @@ func (s *Simulation) resourceSystem(contacts [MaxPlayers][]uint32) {
 				continue
 			}
 			s.gold++
+			s.syncGameState()
 			s.destroyBody(e) // 移除传感器刚体并销毁实体
 		}
 	}
@@ -194,6 +200,7 @@ func (s *Simulation) waveSystem() {
 		return
 	}
 	s.wave++
+	s.syncGameState()
 	n := initialEnemies + (s.wave - 1)
 	if n > maxEnemiesPerWave {
 		n = maxEnemiesPerWave

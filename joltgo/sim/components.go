@@ -10,9 +10,26 @@ package sim
 
 // ---- 组件 ----
 
-// Player 标记玩家实体（每局两个，按 char 槽位 0/1 区分）。玩家是 Jolt 角色
-// 控制器，不是刚体，没有 Body。
-type Player struct{}
+// Player 标记玩家实体，Idx 是玩家槽位（0/1）。客户端据此认出「哪个实体是我」。
+// 玩家是 Jolt 角色控制器，不是刚体，没有 Body。
+type Player struct {
+	Idx int
+}
+
+// Facing 是玩家当前朝向（弧度，绕 Y 轴）。它从 Input 里拆出来单独同步：
+// Input 是客户端上行数据，不该回灌给客户端；朝向才是需要下发的。
+type Facing struct {
+	Yaw float32
+}
+
+// GameState 是对局的全局状态（计分/波次/金币），挂在一个单例实体上。
+// 做成组件是为了让框架里不存在「顶层字段」这个概念 —— 以后加全局状态
+// 也自动走同一套同步机制。
+type GameState struct {
+	Score int32
+	Wave  int32
+	Gold  int32
+}
 
 // Input 是玩家实体的最新输入：move 为世界空间水平期望速度（m/s），
 // Yaw 是水平朝向（弧度，绕 Y 轴），Jump 是边沿触发，消费后清零。

@@ -124,6 +124,7 @@ type Simulation struct {
 	physics Physics
 	world   *ecs.World
 	players [MaxPlayers]ecs.Entity
+	game    ecs.Entity // 全局状态单例实体（GameState），在 init 里创建
 	// bodyQuery 是快照刚体循环的缓存查询（有 Body/Position/Rotation 且无
 	// Resource）：排除过滤在 archetype 粒度完成、传感器球整表跳过，三列
 	// 行内直取（registerBody 保证每个 Body 实体都有 Position/Rotation）。
@@ -141,6 +142,7 @@ func New(p Physics) *Simulation {
 	return &Simulation{
 		physics:   p,
 		world:     ecs.New(),
+		game:      ecs.InvalidEntity,
 		bodyQuery: ecs.Without[Resource](ecs.NewQuery3[Body, Position, Rotation]()),
 	}
 }
@@ -198,6 +200,9 @@ func (s *Simulation) Snapshot() State {
 	return s.snapshot()
 }
 
+// GameEntity 返回全局状态单例实体的 id。
+func (s *Simulation) GameEntity() ecs.Entity { return s.game }
+
 // ---- 内部方法（单线程，调用方保证串行） ----
 
 func (s *Simulation) init() {
@@ -213,8 +218,9 @@ func (s *Simulation) init() {
 
 		// 玩家实体：纯逻辑（角色控制器不是刚体），初始站在出生点、面朝船中。
 		s.players[i] = s.world.NewEntity()
-		ecs.Add4(s.world, s.players[i], Player{}, Health(100), Position{x, playerSpawnY, z},
-			Input{Yaw: playerSpawnYaw(i)})
+		ecs.Add4(s.world, s.players[i], Player{Idx: i}, Health(100),
+			Position{x, playerSpawnY, z}, Input{Yaw: playerSpawnYaw(i)})
+		ecs.Add(s.world, s.players[i], Facing{Yaw: playerSpawnYaw(i)})
 	}
 
 	// 场景几何全部来自 map.go 的部件表（甲板/船体/集装箱/走道/舷梯/桅杆）。
@@ -239,6 +245,11 @@ func (s *Simulation) init() {
 		e := s.registerBody(id, BodySphere, [3]float32{0.4}, true, t, MatDefault)
 		ecs.Add(s.world, e, Target{})
 	}
+
+	// 全局状态单例实体：计分/波次/金币不是实体属性，但走同一套「实体 + 属性」
+	// 机制可以让框架里不存在特例。
+	s.game = s.world.NewEntity()
+	ecs.Add(s.world, s.game, GameState{})
 
 	// PVE 初始波次 + 金币资源。
 	s.wave = 1
@@ -265,11 +276,22 @@ func (s *Simulation) reset() {
 	for i := range s.players {
 		s.players[i] = ecs.InvalidEntity
 	}
+	s.game = ecs.InvalidEntity
 	s.step = 0
 	s.score = 0
 	s.gold = 0
 	s.waveClearStep = 0
 	s.init() // init 里统一重置 wave = 1 并搭建场景
+}
+
+// syncGameState 把 Simulation 的全局计数写进单例实体的 GameState 组件。
+// 全局状态是 Go 侧的普通字段，组件只是它的同步载体。
+func (s *Simulation) syncGameState() {
+	ecs.Add(s.world, s.game, GameState{
+		Score: int32(s.score),
+		Wave:  int32(s.wave),
+		Gold:  int32(s.gold),
+	})
 }
 
 func (s *Simulation) stepOne() {
