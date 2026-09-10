@@ -3389,6 +3389,7 @@ func _init() -> void:
 	_test_schema()
 	_test_full_frame_with_schema()
 	_test_delta_frame()
+	_test_command_encoding()
 	if _failures > 0:
 		printerr("frame_decode_test: %d 项失败" % _failures)
 		quit(1)
@@ -3498,6 +3499,40 @@ func _test_delta_frame() -> void:
 	_check(bool(d["full"]) == false, "默认应是增量帧")
 	_check(bool(d["entities"][0]["destroy"]) == true, "实体 5 应是 destroy")
 	_check((d["entities"][1]["removed"] as Array) == [4, 5], "实体 6 的 removed 应为 [4,5]")
+
+# 上行字段号必须与 CommandMsg 一致。`reset` 是最容易写错的一个：它在服务端生成码里
+# 叫 Reset_（与生成方法重名），但线上字段号仍是 7。
+func _test_command_encoding() -> void:
+	var buf: PackedByteArray = _c._encode_command(
+		Vector2(1.0, 2.0), 0.5, true, true, Vector3(3, 4, 5), Vector3(0, 0, 1), true)
+
+	var seen := {}
+	var i := 0
+	while i < buf.size():
+		var t: Array = _c._read_varint(buf, i)
+		i = int(t[1])
+		var field: int = int(t[0]) >> 3
+		var wire: int = int(t[0]) & 0x07
+		seen[field] = wire
+		match wire:
+			_c.WIRE_VARINT:
+				var r: Array = _c._read_varint(buf, i)
+				i = int(r[1])
+			_c.WIRE_FIXED32:
+				i += 4
+			_c.WIRE_LEN:
+				var rl: Array = _c._read_varint(buf, i)
+				i = int(rl[1]) + int(rl[0])
+			_:
+				break
+
+	_check(seen.get(1, -1) == _c.WIRE_LEN, "move 应是字段 1（packed float）")
+	_check(seen.get(2, -1) == _c.WIRE_FIXED32, "yaw 应是字段 2（fixed32）")
+	_check(seen.get(3, -1) == _c.WIRE_VARINT, "jump 应是字段 3")
+	_check(seen.get(4, -1) == _c.WIRE_VARINT, "shoot 应是字段 4")
+	_check(seen.get(5, -1) == _c.WIRE_LEN, "origin 应是字段 5")
+	_check(seen.get(6, -1) == _c.WIRE_LEN, "dir 应是字段 6")
+	_check(seen.get(7, -1) == _c.WIRE_VARINT, "reset 应是字段 7")
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -3591,8 +3626,16 @@ func _tag_len(field: int, payload: PackedByteArray) -> PackedByteArray:
 
 ```gdscript
 ## CommandMsg：把一帧的上行命令合并成一条消息发送（帧是最小发送单位）。
+## 编码拆成 _encode_command 是为了能脱离 WebSocket 单测字段号 —— `reset` 在服务端
+## 生成码里叫 Reset_（与生成方法重名），线上字段号仍是 7，是最容易写错的一处。
 func send_command(move: Vector2, yaw: float, jump: bool, shoot: bool,
 		origin: Vector3, dir: Vector3, reset: bool) -> void:
+	_send_notify("game.game.cmd", _encode_command(move, yaw, jump, shoot, origin, dir, reset))
+
+## _encode_command 生成 CommandMsg 的 protobuf 载荷。
+## 字段号取自 game/protos/game.proto：move=1 yaw=2 jump=3 shoot=4 origin=5 dir=6 reset=7。
+func _encode_command(move: Vector2, yaw: float, jump: bool, shoot: bool,
+		origin: Vector3, dir: Vector3, reset: bool) -> PackedByteArray:
 	var msg := _packed_floats(1, [move.x, move.y])
 	msg.append_array(_field_fixed32(2, yaw))
 	if jump:
@@ -3603,12 +3646,24 @@ func send_command(move: Vector2, yaw: float, jump: bool, shoot: bool,
 		msg.append_array(_packed_floats(6, [dir.x, dir.y, dir.z]))
 	if reset:
 		msg.append_array(_field_varint(7, 1))
-	_send_notify("game.game.cmd", msg)
+	return msg
 
 ## 请求服务端下一帧下发全量（full 帧自带 schema）。收到 full 之前忽略一切增量。
 func send_resync() -> void:
 	_send_notify("game.game.resync", PackedByteArray())
 ```
+
+> **item 6 还必须接上 `_on_handshake`**：原来那里直接发的是空 payload 的
+> `match.match.join`，改成走 `send_match_join()`：
+>
+> ```gdscript
+> 	# 进匹配队列：match 服务配对后推 onMatched。必须带上 token —— 服务端把它当
+> 	# 会话 UID，重连时才能找回原来的对局实例。
+> 	send_match_join()
+> ```
+>
+> 不接的话 token 永远发不出去，整条「重连回同一局」的链路都不成立。
+
 
 7. 删除 `_decode_snapshot` / `_decode_body` / `_decode_resource` / `_decode_player`，替换为：
 
