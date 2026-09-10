@@ -8,6 +8,7 @@ package game
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"sync"
 
@@ -53,7 +54,11 @@ func (c *Component) Create(ctx context.Context, msg *protos.CreateGameMsg) (*pro
 	if len(msg.Uids) > sim.MaxPlayers {
 		log.Printf("game: create %s rejected: %d players exceeds max %d",
 			msg.MatchId, len(msg.Uids), sim.MaxPlayers)
-		return &protos.CreateGameReply{Code: 1}, nil
+		// 返回 error 而非仅 Code=1：match 只看 RPC 是否报错，nil error 会让它以为
+		// 创建成功、照推 onMatched，而 lookup 永远查不到实例，game.cmd 静默空转。
+		return &protos.CreateGameReply{Code: 1}, fmt.Errorf(
+			"game: create %s rejected: %d players exceeds max %d",
+			msg.MatchId, len(msg.Uids), sim.MaxPlayers)
 	}
 
 	inst := NewInstance(c.app, msg.MatchId, msg.Uids)
@@ -69,6 +74,24 @@ func (c *Component) Create(ctx context.Context, msg *protos.CreateGameMsg) (*pro
 
 	log.Printf("game: created instance %s with %d players", msg.MatchId, len(msg.Uids))
 	return &protos.CreateGameReply{Code: 0}, nil
+}
+
+// Rejoin 是远端 RPC handler（route "game.rejoin"）：报告本节点是否托管着该
+// token 的存量实例，以及原本的玩家槽位。match 服务用它在重连时找回对局。
+func (c *Component) Rejoin(ctx context.Context, msg *protos.RejoinMsg) (*protos.RejoinReply, error) {
+	c.mu.Lock()
+	inst := c.uidToInst[msg.Token]
+	idx := c.uidToIndex[msg.Token]
+	c.mu.Unlock()
+
+	if inst == nil {
+		return &protos.RejoinReply{Found: false}, nil
+	}
+	return &protos.RejoinReply{
+		Found:     true,
+		MatchId:   inst.MatchID(),
+		PlayerIdx: int32(idx),
+	}, nil
 }
 
 // Cmd 是远端 RPC handler（route "game.cmd"）：一帧上行命令。

@@ -20,8 +20,28 @@ const (
 	gameServerType  = "game"             // game 服务类型（AddRoute 与服务发现用）
 	matchedRoute    = "onMatched"        // match → 客户端 push 的 route
 	gameCreateRoute = "game.game.create" // game 服务的创建对局 RPC route（三段式 server.service.method）
+	gameRejoinRoute = "game.game.rejoin" // 回局查询 RPC route（三段式）
 	timeout         = 10 * time.Second   // 单人兜底开局的等待超时
 )
+
+// RejoinResult 是一次回局查询的结果。GameServerID 是托管该实例的 game 节点。
+type RejoinResult struct {
+	Found        bool
+	MatchID      string
+	PlayerIdx    int
+	GameServerID string
+}
+
+// firstFound 从各 game 节点的应答里挑出第一个命中的。nodes 是节点 id。
+// 抽成纯函数是为了能脱离 pitaya 直接单测。
+func firstFound(replies map[string]*RejoinResult) (*RejoinResult, bool) {
+	for _, r := range replies {
+		if r.Found {
+			return r, true
+		}
+	}
+	return nil, false
+}
 
 // queuedPlayer 是匹配队列里的一个等待者。
 type queuedPlayer struct {
@@ -45,12 +65,22 @@ func New(app pitaya.Pitaya) *Component {
 }
 
 // Join 是远端 RPC handler（route "match.join"）：绑定会话 UID 并加入匹配队列。
-func (c *Component) Join(ctx context.Context, _ *protos.JoinMsg) {
+// uid 用客户端持久化的 token 而不是每次新建的 nuid —— 重连时同一个 token 会
+// 让 pitaya 前端把旧会话顶掉（session.go:460-464），从而让对局实例的 uids
+// 数组依然指向正确的连接。
+func (c *Component) Join(ctx context.Context, msg *protos.JoinMsg) {
 	s := c.app.GetSessionFromCtx(ctx)
-	uid := nuid.New().Next()
+	uid := msg.Token
+	if uid == "" {
+		uid = nuid.New().Next() // 未带 token 的旧客户端：退化成一次性身份
+	}
 	if err := s.Bind(ctx, uid); err != nil {
 		log.Printf("match: bind session failed: %v", err)
 		return
+	}
+
+	if c.tryRejoin(ctx, s, uid) {
+		return // 已回到存量对局，不入匹配队列
 	}
 
 	c.mu.Lock()
@@ -58,6 +88,53 @@ func (c *Component) Join(ctx context.Context, _ *protos.JoinMsg) {
 	c.mu.Unlock()
 
 	c.tryMatch()
+}
+
+// tryRejoin 询问所有 game 节点是否托管着该 token 的存量实例。命中则把它当作
+// 一次「匹配成功」收尾（写会话数据 + 推 onMatched），返回 true。
+func (c *Component) tryRejoin(ctx context.Context, s session.Session, token string) bool {
+	servers, err := c.app.GetServersByType(gameServerType)
+	if err != nil || len(servers) == 0 {
+		return false
+	}
+	replies := map[string]*RejoinResult{}
+	for id, srv := range servers {
+		reply := &protos.RejoinReply{}
+		if err := c.app.RPCTo(ctx, srv.ID, gameRejoinRoute, reply, &protos.RejoinMsg{Token: token}); err != nil {
+			continue // 该节点不可达，跳过
+		}
+		replies[id] = &RejoinResult{
+			Found:        reply.Found,
+			MatchID:      reply.MatchId,
+			PlayerIdx:    int(reply.PlayerIdx),
+			GameServerID: srv.ID,
+		}
+	}
+	hit, ok := firstFound(replies)
+	if !ok {
+		return false
+	}
+	log.Printf("match: token %s rejoined match %s on game %s as slot %d",
+		token, hit.MatchID, hit.GameServerID, hit.PlayerIdx)
+	c.bindPlayer(s, token, hit.MatchID, hit.PlayerIdx, hit.GameServerID)
+	return true
+}
+
+// bindPlayer 把对局归属写进会话数据（gate 据此路由 game.*），并推送匹配结果。
+// 初次匹配与重连回局共用这条收尾路径。
+func (c *Component) bindPlayer(s session.Session, uid, matchID string, playerIdx int, gameServerID string) {
+	if err := s.Set("gameServerId", gameServerID); err == nil {
+		if err := s.PushToFront(context.Background()); err != nil {
+			log.Printf("match: push session data failed: %v", err)
+		}
+	}
+	if _, err := c.app.SendPushToUsers(matchedRoute, &protos.MatchResult{
+		MatchId:      matchID,
+		GameServerId: gameServerID,
+		PlayerIdx:    int32(playerIdx),
+	}, []string{uid}, "gate"); err != nil {
+		log.Printf("match: push onMatched to %s failed: %v", uid, err)
+	}
 }
 
 // AfterInit 启动兜底定时器：长时间等不到第二人的玩家单人开局。
@@ -129,21 +206,8 @@ func (c *Component) startMatch(players []queuedPlayer) {
 		return
 	}
 
-	// 通知每个玩家：把 game 节点 id 写进会话数据（gate 据此路由 game.* 消息），
-	// 并推送匹配结果（含玩家槽位）。
 	for i, p := range players {
-		if err := p.session.Set("gameServerId", target.ID); err == nil {
-			if err := p.session.PushToFront(context.Background()); err != nil {
-				log.Printf("match: push session data failed: %v", err)
-			}
-		}
-		if _, err := c.app.SendPushToUsers(matchedRoute, &protos.MatchResult{
-			MatchId:      matchID,
-			GameServerId: target.ID,
-			PlayerIdx:    int32(i),
-		}, []string{p.uid}, "gate"); err != nil {
-			log.Printf("match: push onMatched to %s failed: %v", p.uid, err)
-		}
+		c.bindPlayer(p.session, p.uid, matchID, i, target.ID)
 	}
 	log.Printf("match: started match %s on game %s with %d players", matchID, target.ID, len(players))
 }
