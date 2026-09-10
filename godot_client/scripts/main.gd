@@ -48,8 +48,16 @@ var _store: WorldStore = WorldStore.new()
 # 渲染层自己的插值状态：id -> {"pos","quat"}（上一帧的变换），以及本帧到达时间。
 var _body_xform := {}      # id -> {"pos": Vector3, "quat": Quaternion}：服务端刚体的当前变换
 var _prev_body_xform := {} # id -> {"pos": Vector3, "quat": Quaternion}：插值起点
+# 玩家位置 / 远端朝向的插值状态：_prev_* 是上一帧的显示值（插值起点），_*_target 是服务端
+# 刚下发的权威值；_player_pos / _remote_pos / _remote_yaw 是插值后的显示值（相机与 avatar
+# 读它）。target 必须与显示值分开存：_render_interpolated 一帧内会被调两次（_process
+# 一次、_on_frame 收尾一次），若把插值结果写回 target，第二次调用会拿结果再插一次。
 var _prev_player_pos := Vector3(0, 0.2, 18)
+var _player_pos_target := Vector3(0, 0.2, 18)
 var _prev_remote_pos := Vector3(0, 0.2, -18)
+var _remote_pos_target := Vector3(0, 0.2, -18)
+var _prev_remote_yaw := 0.0
+var _remote_yaw_target := 0.0
 var _frame_time := 0.0     # 本帧到达时间（秒），插值 alpha 的基准
 
 # 实体缓存：id -> BodyEntity；金币：id -> {node, base}
@@ -155,14 +163,17 @@ func _process(delta: float) -> void:
 	overlay.visible = not captured
 
 	# 每渲染帧都上报一条命令（输入 + 射击 + 重置合并成一条，帧是最小发送单位），
-	# **包括鼠标未捕获（按了 ESC 暂停）时** —— 未捕获时 _wish_velocity() 返回零向量。
-	# 两个理由：
+	# **包括鼠标未捕获（按了 ESC 暂停）时**。两个理由：
 	#   1. 服务端合并后的 Cmd 每帧都调 ApplyInput，客户端必须每帧都给出 move；
 	#   2. 服务端按「最近一次上行消息」判定实例空闲（60 s）。暂停时若停止上报，
 	#      玩家虽然仍连着却完全静默 —— 60 s 后服务端会在**在线**状态下把他回收，
 	#      画面停推 → 2.5 s 看门狗强制重连 → 重新匹配开新局 → 再次被回收，形成
 	#      每分钟一局的空转。每帧都发就从根上消除了这个窗口。
-	var move := _wish_velocity()
+	# 但「每帧都发」不等于「暂停时还在推着人跑」：_wish_velocity() 只看 Input 按键，
+	# 根本不看 captured，照 raw 调用会让 WASD 在鼠标释放后照样驱动角色（85% 不透明的
+	# 暂停面板下面，服务端在实时执行输入）。旧行为是释放鼠标时补发一条静止输入，
+	# 这里等价地发零向量 —— 是「发零」，不是「不发」。
+	var move := _wish_velocity() if captured else Vector2.ZERO
 	var jump := _jump_queued
 	_jump_queued = false
 	var origin := Vector3.ZERO
@@ -268,6 +279,11 @@ func _on_frame(frame: Dictionary) -> void:
 		_on_entity_destroyed(ev as Dictionary)
 	_render_resources_from_store()
 	_update_hud()
+	# 收尾再插值一次。Godot 先跑父节点 _process（里面已有一次 _render_interpolated）
+	# 再跑子节点 FpsClient._process，而后者同步 emit frame_received → 这里；上面
+	# _reconcile_scene 刚把**原始**变换写进节点，若不在此收尾，本渲染帧画的就是未插值
+	# 的跳变，下一帧才被拉回去 —— 每来一帧抖一次。让一帧里对节点的最后一次写是插值结果。
+	_render_interpolated()
 
 ## _refresh_derived 从 store 刷新刚体变换、玩家位置、远端朝向。必须在插值之前做，
 ## 这样 prev/cur 才是相邻两帧。
@@ -291,11 +307,15 @@ func _refresh_derived() -> void:
 		var eid := int(id)
 		var feet := _vec3_of(_store.attr(eid, "Pos"))
 		if int(_store.attr(eid, "Player.Idx")) == _my_player_idx:
-			_player_pos = feet
+			# 本地玩家：像刚体一样保留上一帧的显示值作为插值起点，否则第一人称相机
+			# 与第三人称 avatar 会按 20 Hz 跳步（走 0.4 m/步、跑 0.7 m/步）。
+			_prev_player_pos = _player_pos
+			_player_pos_target = feet
 		else:
 			_prev_remote_pos = _remote_pos
-			_remote_pos = feet
-			_remote_yaw = float(_store.attr(eid, "Facing"))
+			_remote_pos_target = feet
+			_prev_remote_yaw = _remote_yaw
+			_remote_yaw_target = float(_store.attr(eid, "Facing"))
 
 ## _on_entity_destroyed 消失的实体触发对应反馈。销毁事件带着消失前的属性，
 ## 所以这里能分辨消失的是弹丸（爆闪 + 命中音）还是金币（拾取音）。
@@ -362,8 +382,11 @@ func _render_interpolated() -> void:
 		var prev: Dictionary = _prev_body_xform.get(eid, cur)
 		node.global_position = (prev["pos"] as Vector3).lerp(cur["pos"] as Vector3, alpha)
 		node.quaternion = (prev["quat"] as Quaternion).slerp(cur["quat"] as Quaternion, alpha)
-	_player_pos = _player_pos  # 本地玩家位置由 _refresh_derived 直接给出（服务端权威）
-	_remote_pos = _prev_remote_pos.lerp(_remote_pos, alpha)
+	# 本地玩家位置与远端位置/朝向同样在 prev→target 之间插值：直接赋 raw 值会让
+	# 第一人称相机与 avatar 按 20 Hz 跳步。yaw 是角度，用最短角插值避免 180° 附近跳变。
+	_player_pos = _prev_player_pos.lerp(_player_pos_target, alpha)
+	_remote_pos = _prev_remote_pos.lerp(_remote_pos_target, alpha)
+	_remote_yaw = lerp_angle(_prev_remote_yaw, _remote_yaw_target, alpha)
 
 func _place_body(id: int, b: Dictionary, pos: Vector3, quat: Quaternion) -> void:
 	if not _entities.has(id):
