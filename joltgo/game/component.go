@@ -156,7 +156,12 @@ func (c *Component) lookup(ctx context.Context) (*Instance, int, bool) {
 func (c *Component) forget(inst *Instance, matchID string, uids []string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	delete(c.instances, matchID) // matchId 由 nuid 生成，不会重复，无需守卫
+	// matchId 由 nuid 生成、不会重复；但仍守卫一下 —— 成本极低，且能挡住未来
+	// 「Create 被重试」这类改动：那时无脑删会把仍在运行的实例从注册表里注销掉，
+	// Shutdown 就再也停不到它，goroutine 与它的 Jolt 世界都会泄漏。
+	if c.instances[matchID] == inst {
+		delete(c.instances, matchID)
+	}
 	for _, uid := range uids {
 		if c.uidToInst[uid] != inst {
 			continue // 该 uid 已经归新对局所有

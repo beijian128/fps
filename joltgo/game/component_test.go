@@ -15,6 +15,9 @@ func TestForgetKeepsUIDsOwnedByAnotherInstance(t *testing.T) {
 	if c.uidToInst["u"] != fresh {
 		t.Fatal("旧实例回收不应抹掉新对局的 uid 映射")
 	}
+	if c.uidToIndex["u"] != 1 {
+		t.Fatal("旧实例回收不应抹掉新对局的槽位映射（否则会把错误的玩家当成调用者）")
+	}
 	if _, ok := c.instances["m1"]; ok {
 		t.Fatal("旧实例应从 instances 里摘掉")
 	}
