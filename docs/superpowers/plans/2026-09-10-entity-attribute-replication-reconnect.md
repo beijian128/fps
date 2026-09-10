@@ -2857,7 +2857,11 @@ func (i *Instance) Stop() {
 				}
 				// 关掉 stop：退出后没有 goroutine 再消费 cmds，正在并发的
 				// RPC handler 若还持有实例指针，enqueue 会卡在写满的 channel 上。
-				i.Stop()
+				// 用 defer 而不是直接调用，是为了 onExit 万一 panic 也一定会关。
+				defer i.Stop()
+				if i.onExit != nil {
+					i.onExit()
+				}
 				return
 			}
 ```
@@ -2942,7 +2946,12 @@ func (i *Instance) RequestFull(slot int) {
 func (c *Component) forget(inst *Instance, matchID string, uids []string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	delete(c.instances, matchID) // matchId 由 nuid 生成，不会重复，无需守卫
+	// matchId 由 nuid 生成、不会重复；但仍守卫一下 —— 成本极低，且能挡住未来
+	// 「Create 被重试」这类改动：那时无脑删会把仍在运行的实例从注册表里注销掉，
+	// Shutdown 就再也停不到它，goroutine 与它的 Jolt 世界都会泄漏。
+	if c.instances[matchID] == inst {
+		delete(c.instances, matchID)
+	}
 	for _, uid := range uids {
 		if c.uidToInst[uid] != inst {
 			continue // 该 uid 已经归新对局所有
@@ -2976,6 +2985,9 @@ func TestForgetKeepsUIDsOwnedByAnotherInstance(t *testing.T) {
 
 	if c.uidToInst["u"] != fresh {
 		t.Fatal("旧实例回收不应抹掉新对局的 uid 映射")
+	}
+	if c.uidToIndex["u"] != 1 {
+		t.Fatal("旧实例回收不应抹掉新对局的槽位映射（否则会把错误的玩家当成调用者）")
 	}
 	if _, ok := c.instances["m1"]; ok {
 		t.Fatal("旧实例应从 instances 里摘掉")
@@ -4041,6 +4053,19 @@ func _update_hud() -> void:
 		_pending_shot = {}
 	fps_client.send_command(move, _yaw, jump, shoot, origin, dir, false)
 ```
+
+> **必须每渲染帧都发，包括鼠标未捕获（按了 ESC 暂停）时** —— 把原来 `if _was_captured:`
+> 的包裹去掉，暂停时 `_wish_velocity()` 自然返回零向量。两个理由：
+>
+> 1. Task 7 合并后的 `Cmd` **每帧都会调 `ApplyInput`**，客户端必须每帧都给出 `move`，
+>    否则移动语义与旧协议不一致。
+> 2. 服务端的实例空闲回收（Task 10）以「最近一次收到上行消息」判定在线。旧客户端只在
+>    鼠标捕获时上报，按 ESC 后虽然**仍连着**却完全静默 —— 60 秒后服务端会把他在**在线
+>    状态**下回收，快照停推 → 客户端 2.5 秒看门狗强制重连 → 重新匹配开新局 → 再次被
+>    回收，形成每分钟一局的空转。每帧都发就从根上消除了这个窗口。
+>
+> 代价是暂停时也有 60 条/秒的小消息；服务端本来就会把同一 tick 内的输入合并成最新一条，
+> 可以接受。
 
 > `_process` 里原来单独调用 `fps_client.send_input(...)` 与 `send_shoot(...)` 的地方都删掉。`reset` 按钮（`_on_reset_pressed`）同样改成在 `_process` 里以 `reset` 边沿上报一次。
 
