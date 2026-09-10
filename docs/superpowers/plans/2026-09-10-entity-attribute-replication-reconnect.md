@@ -1234,6 +1234,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 - Create: `joltgo/sim/replicate_test.go`
 - Modify: `joltgo/sim/simulation.go`
 - Modify: `joltgo/sim/systems.go`
+- Modify: `joltgo/sim/sim_test.go`（新增 `setBodyActive` 测试钩子，见 Step 1 的测试辅助说明）
 
 **Interfaces:**
 - Consumes: `replication.Store`（Task 1–3）、`Simulation.game`（Task 4）
@@ -1401,16 +1402,49 @@ func TestStoreMatchesWorldThroughoutMatch(t *testing.T) {
 	s, p := newTestSim(t)
 	assertStoreMatchesWorld(t, s)
 
-	// 跑一段：物理步进、弹丸命中、接触伤害、拾取、刷怪都要覆盖到。
+	// 跑一段：物理步进、刷怪、接触伤害都要覆盖到。
 	for i := 0; i < 40; i++ {
 		s.Step()
 		assertStoreMatchesWorld(t, s)
 	}
 
-	// 射击 -> 命中靶球（摧毁实体）
-	target := targetsOf(snapshotWorld(s))[0]
+	// 弹丸存活期间必须被同步（Projectile 属性只在创建时 Set 一次，而别的用例里
+	// 弹丸都在创建的同一 tick 就被销毁 —— 不单独跑这一条，漏写这个 Set 不会被发现）。
 	proj := s.Shoot(shoot0(), [3]float32{1, 0, 0})
+	s.Step()
+	assertStoreMatchesWorld(t, s)
+
+	// 弹丸命中靶球（摧毁实体）
+	target := targetsOf(snapshotWorld(s))[0]
 	p.queueContact(proj, target)
+	s.Step()
+	assertStoreMatchesWorld(t, s)
+
+	// 玩家朝向：yaw 必须真的变过才验证得到 Facing 的 Set（出生朝向是 0）。
+	s.ApplyInput(0, [2]float32{0, 0}, 0.7, false)
+	s.Step()
+	assertStoreMatchesWorld(t, s)
+
+	// 刚体的变换必须跟着物理走。fake 平时既不移动也不旋转刚体，所以这里手动推一下；
+	// 必须挑动态刚体（静态船体的 active 恒为 false，翻转不出变化）。
+	var dyn uint32
+	for _, b := range snapshotWorld(s).Bodies {
+		if !b.Static {
+			dyn = b.ID
+			break
+		}
+	}
+	if dyn == 0 {
+		t.Fatal("场景里应有动态刚体（木箱）")
+	}
+
+	p.moveBody(dyn, [3]float32{1.5, 2.5, 3.5})
+	p.setBodyQuat(dyn, [4]float32{0, 0.70710678, 0, 0.70710678})
+	s.Step()
+	assertStoreMatchesWorld(t, s)
+
+	// 休眠状态翻转：Body.Active 只在值真的变了才 Set，必须真的翻过才验证得到。
+	p.setBodyActive(dyn, false)
 	s.Step()
 	assertStoreMatchesWorld(t, s)
 
@@ -1418,35 +1452,42 @@ func TestStoreMatchesWorldThroughoutMatch(t *testing.T) {
 	// 见 TestInitialSnapshot 的同源 flake），所以先判空再取下标。
 	if res := snapshotWorld(s).Resources; len(res) > 0 {
 		p.queueCharacterContact(uint32(res[0].ID))
-		s.ApplyInput(0, [2]float32{0, 0}, 0, false)
 		s.Step()
 		assertStoreMatchesWorld(t, s)
 	}
 
-	// 敌人贴身伤害 + 复活
+	// 敌人贴身伤害。**每 tick 都断言**：玩家复活那一帧会同时改 Health 与 Position，
+	// 只在循环外断言的话，下一 tick 的同步会把两边都修好、漏写的 Set 就抓不住了。
 	enemy := enemiesOf(snapshotWorld(s))[0]
 	p.queueCharacterContact(enemy)
 	for i := 0; i < 300; i++ {
 		s.Step()
+		assertStoreMatchesWorld(t, s)
 	}
-	assertStoreMatchesWorld(t, s)
+}
 
-	// 波次推进：击杀全场敌人，等 2 秒（waveDelayTicks=40）应刷出新的一波
-	// —— 这会新建实体，必须同样被同步到。
-	for round := 0; round < 2; round++ {
-		for _, e := range enemiesOf(snapshotWorld(s)) {
+// 波次推进：击杀全场敌人 -> 清波 waveDelayTicks 后刷出新的一波（会新建实体）。
+// 单独成测是因为「真的把敌人打死」需要 enemyHealth 次命中；waveSystem 的
+// wave++ 与运行期的 spawnEnemy 只有走到这里才会被覆盖到。
+func TestStoreMatchesWorldAcrossWaveAdvance(t *testing.T) {
+	s, p := newTestSim(t)
+	before := s.wave
+
+	for _, e := range enemiesOf(snapshotWorld(s)) {
+		for hit := 0; hit < enemyHealth; hit++ {
 			proj := s.Shoot(shoot0(), [3]float32{1, 0, 0})
 			p.queueContact(proj, e)
 			s.Step()
 			assertStoreMatchesWorld(t, s)
 		}
-		for i := 0; i < 50; i++ {
-			s.Step()
-			assertStoreMatchesWorld(t, s)
-		}
 	}
-	if len(enemiesOf(snapshotWorld(s))) == 0 {
-		t.Fatal("清波 2 秒后应刷出下一波敌人（否则这个用例没覆盖到新建实体）")
+
+	for i := 0; i < waveDelayTicks+10; i++ {
+		s.Step()
+		assertStoreMatchesWorld(t, s)
+	}
+	if s.wave <= before {
+		t.Fatalf("清波后应刷出新的一波（否则运行期 spawnEnemy 与 wave++ 都没被覆盖），wave 仍是 %d", s.wave)
 	}
 }
 
@@ -1464,11 +1505,12 @@ func TestDeltaStreamRebuildsFullState(t *testing.T) {
 		client.Declare(a.Name, a.Kind)
 	}
 
+	// 注意：destroy 之后**不能** continue —— 同帧销毁+重建时，同一个 EntityDelta
+	// 里既有 destroy 也有新实体的 set，丢掉 set 客户端就再也收不到重建的实体。
 	applyFrame := func(f replication.Frame) {
 		for _, ed := range f.Entities {
 			if ed.Destroy {
 				client.Destroy(ed.ID)
-				continue
 			}
 			for _, cid := range ed.Removed {
 				client.Remove(ed.ID, name[cid])
@@ -1480,6 +1522,14 @@ func TestDeltaStreamRebuildsFullState(t *testing.T) {
 	}
 
 	for i := 0; i < 60; i++ {
+		s.Step()
+		applyFrame(s.DrainFrame())
+	}
+
+	// 场景重建走的是「所有旧实体各发一条 destroy、随后整体重建」的路径，
+	// 而且刚体 id 会从头复用 —— 正好覆盖上面 destroy+set 同帧那个分支。
+	s.Reset()
+	for i := 0; i < 5; i++ {
 		s.Step()
 		applyFrame(s.DrainFrame())
 	}
@@ -1533,6 +1583,56 @@ func snapshotWorld(s *Simulation) State { return s.snapshot() }
 ```
 
 > 另外 `fakePhysics` 已经有一个测试钩子 `queueCharacterContact(id uint32)`（`sim_test.go` 里，「注入一个持续存在的 0 号角色接触」），上面的接触注入直接用它，不要新加同义方法。
+
+> **还需要给 fake 补上「旋转」与几个测试钩子。** 现在 `fakePhysics.Sync` 永远上报单位四元数，
+> 于是 `attrRot` 的同步漏写根本验证不到。改动（都在 `sim_test.go`）：
+
+```go
+// fakeBody 加一个字段（放在 active 旁边）：
+	quat [4]float32
+```
+
+```go
+// addBody 里初始化（否则默认零四元数不是合法旋转）：
+	f.bodies[id] = &fakeBody{
+		active: motion != MotionStatic,
+		pos:    pos,
+		quat:   [4]float32{0, 0, 0, 1},
+		radius: radius,
+		sensor: sensor,
+	}
+```
+
+```go
+// Sync 上报刚体自己的四元数，而不是写死单位四元数：
+func (f *fakePhysics) Sync(fn func(id uint32, active bool, pos [3]float32, quat [4]float32)) {
+	for id, b := range f.bodies {
+		fn(id, b.active, b.pos, b.quat)
+	}
+}
+```
+
+```go
+// 新增三个钩子（紧挨着已有的 moveBody）：
+//
+// setBodyActive 翻转一个刚体的「仍在模拟」状态。fake 的 active 只在创建时赋值、
+// 之后从不变化，不翻转它就无法验证 Body.Active 的同步（syncSystem 只在值变了才 Set）。
+func (f *fakePhysics) setBodyActive(id uint32, active bool) {
+	if b, ok := f.bodies[id]; ok {
+		b.active = active
+	}
+}
+
+// setBodyQuat 直接改一个刚体的旋转，用于验证旋转变换的同步。
+func (f *fakePhysics) setBodyQuat(id uint32, quat [4]float32) {
+	if b, ok := f.bodies[id]; ok {
+		b.quat = quat
+	}
+}
+```
+
+> `moveBody` 已经在 `sim_test.go` 里了，直接用，不要重复定义。既有测试都不读 `quat`，
+> 所以给 fake 补四元数不会影响它们。
 
 - [ ] **Step 2: 跑测试确认失败**
 
@@ -1613,8 +1713,10 @@ func (s *Simulation) FullFrame() replication.Frame {
 }
 
 // replicateBodyMeta 把一个刚体的渲染元数据写进同步 store。
-// 只在创建时调用一次（静态属性不会变）；变换由 syncSystem 每 tick 推送。
-func (s *Simulation) replicateBodyMeta(e ecs.Entity, b Body, pos [3]float32) {
+// 只在创建时调用一次（静态属性不会变，变换由 syncSystem 每 tick 推送）。
+// 初始旋转由调用方传入：写死成单位四元数会和 registerBody 的 Rotation 悄悄脱钩，
+// 而「静默不同步」正是本任务要防的东西。
+func (s *Simulation) replicateBodyMeta(e ecs.Entity, b Body, pos [3]float32, rot [4]float32) {
 	id := uint32(e)
 	s.rep.Set(id, attrBodyKind, replication.I32(int32(b.Kind)))
 	s.rep.Set(id, attrBodySize, replication.Vec3(b.Size[0], b.Size[1], b.Size[2]))
@@ -1622,7 +1724,7 @@ func (s *Simulation) replicateBodyMeta(e ecs.Entity, b Body, pos [3]float32) {
 	s.rep.Set(id, attrBodyActive, replication.Bool(b.Active))
 	s.rep.Set(id, attrBodyMat, replication.I32(int32(b.Mat)))
 	s.rep.Set(id, attrPos, replication.Vec3(pos[0], pos[1], pos[2]))
-	s.rep.Set(id, attrRot, replication.Vec4(0, 0, 0, 1))
+	s.rep.Set(id, attrRot, replication.Vec4(rot[0], rot[1], rot[2], rot[3]))
 }
 
 // replicatePlayer 把玩家的槽位/位置/血量/朝向写进同步 store。
@@ -1669,12 +1771,14 @@ func New(p Physics) *Simulation {
 		s.replicatePlayer(i, [3]float32{x, playerSpawnY, z}, 100, playerSpawnYaw(i))
 ```
 
-5. `init()` 里单例实体创建之后加：
+5. `init()` 里紧挨着 Task 4 加的 `s.syncGameState()`（在 `s.wave = 1` 之后）加三条。
+   **用 `s.*` 字段而不是字面量** —— 写死 `I32(1)` 会让同一件事有「组件」和「store」
+   两处真相，以后改初始波次就会脱钩：
 
 ```go
-	s.rep.Set(uint32(s.game), attrGameScore, replication.I32(0))
-	s.rep.Set(uint32(s.game), attrGameWave, replication.I32(1))
-	s.rep.Set(uint32(s.game), attrGameGold, replication.I32(0))
+	s.rep.Set(uint32(s.game), attrGameScore, replication.I32(int32(s.score)))
+	s.rep.Set(uint32(s.game), attrGameWave, replication.I32(int32(s.wave)))
+	s.rep.Set(uint32(s.game), attrGameGold, replication.I32(int32(s.gold)))
 ```
 
 6. `registerBody()` 末尾加：
@@ -1689,8 +1793,9 @@ func New(p Physics) *Simulation {
 func (s *Simulation) registerBody(id uint32, kind BodyKind, size [3]float32, static bool, pos [3]float32, mat Material) ecs.Entity {
 	e := ecs.Entity(id)
 	body := Body{Kind: kind, Size: size, Static: static, Active: !static, Mat: mat}
-	ecs.Add3(s.world, e, body, Position(pos), Rotation{0, 0, 0, 1})
-	s.replicateBodyMeta(e, body, pos)
+	rot := Rotation{0, 0, 0, 1}
+	ecs.Add3(s.world, e, body, Position(pos), rot)
+	s.replicateBodyMeta(e, body, pos, rot)
 	return e
 }
 ```
