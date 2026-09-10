@@ -12,6 +12,24 @@ const MONSTER_BELLY := Color("efe0ff")
 const MONSTER_DARK := Color("4a3a5a")   # 眼睛
 const MONSTER_HORN := Color("ffd75e")
 
+## 场景视觉材质表：键与服务端 sim/map.go 的 Material 编号一一对应（只能追加）。
+## 标记类刚体（弹丸/怪物/靶球）由各自的标志位先决定外观，不看材质号。
+const MATS := {
+	1: {"color": "4a545e", "rough": 0.80, "metal": 0.25}, # 甲板钢板
+	2: {"color": "333d47", "rough": 0.70, "metal": 0.35}, # 船体外板
+	3: {"color": "2f6fb5", "rough": 0.45, "metal": 0.40}, # 集装箱 · 蓝
+	4: {"color": "b5443a", "rough": 0.45, "metal": 0.40}, # 集装箱 · 红
+	5: {"color": "3f8f5a", "rough": 0.45, "metal": 0.40}, # 集装箱 · 绿
+	6: {"color": "c07a2c", "rough": 0.45, "metal": 0.40}, # 集装箱 · 橙
+	7: {"color": "8a6a3a", "rough": 0.75, "metal": 0.30}, # 高架走道格栅
+	8: {"color": "9aa7b5", "rough": 0.40, "metal": 0.60}, # 栏杆
+	9: {"color": "d08a4e", "rough": 0.65, "metal": 0.05}, # 木箱
+	10: {"color": "6b7683", "rough": 0.50, "metal": 0.55}, # 桅杆/烟囱/系缆桩
+	11: {"color": "556069", "rough": 0.80, "metal": 0.30}, # 舷梯踏步
+}
+## 集装箱材质号：额外加一圈顶/底包边，让方盒子看起来像货柜。
+const CONTAINER_MATS := [3, 4, 5, 6]
+
 var _sig := ""
 var _simple_mesh: MeshInstance3D = null
 var _bob: Node3D = null
@@ -49,6 +67,34 @@ func _build_simple(body: Dictionary) -> void:
 	mi.material_override = _make_material(body)
 	add_child(mi)
 	_simple_mesh = mi
+	_add_container_trim(body)
+
+## 集装箱的顶/底包边：在方盒子上下各套一圈略大、略暗的薄框，一眼能看出是货柜。
+## 包边必须明显凸出箱体表面（y 方向探出半个厚度、xz 方向放大 2%）——与箱面共面
+## 会 z-fighting，在平顶/侧面拉出满屏摩尔纹条纹。
+func _add_container_trim(body: Dictionary) -> void:
+	if not CONTAINER_MATS.has(int(body.get("mat", 0))):
+		return
+	var size: Array = body.get("size", [0.0, 0.0, 0.0])
+	var sx := float(size[0])
+	var sy := float(size[1])
+	var sz := float(size[2])
+	if sx <= 0.0 or sy <= 0.0 or sz <= 0.0:
+		return
+	var base := MATS[int(body.get("mat", 0))]["color"] as String
+	for sign_y in [-1.0, 1.0]:
+		var rim := MeshInstance3D.new()
+		var bm := BoxMesh.new()
+		bm.size = Vector3(sx * 2.0 * 1.02, 0.12, sz * 2.0 * 1.02)
+		rim.mesh = bm
+		rim.position.y = sign_y * sy
+		rim.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+		var mat := StandardMaterial3D.new()
+		mat.albedo_color = Color(base).darkened(0.45)
+		mat.roughness = 0.5
+		mat.metallic = 0.5
+		rim.material_override = mat
+		add_child(rim)
 
 func _build_monster(body: Dictionary) -> void:
 	var size_a: Array = body.get("size", [0.35, 0.5, 0.0])
@@ -175,18 +221,28 @@ func _make_material(b: Dictionary) -> StandardMaterial3D:
 		mat.emission = Color("550000")
 		mat.roughness = 0.35
 		mat.metallic = 0.1
-	elif b.get("static", false):
-		mat.albedo_color = Color("6e7681")
-		mat.roughness = 0.9
 	else:
-		mat.albedo_color = Color("d08a4e")
-		mat.roughness = 0.65
-		mat.metallic = 0.05
+		# 场景刚体按服务端下发的材质号配色（甲板/船体/集装箱/走道/木箱…）。
+		var m: Dictionary = MATS.get(int(b.get("mat", 0)), {})
+		if m.is_empty():
+			# 未标材质的刚体：静态用钢灰、动态用木色。
+			if b.get("static", false):
+				mat.albedo_color = Color("6e7681")
+				mat.roughness = 0.9
+			else:
+				mat.albedo_color = Color("d08a4e")
+				mat.roughness = 0.65
+				mat.metallic = 0.05
+		else:
+			mat.albedo_color = Color(m.get("color", "6e7681"))
+			mat.roughness = float(m.get("rough", 0.6))
+			mat.metallic = float(m.get("metal", 0.0))
 	return mat
 
 func _signature(b: Dictionary) -> String:
 	var size: Array = b.get("size", [0.0, 0.0, 0.0])
-	return "%d|%s|%s|%s|%s|%.5f|%.5f" % [
+	return "%d|%s|%s|%s|%s|%d|%.5f|%.5f|%.5f" % [
 		int(b.get("type", 0)), b.get("static", false), b.get("target", false),
-		b.get("enemy", false), b.get("projectile", false), float(size[0]), float(size[1]),
+		b.get("enemy", false), b.get("projectile", false), int(b.get("mat", 0)),
+		float(size[0]), float(size[1]), float(size[2]),
 	]

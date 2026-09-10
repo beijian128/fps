@@ -211,28 +211,32 @@ func (s *Simulation) init() {
 		s.physics.CreateCharacter(i, characterHalfHeight, characterRadius, characterOffsetY, x, characterSpawnY, z)
 		s.physics.SetCharacterDynamicPush(i, false)
 
-		// 玩家实体：纯逻辑（角色控制器不是刚体），初始站在出生点。
+		// 玩家实体：纯逻辑（角色控制器不是刚体），初始站在出生点、面朝船中。
 		s.players[i] = s.world.NewEntity()
-		ecs.Add4(s.world, s.players[i], Player{}, Health(100), Position{x, playerSpawnY, z}, Input{})
+		ecs.Add4(s.world, s.players[i], Player{}, Health(100), Position{x, playerSpawnY, z},
+			Input{Yaw: playerSpawnYaw(i)})
 	}
 
-	// 地板 + 竞技场四墙。
-	s.registerBody(s.physics.AddBox(100, 1, 100, 0, -1, 0, MotionStatic), BodyBox, [3]float32{100, 1, 100}, true, [3]float32{0, -1, 0})
-	s.registerBody(s.physics.AddBox(20, 4, 1, 0, 3, 20, MotionStatic), BodyBox, [3]float32{20, 4, 1}, true, [3]float32{0, 3, 20})
-	s.registerBody(s.physics.AddBox(20, 4, 1, 0, 3, -20, MotionStatic), BodyBox, [3]float32{20, 4, 1}, true, [3]float32{0, 3, -20})
-	s.registerBody(s.physics.AddBox(1, 4, 20, 20, 3, 0, MotionStatic), BodyBox, [3]float32{1, 4, 20}, true, [3]float32{20, 3, 0})
-	s.registerBody(s.physics.AddBox(1, 4, 20, -20, 3, 0, MotionStatic), BodyBox, [3]float32{1, 4, 20}, true, [3]float32{-20, 3, 0})
+	// 场景几何全部来自 map.go 的部件表（甲板/船体/集装箱/走道/舷梯/桅杆）。
+	for _, b := range shipBoxParts {
+		id := s.physics.AddBox(b.hx, b.hy, b.hz, b.x, b.y, b.z, MotionStatic)
+		s.registerBody(id, BodyBox, [3]float32{b.hx, b.hy, b.hz}, true, [3]float32{b.x, b.y, b.z}, b.mat)
+	}
+	for _, c := range shipCapsuleParts {
+		id := s.physics.AddCapsule(c.x, c.y, c.z, c.half, c.radius, MotionStatic)
+		s.registerBody(id, BodyCapsule, [3]float32{c.radius, c.half, 0}, true, [3]float32{c.x, c.y, c.z}, c.mat)
+	}
 
-	// 箱子（动态，可被弹丸挡下、可被玩家推开）。
-	for _, c := range cratePositions {
+	// 木箱（动态，可被弹丸挡下、可被玩家推开）。
+	for _, c := range deckCratePositions {
 		id := s.physics.AddBox(0.5, 0.5, 0.5, c[0], c[1], c[2], MotionDynamic)
-		s.registerBody(id, BodyBox, [3]float32{0.5, 0.5, 0.5}, false, c)
+		s.registerBody(id, BodyBox, [3]float32{0.5, 0.5, 0.5}, false, c, MatCrate)
 	}
 
 	// 可破坏的悬浮靶球（静态球）。
-	for _, t := range targetPositions {
+	for _, t := range shipTargets {
 		id := s.physics.AddSphere(t[0], t[1], t[2], 0.4, MotionStatic)
-		e := s.registerBody(id, BodySphere, [3]float32{0.4}, true, t)
+		e := s.registerBody(id, BodySphere, [3]float32{0.4}, true, t, MatDefault)
 		ecs.Add(s.world, e, Target{})
 	}
 
@@ -310,7 +314,7 @@ func (s *Simulation) shoot(origin, dir [3]float32) uint32 {
 	s.physics.SetBodyRestitution(id, 0)
 	s.physics.SetBodyVelocity(id, dx*projectileSpeed, dy*projectileSpeed, dz*projectileSpeed)
 
-	e := s.registerBody(id, BodySphere, [3]float32{projectileRadius}, false, origin)
+	e := s.registerBody(id, BodySphere, [3]float32{projectileRadius}, false, origin, MatDefault)
 	ecs.Add(s.world, e, Projectile{SpawnStep: s.step})
 	return id
 }
@@ -318,11 +322,11 @@ func (s *Simulation) shoot(origin, dir [3]float32) uint32 {
 // registerBody 用物理层返回的 body id 建立实体并挂上基础组件。
 // 实体 id 即 body id，创建时先写入已知的初始位置/旋转/活跃状态，
 // 让两次 tick 之间创建的实体（如弹丸）也能立即出现在快照里。
-func (s *Simulation) registerBody(id uint32, kind BodyKind, size [3]float32, static bool, pos [3]float32) ecs.Entity {
+func (s *Simulation) registerBody(id uint32, kind BodyKind, size [3]float32, static bool, pos [3]float32, mat Material) ecs.Entity {
 	e := ecs.Entity(id)
 	// Bundle 式挂载：一次搬家进入 {Body,Position,Rotation} archetype。
 	ecs.Add3(s.world, e,
-		Body{Kind: kind, Size: size, Static: static, Active: !static},
+		Body{Kind: kind, Size: size, Static: static, Active: !static, Mat: mat},
 		Position(pos),
 		Rotation{0, 0, 0, 1})
 	return e
@@ -337,18 +341,23 @@ func (s *Simulation) destroyBody(e ecs.Entity) {
 	s.world.Destroy(e)
 }
 
-// 初始金币：随机撒在地图上（离 0 号玩家出生点 4m 以外）。
+// 初始金币：随机撒在甲板上（离 0 号玩家出生点 4m 以外、不与掩体重叠）。
 func (s *Simulation) spawnInitialResource() {
-	for attempt := 0; attempt < 24; attempt++ {
-		x := randRange(-16, 16)
-		z := randRange(-16, 16)
-		sx, sz := playerSpawnXZ(0)
+	sx, sz := playerSpawnXZ(0)
+	for attempt := 0; attempt < 32; attempt++ {
+		x := randRange(-deckHalfX+1, deckHalfX-1)
+		z := randRange(-deckHalfZ+1, deckHalfZ-1)
 		dx := x - sx
 		dz := z - sz
-		if dx*dx+dz*dz >= 4*4 {
-			s.spawnResource([3]float32{x, resourceY, z})
-			return
+		if dx*dx+dz*dz < spawnFreeGap*spawnFreeGap {
+			continue
 		}
+		// 金币悬浮高度固定，掩体位置由 map.go 判定——避免刷进集装箱内部（拾不到）。
+		if mapBlocks(x, resourceY, z, resourceSensorRadius) {
+			continue
+		}
+		s.spawnResource([3]float32{x, resourceY, z})
+		return
 	}
 }
 
@@ -359,7 +368,7 @@ func (s *Simulation) spawnResource(pos [3]float32) {
 		return
 	}
 	id := s.physics.AddSensorSphere(pos[0], pos[1], pos[2], resourceSensorRadius)
-	e := s.registerBody(id, BodySphere, [3]float32{resourceSensorRadius}, true, pos)
+	e := s.registerBody(id, BodySphere, [3]float32{resourceSensorRadius}, true, pos, MatDefault)
 	ecs.Add(s.world, e, Resource{Kind: 0})
 }
 
@@ -413,6 +422,7 @@ func (s *Simulation) snapshot() State {
 			Quat:       *rot,
 			Size:       b.Size,
 			Active:     b.Active,
+			Mat:        int(b.Mat),
 		}
 		if h, ok := ecs.RowGet[Health](row); ok {
 			bi.Health = float32(*h)
@@ -434,32 +444,4 @@ func (s *Simulation) snapshot() State {
 
 func randRange(a, b float32) float32 {
 	return a + rand.Float32()*(b-a)
-}
-
-// playerSpawnXZ 返回玩家槽位 i 的出生点水平坐标（两名玩家错开出生位置）。
-func playerSpawnXZ(i int) (float32, float32) {
-	switch i {
-	case 1:
-		return 3, 12
-	default:
-		return 0, 12
-	}
-}
-
-// ---- 场景数据 ----
-
-type scenePos [3]float32
-
-var cratePositions = []scenePos{
-	{-4, 1, 3}, {-3, 1, 4}, {-3.5, 1, 5},
-	{4, 1, -2}, {5, 1, -1}, {5, 2, -1.5}, {4, 2, -1},
-	{-6, 1, -3}, {-6, 2, -3}, {-6, 3, -3},
-	{2, 1, 5}, {3, 1, 5},
-	{-2, 1, -5}, {-1, 1, -5}, {-1.5, 2, -5},
-	{7, 1, 3}, {7, 2, 3}, {8, 1, 3},
-}
-
-var targetPositions = []scenePos{
-	{-8, 2.5, 0}, {-5, 3, 7}, {3, 3.5, -8}, {8, 2.5, -6},
-	{0, 4, 2}, {-3, 2, -8}, {6, 3, 6}, {-7, 3.5, 5},
 }

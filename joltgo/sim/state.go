@@ -16,6 +16,7 @@ type BodyInfo struct {
 	Size       [3]float32
 	Health     float32
 	Active     bool
+	Mat        int // 视觉材质（Material），客户端据此配色；标记类刚体（靶球/敌人/弹丸）由客户端的标志位优先决定
 }
 
 // PlayerState 是单个玩家的快照（Pos 为脚底位置）。

@@ -152,6 +152,7 @@ func toSnapshot(s sim.State) *protos.Snapshot {
 			Size:       b.Size[:],
 			Health:     b.Health,
 			Active:     b.Active,
+			Mat:        int32(b.Mat),
 		})
 	}
 	for _, r := range s.Resources {

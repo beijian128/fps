@@ -61,6 +61,10 @@ message BodyInfo {
   repeated float size = 9; // box 半边长；sphere 半径在 [0]；capsule 半径在 [0]、半高在 [1]
   float health = 10;       // 敌人血量（其他刚体为 0）
   bool active = 11;        // 是否仍在模拟（未休眠）
+  int32 mat = 12;          // 视觉材质（场景配色，见 sim/map.go Material）：
+                           //   0 默认 1 甲板 2 船体 3-6 集装箱 7 走道 8 栏杆
+                           //   9 木箱 10 桅杆/烟囱 11 舷梯踏步
+                           // 标记类刚体（靶球/敌人/弹丸）由客户端的标志位优先决定外观。
 }
 
 // ResourceInfo 是可拾取资源快照。

@@ -201,7 +201,7 @@ func _decode_body(buf: PackedByteArray) -> Dictionary:
 	var d := {
 		"id": 0, "type": 0, "static": false, "target": false, "enemy": false,
 		"projectile": false, "pos": [0.0, 0.0, 0.0], "quat": [0.0, 0.0, 0.0, 1.0],
-		"size": [0.0, 0.0, 0.0], "health": 0.0, "active": false,
+		"size": [0.0, 0.0, 0.0], "health": 0.0, "active": false, "mat": 0,
 	}
 	var i := 0
 	while i < buf.size():
@@ -222,6 +222,7 @@ func _decode_body(buf: PackedByteArray) -> Dictionary:
 					5: d["enemy"] = v != 0
 					6: d["projectile"] = v != 0
 					11: d["active"] = v != 0
+					12: d["mat"] = v
 			WIRE_LEN:
 				var rl: Array = _read_varint(buf, i)
 				i = int(rl[1])
