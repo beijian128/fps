@@ -10,7 +10,7 @@
 // 非并发安全：与 sim.Simulation 一样，由对局实例 goroutine 独占。
 package replication
 
-import "sort"
+import "strconv"
 
 // Attr 是一个属性的声明：ID 从 1 起，0 保留为无效。
 type Attr struct {
@@ -70,8 +70,15 @@ func (s *Store) attrOf(name string) uint32 {
 //
 // 标脏规则：与「上一次下发给客户端的值」不同才标脏。同一帧内多次 Set 只留终值；
 // 改回已下发过的值会撤销本帧的脏标记（A → B → A 不产生任何流量）。
+//
+// 类型必须与 Declare 时声明的 Kind 一致：不一致说明调用点写错了属性名或值的
+// 构造器，会让客户端按错误的 Kind 解码（静默数据损坏），所以在 dev/test 直接 panic。
 func (s *Store) Set(id uint32, attr string, v Value) {
 	cid := s.attrOf(attr)
+	if want := s.attrs[cid-1].Kind; want != v.Kind() {
+		panic("replication: 属性 " + attr + " 声明为 Kind " + strconv.Itoa(int(want)) +
+			"，却写入了 Kind " + strconv.Itoa(int(v.Kind())))
+	}
 
 	m := s.values[id]
 	if m == nil {
@@ -132,30 +139,40 @@ func (s *Store) Remove(id uint32, attr string) {
 }
 
 // Destroy 销毁实体：清空它的全部属性并记一条销毁下发。
+//
+// `sent`（已下发基线）也必须一并清掉：实体 id 可能被回收后立刻复用，若基线还在，
+// 新实体的 Set 会因为「与旧实体的值相同」而撤销脏标记，客户端再也收不到它。
 func (s *Store) Destroy(id uint32) {
 	delete(s.values, id)
 	delete(s.dirty, id)
 	delete(s.gone, id)
+	delete(s.sent, id)
 	s.dead[id] = true
 }
 
-// Reset 清空全部实体与脏集，保留属性声明（对局 Reset 用）。
+// Reset 丢弃全部实体与脏集，保留属性声明（对局 Reset 用）。
+//
+// 已下发过的实体各自保留一条待发的 destroy：场景重建后刚体 id 会从头发放，
+// 不显式销毁的话客户端会残留旧实体（新实体的 set 只会覆盖同 id 的那些）。
 func (s *Store) Reset() {
+	for id := range s.values {
+		s.dead[id] = true
+	}
 	s.values = map[uint32]map[uint32]Value{}
-	s.sent = map[uint32]map[uint32]Value{}
 	s.dirty = map[uint32]map[uint32]bool{}
 	s.gone = map[uint32]map[uint32]bool{}
-	s.dead = map[uint32]bool{}
 }
 
 // Get 返回实体 id 的属性 attr 的终值；不存在时返回 (Value{}, false)。
-// 供测试与调试使用，不参与同步路径。
+// 供测试与调试使用，不参与同步路径。属性名未声明时与 Set 一样 panic
+// （先校验名字再查实体，避免同一个错误在实体不存在时被静默吞掉）。
 func (s *Store) Get(id uint32, attr string) (Value, bool) {
+	cid := s.attrOf(attr)
 	m := s.values[id]
 	if m == nil {
 		return Value{}, false
 	}
-	v, ok := m[s.attrOf(attr)]
+	v, ok := m[cid]
 	return v, ok
 }
 
@@ -174,14 +191,4 @@ func schemaVersion(attrs []Attr) uint32 {
 		h = (h ^ uint32(a.Kind)) * prime32
 	}
 	return h
-}
-
-// sortedIDs 返回按键升序排列的实体 ID 列表（map 迭代无序，输出必须确定）。
-func sortedIDs[V any](m map[uint32]V) []uint32 {
-	out := make([]uint32, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
-	return out
 }

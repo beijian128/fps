@@ -31,6 +31,7 @@ func TestSetStoresFinalValueOnly(t *testing.T) {
 func TestDestroyClearsValues(t *testing.T) {
 	s := newTestStore()
 	s.Set(7, "Health", F32(10))
+	s.sent[7] = map[uint32]Value{s.attrOf("Health"): F32(10)} // 模拟已下发过
 
 	s.Destroy(7)
 	if _, ok := s.Get(7, "Health"); ok {
@@ -39,6 +40,32 @@ func TestDestroyClearsValues(t *testing.T) {
 	if !s.dead[7] {
 		t.Fatal("销毁应记录 dead 标记")
 	}
+	if _, ok := s.sent[7]; ok {
+		t.Fatal("销毁应同时清掉已下发基线，否则 id 被复用时新实体会因为值相同而发不出去")
+	}
+}
+
+// id 被回收后立刻重建：新实体必须重新下发，即便它的值和旧实体的相同。
+func TestSetAfterDestroyIsDirtyAgain(t *testing.T) {
+	s := newTestStore()
+	s.Set(7, "Health", F32(10))
+	s.sent[7] = map[uint32]Value{s.attrOf("Health"): F32(10)} // 旧实体已下发过 10
+
+	s.Destroy(7)
+	s.Set(7, "Health", F32(10)) // 新实体，值恰好相同
+
+	if got := dirtyIDs(s, 7); len(got) != 1 {
+		t.Fatalf("重建的实体必须重新标脏，得到 %v", got)
+	}
+}
+
+func TestSetKindMismatchPanics(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("值与声明的 Kind 不一致应 panic")
+		}
+	}()
+	newTestStore().Set(1, "Health", Vec3(1, 2, 3)) // Health 声明为 KindF32
 }
 
 func TestRemoveDropsValue(t *testing.T) {
@@ -54,13 +81,20 @@ func TestRemoveDropsValue(t *testing.T) {
 	}
 }
 
-func TestRemoveUndeclaredAttrPanics(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("Set/Remove 未声明属性应 panic")
-		}
-	}()
-	newTestStore().Set(1, "Nope", F32(1))
+func TestUndeclaredAttrPanics(t *testing.T) {
+	assertPanics := func(name string, fn func()) {
+		t.Helper()
+		defer func() {
+			if recover() == nil {
+				t.Fatalf("%s 未声明属性应 panic", name)
+			}
+		}()
+		fn()
+	}
+	s := newTestStore()
+	assertPanics("Set", func() { s.Set(1, "Nope", F32(1)) })
+	assertPanics("Remove", func() { s.Remove(1, "Nope") })
+	assertPanics("Get", func() { s.Get(1, "Nope") })
 }
 
 func TestDeclareTwicePanics(t *testing.T) {
@@ -81,6 +115,9 @@ func TestResetKeepsDeclarations(t *testing.T) {
 
 	if _, ok := s.Get(7, "Health"); ok {
 		t.Fatal("Reset 后应清空终值表")
+	}
+	if !s.dead[7] {
+		t.Fatal("Reset 应保留一条待发的 destroy，否则场景重建后客户端会残留旧实体")
 	}
 	s.Set(7, "Health", F32(1)) // 声明还在，不应 panic
 }
