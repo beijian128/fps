@@ -83,7 +83,9 @@ func (s *Simulation) replicateBodyMeta(e ecs.Entity, b Body, pos [3]float32, rot
 	s.rep.Set(id, attrRot, replication.Vec4(rot[0], rot[1], rot[2], rot[3]))
 }
 
-// replicatePlayer 把玩家的槽位/位置/血量/朝向写进同步 store。
+// replicatePlayer 把玩家的槽位/血量/朝向写进同步 store。
+// 位置也在这里写一次，让实体一建出来就是完整的；此后每 tick 由 syncSystem 推送
+// （init 末尾会调一次 syncSystem，所以这两处谁先谁后都不会留下不一致）。
 func (s *Simulation) replicatePlayer(idx int, pos [3]float32, health float32, yaw float32) {
 	id := uint32(s.players[idx])
 	s.rep.Set(id, attrPlayerIdx, replication.I32(int32(idx)))

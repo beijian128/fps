@@ -1,7 +1,9 @@
 package sim
 
 import (
+	"fmt"
 	"reflect"
+	"strconv"
 	"testing"
 
 	"joltgo/ecs"
@@ -115,7 +117,7 @@ func assertStoreMatchesWorld(t *testing.T, s *Simulation) {
 				t.Fatalf("实体 %d 缺少属性 %s（漏写 rep.Set？）", id, attr)
 			}
 			if !valueEqual(wv, gv) {
-				t.Fatalf("实体 %d 属性 %s 不一致：世界 %v vs store %v", id, attr, wv.Floats(), gv.Floats())
+				t.Fatalf("实体 %d 属性 %s 不一致：世界 %s vs store %s", id, attr, describe(wv), describe(gv))
 			}
 		}
 	}
@@ -128,6 +130,21 @@ func assertStoreMatchesWorld(t *testing.T, s *Simulation) {
 				t.Fatalf("实体 %d 有世界里不存在的属性 %s", id, attr)
 			}
 		}
+	}
+}
+
+// describe 把属性值渲染成可读文本。不能直接用 Floats()：它对整数/布尔返回 nil，
+// 会让这两类属性的失败信息变成两个空切片，看不到到底是哪个值不对。
+func describe(v replication.Value) string {
+	switch {
+	case v.Kind().Dim() > 0:
+		return fmt.Sprintf("%v", v.Floats())
+	case v.Kind() == replication.KindStr:
+		return strconv.Quote(v.Text())
+	case v.Kind() == replication.KindBool:
+		return strconv.FormatBool(v.Boolean())
+	default:
+		return strconv.FormatInt(int64(v.Int()), 10)
 	}
 }
 
@@ -243,7 +260,7 @@ func TestStoreMatchesWorldAcrossWaveAdvance(t *testing.T) {
 
 // 需求 3：把增量流喂给一个「客户端 store」，重建结果必须等于直接取全量。
 func TestDeltaStreamRebuildsFullState(t *testing.T) {
-	s, _ := newTestSim(t)
+	s, p := newTestSim(t)
 
 	// 客户端从服务端 schema 建立同一套属性表。注意增量帧不带 schema
 	// （只有 full 帧带），所以名字表要在循环外建好。
@@ -274,6 +291,25 @@ func TestDeltaStreamRebuildsFullState(t *testing.T) {
 	for i := 0; i < 60; i++ {
 		s.Step()
 		applyFrame(s.DrainFrame())
+	}
+
+	// 「只销毁、不重建」的帧——生产里最常见的路径（弹丸过期、金币被拾取、
+	// 敌人被击杀），而下面 Reset 那条路径只会产生 destroy+set。
+	// 不单独走一遍的话，客户端就算完全忽略 destroy 也测不出来。
+	doomed := enemiesOf(snapshotWorld(s))[0]
+	if _, seen := storeAttrsOf(client)[doomed]; !seen {
+		t.Fatalf("客户端本应已收到敌人 %d，否则这个用例覆盖不到销毁", doomed)
+	}
+	for _, e := range enemiesOf(snapshotWorld(s)) {
+		for hit := 0; hit < enemyHealth; hit++ {
+			proj := s.Shoot(shoot0(), [3]float32{1, 0, 0})
+			p.queueContact(proj, e)
+			s.Step()
+			applyFrame(s.DrainFrame())
+		}
+	}
+	if attrs, still := storeAttrsOf(client)[doomed]; still {
+		t.Fatalf("敌人 %d 已被击杀，客户端 store 里不应还有它：%+v", doomed, attrs)
 	}
 
 	// 场景重建走的是「所有旧实体各发一条 destroy、随后整体重建」的路径，
