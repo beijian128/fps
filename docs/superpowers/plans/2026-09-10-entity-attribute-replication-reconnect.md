@@ -318,7 +318,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 package replication
 
 import (
-	"reflect"
+	"sort"
 	"testing"
 )
 
@@ -336,48 +336,18 @@ func TestSetStoresFinalValueOnly(t *testing.T) {
 	s.Set(7, "Health", F32(20))
 	s.Set(7, "Health", F32(30))
 
-	ids, sets := dirtyOf(s, 7)
-	if !reflect.DeepEqual(ids, []uint32{7}) {
-		t.Fatalf("脏实体应为 [7]，得到 %v", ids)
+	if got := dirtyIDs(s, 7); len(got) != 1 {
+		t.Fatalf("同一帧内三次 Set 应只留 1 条脏记录，得到 %d 条", len(got))
 	}
-	if len(sets) != 1 {
-		t.Fatalf("同一帧内三次 Set 应只留 1 条，得到 %d 条", len(sets))
-	}
-	if got := sets[0].Value.Floats()[0]; got != 30 {
-		t.Fatalf("应保留终值 30，得到 %v", got)
-	}
-}
-
-func TestSetSameValueIsNotDirty(t *testing.T) {
-	s := newTestStore()
-	s.Set(7, "Health", F32(10))
-	if ids, _ := dirtyOf(s, 7); len(ids) != 1 {
-		t.Fatal("首次 Set 应标脏")
-	}
-	s.Drain() // 本帧已下发 → 10 成为基线
-	s.Set(7, "Health", F32(10)) // 与已下发值相同
-	if ids, _ := dirtyOf(s, 7); len(ids) != 0 {
-		t.Fatalf("写入相同的值不应标脏，得到 %v", ids)
-	}
-}
-
-func TestSetBackToSentValueCancelsDirty(t *testing.T) {
-	s := newTestStore()
-	s.Set(7, "Health", F32(10))
-	s.Drain() // 模拟这一帧已经下发过 10
-
-	s.Set(7, "Health", F32(20))
-	s.Set(7, "Health", F32(10)) // 改回已下发值 → 撤销
-
-	if ids, _ := dirtyOf(s, 7); len(ids) != 0 {
-		t.Fatalf("改回已下发值应撤销脏标记，得到 %v", ids)
+	v, ok := s.Get(7, "Health")
+	if !ok || v.Floats()[0] != 30 {
+		t.Fatalf("应保留终值 30，得到 %v", v.Floats())
 	}
 }
 
 func TestDestroyClearsValues(t *testing.T) {
 	s := newTestStore()
 	s.Set(7, "Health", F32(10))
-	s.Drain()
 
 	s.Destroy(7)
 	if _, ok := s.Get(7, "Health"); ok {
@@ -391,14 +361,13 @@ func TestDestroyClearsValues(t *testing.T) {
 func TestRemoveDropsValue(t *testing.T) {
 	s := newTestStore()
 	s.Set(7, "Enemy", Bool(true))
-	s.Drain()
 
 	s.Remove(7, "Enemy")
 	if _, ok := s.Get(7, "Enemy"); ok {
 		t.Fatal("Remove 后属性应消失")
 	}
-	if !s.gone[7][mustAttrID(t, s, "Enemy")] {
-		t.Fatal("移除曾经下发过的属性应记录 gone 标记")
+	if got := dirtyIDs(s, 7); len(got) != 0 {
+		t.Fatalf("Remove 应同时撤销该属性的脏标记，得到 %v", got)
 	}
 }
 
@@ -435,32 +404,21 @@ func TestResetKeepsDeclarations(t *testing.T) {
 
 // ---- 测试辅助（与 store.go 同包，可直接读内部字段） ----
 
-// dirtyOf 返回实体 id 的脏属性 ID 列表与对应的 (属性, 值) 列表。
-func dirtyOf(s *Store, id uint32) ([]uint32, []AttrValue) {
-	d := s.dirty[id]
-	if len(d) == 0 {
-		return nil, nil
+// dirtyIDs 返回实体 id 本帧被标脏的属性 ID（升序，便于比较）。
+func dirtyIDs(s *Store, id uint32) []uint32 {
+	out := make([]uint32, 0, len(s.dirty[id]))
+	for cid := range s.dirty[id] {
+		out = append(out, cid)
 	}
-	var ids []uint32
-	var sets []AttrValue
-	for cid := range d {
-		ids = append(ids, cid)
-		sets = append(sets, AttrValue{Attr: cid, Value: s.values[id][cid]})
-	}
-	return ids, sets
-}
-
-func mustAttrID(t *testing.T, s *Store, name string) uint32 {
-	t.Helper()
-	id, ok := s.attrID[name]
-	if !ok {
-		t.Fatalf("属性 %q 未声明", name)
-	}
-	return id
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
 }
 ```
 
-> 注：测试用 `s.Drain()` 来构造「上一帧已下发」的前置状态 —— 它本来就把脏集搬进基线，不需要额外的测试专用方法。
+> 本步只验证「终值存储 + 标脏 + 销毁/移除清值」这些**不依赖产出**的语义。
+> 与「已下发基线」交互的语义（写入相同的值不标脏、改回已下发值撤销脏标记、
+> 移除已下发属性产生 removed）需要 `Drain` 才能观测，放在 Task 3 的
+> `frame_test.go` 里。
 
 - [ ] **Step 2: 跑测试确认失败**
 
@@ -804,6 +762,33 @@ func TestOutputIsDeterministic(t *testing.T) {
 		if first.Entities[i].ID != second.Entities[i].ID {
 			t.Fatalf("第 %d 项实体 ID 不稳定：%d vs %d", i, first.Entities[i].ID, second.Entities[i].ID)
 		}
+	}
+}
+
+// 已下发基线的语义：Set 的相等性比较对象是「上一次下发的值」，不是「本帧上一个值」。
+// 这两条是「同步系统每 tick 重写全部刚体也不产生流量」的依据。
+func TestSetSameAsSentValueIsNotDirty(t *testing.T) {
+	s := newTestStore()
+	s.Set(7, "Health", F32(10))
+	if f := s.Drain(); len(f.Entities) != 1 {
+		t.Fatal("首次 Set 应产生 1 条增量")
+	}
+	s.Set(7, "Health", F32(10)) // 与已下发值相同
+	if f := s.Drain(); len(f.Entities) != 0 {
+		t.Fatalf("写入相同的值不应产生增量，得到 %+v", f.Entities)
+	}
+}
+
+func TestSetBackToSentValueCancelsDirty(t *testing.T) {
+	s := newTestStore()
+	s.Set(7, "Health", F32(10))
+	s.Drain() // 10 成为基线
+
+	s.Set(7, "Health", F32(20))
+	s.Set(7, "Health", F32(10)) // 改回已下发值 → 撤销脏标记
+
+	if f := s.Drain(); len(f.Entities) != 0 {
+		t.Fatalf("改回已下发值应不产生增量，得到 %+v", f.Entities)
 	}
 }
 ```
@@ -3717,10 +3702,11 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 - `Instance.RequestFull(slot int)` 在 Task 6 定义，Task 9 调用 —— 一致。
 - `Component.forget` 在 Task 10 定义并在 Task 10 的 `Create` 里接线 —— 一致。
 
-**已解决的两处偏差**
+**已解决的三处偏差**
 
 1. Task 13 原先用占位字段名描述 `main.gd` 的改动。已核对实际代码并把真名写进计划：`_entities` / `_res_nodes` / `_place_body` / `_remove_body` / `_player_pos` / `_remote_pos` / `_remote_yaw` / `_hud_score` / `_last_health` / `_prev_projectiles` / `_render_resources` / `_update_hud` / `_detect_impacts`。
 2. `world_store.apply_frame` 原先只返回 `destroyed: Array[int]`，但渲染层需要区分「消失的是弹丸还是金币」（旧的 `_detect_impacts` 靠 `projectile` 标志判断）。已改成返回 `[{"id", "attrs"}]`，携带**消失前的属性快照**，Task 11 的实现与测试同步更新。
+3. Task 2 的测试原先依赖 Task 3 才有的 `Drain` 与 `AttrValue`，无法独立跑 TDD（会一直编译失败）。已把「已下发基线」相关的三个用例移到 Task 3 的 `frame_test.go`，Task 2 只验证不依赖产出的存储语义（通过 `Get` 与包内 `dirty` 映射观测）。
 
 **仍需实施时留意的一点**
 
