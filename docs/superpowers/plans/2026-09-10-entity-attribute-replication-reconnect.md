@@ -2447,6 +2447,8 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 **关键事实（已核实）：** `third_party/pitaya/pkg/session/session.go:460-464` —— 前端会话 `Bind` 遇到已存在的同 UID 会**主动关掉旧会话并把新连接顶上去**；而 `SendPushToUsers` 正是按 UID 从 `sessionsByUID` 取会话。所以把 token 当会话 UID 之后，实例的 `uids` 数组在重连后依旧指向正确的连接，**广播代码不用改**。
 
+**顺手修一处 Task 6 留下的尖角：** `game.Component.Create` 的人数上限校验目前返回 `CreateGameReply{Code: 1}` 且 `error` 为 nil，而 `match.startMatch` 只看 RPC 是否报错、不看 `reply.Code` —— 于是超编时 match 会照样给玩家推 `onMatched`，而 `lookup` 每次都返回 nil，`game.cmd` 变成静默空操作。改成返回 `error`（`fmt.Errorf`），让 match 走它已有的失败日志分支。
+
 - [ ] **Step 1: 写失败的测试**
 
 创建 `joltgo/match/match_test.go`。`Component` 依赖 pitaya 的 `Pitaya` 接口，无法直接构造，所以把「回局查询的判定」抽成不依赖 app 的纯函数 `firstFound` 来测：
