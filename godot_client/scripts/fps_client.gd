@@ -8,8 +8,9 @@ extends Node
 ##   - Data 帧内是 message 编码：flag 字节（type<<1）+ 1 字节 route 长度 + route
 ##     字符串 + payload（Notify 无 id；Push 无 id）
 ##   - payload 用 **protobuf** 序列化（schema 见 joltgo/game/protos/game.proto）：
-##     上行 match.join（JoinMsg）/ game.input / game.shoot / game.reset；
-##     下行 onMatched（MatchResult）/ onSnapshot（Snapshot，players 数组）
+##     上行 match.join（JoinMsg，带持久化 token）/ game.cmd（CommandMsg，一帧一条）/
+##     game.resync（空，请求全量）；
+##     下行 onMatched（MatchResult）/ onFrame（Frame，实体-属性增量）
 ##   - 握手：连接后发 Handshake{json} → 收 Handshake 响应 → 发 HandshakeAck →
 ##     发 match.join 进入匹配，收到 onMatched 后进入对局
 ##   - 心跳：按固定间隔发 Heartbeat 空帧，防止服务端超时踢人
@@ -18,9 +19,9 @@ extends Node
 ## 接收看门狗——半开连接（对端崩溃不发 FIN、路由丢包、休眠唤醒）不会让
 ## WebSocketPeer 进入 CLOSED，此时强制重建连接，避免画面永久冻结。
 
-signal state_received(state: Dictionary)   # 服务端推送的状态快照（players 数组）
-signal matched_received(result: Dictionary) # 匹配成功结果（player_idx/match_id/game_server_id）
-signal connection_changed(connected: bool) # 连接状态变化
+signal frame_received(frame: Dictionary)   # 服务端推送的同步帧（增量或全量）
+signal matched_received(result: Dictionary)
+signal connection_changed(connected: bool)
 
 const WS_URL := "ws://localhost:8080/"
 const RETRY_SECS := 1.0
@@ -42,6 +43,8 @@ const WIRE_VARINT := 0
 const WIRE_FIXED32 := 5
 const WIRE_LEN := 2
 
+const TOKEN_PATH := "user://client_id.txt"
+
 var _ws := WebSocketPeer.new()
 var _retry_at := 0.0
 var _last_recv := 0.0    # 最近一次收到数据的时间戳（秒）
@@ -49,9 +52,39 @@ var _last_beat := 0.0    # 最近一次发心跳的时间戳（秒）
 var _handshaken := false # 是否已完成握手（连接后置 false，收到握手响应后置 true）
 var _matched := false    # 是否已匹配进入对局（匹配前无快照流，看门狗不生效）
 var connected := false
+var client_token := ""
 
 func _ready() -> void:
+	client_token = _load_or_create_token()
 	_ws.connect_to_url(WS_URL)
+
+## _load_or_create_token 读取持久化的客户端身份；首次运行生成一个 UUID 并落盘。
+## 服务端把它当会话 UID，重连时据此找回原来的对局实例。
+func _load_or_create_token() -> String:
+	if FileAccess.file_exists(TOKEN_PATH):
+		var f := FileAccess.open(TOKEN_PATH, FileAccess.READ)
+		if f != null:
+			var t := f.get_as_text().strip_edges()
+			if t != "":
+				return t
+	var t := _uuid4()
+	var f := FileAccess.open(TOKEN_PATH, FileAccess.WRITE)
+	if f != null:
+		f.store_string(t)
+	return t
+
+## _uuid4 生成一个 RFC 4122 v4 UUID 字符串。
+func _uuid4() -> String:
+	var b := PackedByteArray()
+	for i in 16:
+		b.append(randi() & 0xFF)
+	b[6] = (b[6] & 0x0F) | 0x40
+	b[8] = (b[8] & 0x3F) | 0x80
+	var hex := b.hex_encode()
+	return "%s-%s-%s-%s-%s" % [
+		hex.substr(0, 8), hex.substr(8, 4), hex.substr(12, 4),
+		hex.substr(16, 4), hex.substr(20, 12),
+	]
 
 func _process(_delta: float) -> void:
 	var now := Time.get_ticks_msec() / 1000.0
@@ -99,45 +132,37 @@ func _force_reconnect() -> void:
 
 # ---- 上行：业务接口（main.gd 调用） ----
 
+## JoinMsg：token = 字段 1（string）。
 func send_match_join() -> void:
-	# JoinMsg 空消息：payload 空。route 三段式 serverType.service.method。
-	_send_notify("match.match.join", PackedByteArray())
+	var payload := _tag_len(1, client_token.to_utf8_buffer())
+	_send_notify("match.match.join", payload)
 
-func send_input(move: Vector2, yaw: float, jump: bool) -> void:
-	_send_notify("game.game.input", _encode_input(move, yaw, jump))
-
-func send_shoot(origin: Vector3, dir: Vector3) -> void:
-	_send_notify("game.game.shoot", _encode_shoot(origin, dir))
-
-func send_reset() -> void:
-	# Reset handler 无入参，payload 为空。
-	_send_notify("game.game.reset", PackedByteArray())
-
-# ---- protobuf 上行编码（客户端 → 服务端） ----
-
-## InputMsg：move = 字段1（packed float[2]），jump = 字段2（bool，true 才发），
-## yaw = 字段3（fixed32，水平朝向弧度）。
-func _encode_input(move: Vector2, yaw: float, jump: bool) -> PackedByteArray:
-	var out := _packed_floats(1, [move.x, move.y])
+## CommandMsg：把一帧的上行命令合并成一条消息发送（帧是最小发送单位）。
+func send_command(move: Vector2, yaw: float, jump: bool, shoot: bool,
+		origin: Vector3, dir: Vector3, reset: bool) -> void:
+	var msg := _packed_floats(1, [move.x, move.y])
+	msg.append_array(_field_fixed32(2, yaw))
 	if jump:
-		out.append_array(_field_varint(2, 1))
-	out.append_array(_field_fixed32(3, yaw))
-	return out
+		msg.append_array(_field_varint(3, 1))
+	if shoot:
+		msg.append_array(_field_varint(4, 1))
+		msg.append_array(_packed_floats(5, [origin.x, origin.y, origin.z]))
+		msg.append_array(_packed_floats(6, [dir.x, dir.y, dir.z]))
+	if reset:
+		msg.append_array(_field_varint(7, 1))
+	_send_notify("game.game.cmd", msg)
 
-## ShootMsg：origin = 字段1（packed float[3]），dir = 字段2（packed float[3]）。
-func _encode_shoot(origin: Vector3, dir: Vector3) -> PackedByteArray:
-	var out := _packed_floats(1, [origin.x, origin.y, origin.z])
-	out.append_array(_packed_floats(2, [dir.x, dir.y, dir.z]))
-	return out
+## 请求服务端下一帧下发全量（full 帧自带 schema）。收到 full 之前忽略一切增量。
+func send_resync() -> void:
+	_send_notify("game.game.resync", PackedByteArray())
 
 # ---- protobuf 下行解码（服务端 → 客户端） ----
 
-## Snapshot 解码：还原成 main.gd 消费的 Dictionary（players 是按槽位 0/1 的数组）。
-func _decode_snapshot(buf: PackedByteArray) -> Dictionary:
-	var d := {
-		"bodies": [], "resources": [], "players": [],
-		"step": 0, "score": 0, "wave": 0, "gold": 0,
-	}
+## Frame 解码：{step, full, schema:{fields:[{id,name,kind}], version}, entities:[...]}。
+## 每条 EntityDelta 是 {id, destroy, removed:[], set:[{id, f:[], i, b, s}]}，
+## 原样交给 WorldStore.apply_frame 解释 —— 协议层不理解属性语义。
+func _decode_frame(buf: PackedByteArray) -> Dictionary:
+	var d := {"step": 0, "full": false, "schema": {"fields": [], "version": 0}, "entities": []}
 	var i := 0
 	while i < buf.size():
 		var tag: Array = _read_varint(buf, i)
@@ -148,12 +173,9 @@ func _decode_snapshot(buf: PackedByteArray) -> Dictionary:
 			WIRE_VARINT:
 				var r: Array = _read_varint(buf, i)
 				i = int(r[1])
-				var v: int = int(r[0])
 				match field:
-					4: d["step"] = v
-					5: d["score"] = v
-					6: d["wave"] = v
-					7: d["gold"] = v
+					1: d["step"] = int(r[0])
+					2: d["full"] = int(r[0]) != 0
 			WIRE_LEN:
 				var rl: Array = _read_varint(buf, i)
 				i = int(rl[1])
@@ -161,12 +183,140 @@ func _decode_snapshot(buf: PackedByteArray) -> Dictionary:
 				var sub: PackedByteArray = buf.slice(i, i + n)
 				i += n
 				match field:
-					1: d["bodies"].append(_decode_body(sub))
-					2: d["resources"].append(_decode_resource(sub))
-					3: d["players"].append(_decode_player(sub))
+					3: d["entities"].append(_decode_entity_delta(sub))
+					4: d["schema"] = _decode_schema(sub)
 			_:
-				break  # 未知字段/wire，跳过（不期望出现）
+				break
 	return d
+
+## Schema：fields（字段 1，repeated SchemaField）+ version（字段 2，varint）。
+func _decode_schema(buf: PackedByteArray) -> Dictionary:
+	var d := {"fields": [], "version": 0}
+	var i := 0
+	while i < buf.size():
+		var tag: Array = _read_varint(buf, i)
+		i = int(tag[1])
+		var field: int = int(tag[0]) >> 3
+		var wire: int = int(tag[0]) & 0x07
+		match wire:
+			WIRE_VARINT:
+				var r: Array = _read_varint(buf, i)
+				i = int(r[1])
+				if field == 2:
+					d["version"] = int(r[0])
+			WIRE_LEN:
+				var rl: Array = _read_varint(buf, i)
+				i = int(rl[1])
+				var n: int = int(rl[0])
+				var sub: PackedByteArray = buf.slice(i, i + n)
+				i += n
+				if field == 1:
+					d["fields"].append(_decode_schema_field(sub))
+			_:
+				break
+	return d
+
+## SchemaField：id（1，varint）/ name（2，string）/ kind（3，varint）。
+func _decode_schema_field(buf: PackedByteArray) -> Dictionary:
+	var d := {"id": 0, "name": "", "kind": 0}
+	var i := 0
+	while i < buf.size():
+		var tag: Array = _read_varint(buf, i)
+		i = int(tag[1])
+		var field: int = int(tag[0]) >> 3
+		var wire: int = int(tag[0]) & 0x07
+		match wire:
+			WIRE_VARINT:
+				var r: Array = _read_varint(buf, i)
+				i = int(r[1])
+				match field:
+					1: d["id"] = int(r[0])
+					3: d["kind"] = int(r[0])
+			WIRE_LEN:
+				var rl: Array = _read_varint(buf, i)
+				i = int(rl[1])
+				var n: int = int(rl[0])
+				var sub: PackedByteArray = buf.slice(i, i + n)
+				i += n
+				if field == 2:
+					d["name"] = sub.get_string_from_utf8()
+			_:
+				break
+	return d
+
+## AttrValue：id（1）/ f（2，packed floats）/ i（3，varint）/ b（4，varint）/ s（5，string）。
+func _decode_attr_value(buf: PackedByteArray) -> Dictionary:
+	var d := {"id": 0, "f": [], "i": 0, "b": false, "s": ""}
+	var i := 0
+	while i < buf.size():
+		var tag: Array = _read_varint(buf, i)
+		i = int(tag[1])
+		var field: int = int(tag[0]) >> 3
+		var wire: int = int(tag[0]) & 0x07
+		match wire:
+			WIRE_VARINT:
+				var r: Array = _read_varint(buf, i)
+				i = int(r[1])
+				match field:
+					1: d["id"] = int(r[0])
+					3: d["i"] = int(r[0])
+					4: d["b"] = int(r[0]) != 0
+			WIRE_FIXED32:
+				if field == 2:
+					d["f"].append(buf.slice(i, i + 4).to_float32_array()[0])
+				i += 4
+			WIRE_LEN:
+				var rl: Array = _read_varint(buf, i)
+				i = int(rl[1])
+				var n: int = int(rl[0])
+				var sub: PackedByteArray = buf.slice(i, i + n)
+				i += n
+				match field:
+					2: d["f"].append_array(_decode_floats(sub))
+					5: d["s"] = sub.get_string_from_utf8()
+			_:
+				break
+	return d
+
+## EntityDelta：id（1）/ destroy（2）/ removed（3，packed varint）/ set（4，repeated AttrValue）。
+func _decode_entity_delta(buf: PackedByteArray) -> Dictionary:
+	var d := {"id": 0, "destroy": false, "removed": [], "set": []}
+	var i := 0
+	while i < buf.size():
+		var tag: Array = _read_varint(buf, i)
+		i = int(tag[1])
+		var field: int = int(tag[0]) >> 3
+		var wire: int = int(tag[0]) & 0x07
+		match wire:
+			WIRE_VARINT:
+				var r: Array = _read_varint(buf, i)
+				i = int(r[1])
+				match field:
+					1: d["id"] = int(r[0])
+					2: d["destroy"] = int(r[0]) != 0
+					3: d["removed"].append(int(r[0]))
+			WIRE_LEN:
+				var rl: Array = _read_varint(buf, i)
+				i = int(rl[1])
+				var n: int = int(rl[0])
+				var sub: PackedByteArray = buf.slice(i, i + n)
+				i += n
+				match field:
+					3: d["removed"].append_array(_decode_varints(sub))
+					4: d["set"].append(_decode_attr_value(sub))
+			_:
+				break
+	return d
+
+## packed repeated varint（proto3 对 repeated uint32 的默认编码）。
+func _decode_varints(bytes: PackedByteArray) -> Array:
+	var out: Array = []
+	var i := 0
+	while i < bytes.size():
+		var r: Array = _read_varint(bytes, i)
+		i = int(r[1])
+		out.append(int(r[0]))
+	return out
 
 ## MatchResult 解码：match_id（字段1 string）/ game_server_id（字段2 string）/
 ## player_idx（字段3 varint）。
@@ -193,104 +343,6 @@ func _decode_match_result(buf: PackedByteArray) -> Dictionary:
 				match field:
 					1: d["match_id"] = s
 					2: d["game_server_id"] = s
-			_:
-				break
-	return d
-
-func _decode_body(buf: PackedByteArray) -> Dictionary:
-	var d := {
-		"id": 0, "type": 0, "static": false, "target": false, "enemy": false,
-		"projectile": false, "pos": [0.0, 0.0, 0.0], "quat": [0.0, 0.0, 0.0, 1.0],
-		"size": [0.0, 0.0, 0.0], "health": 0.0, "active": false, "mat": 0,
-	}
-	var i := 0
-	while i < buf.size():
-		var tag: Array = _read_varint(buf, i)
-		i = int(tag[1])
-		var field: int = int(tag[0]) >> 3
-		var wire: int = int(tag[0]) & 0x07
-		match wire:
-			WIRE_VARINT:
-				var r: Array = _read_varint(buf, i)
-				i = int(r[1])
-				var v: int = int(r[0])
-				match field:
-					1: d["id"] = v
-					2: d["type"] = v
-					3: d["static"] = v != 0
-					4: d["target"] = v != 0
-					5: d["enemy"] = v != 0
-					6: d["projectile"] = v != 0
-					11: d["active"] = v != 0
-					12: d["mat"] = v
-			WIRE_LEN:
-				var rl: Array = _read_varint(buf, i)
-				i = int(rl[1])
-				var n: int = int(rl[0])
-				var sub: PackedByteArray = buf.slice(i, i + n)
-				i += n
-				match field:
-					7: d["pos"] = _decode_floats(sub)
-					8: d["quat"] = _decode_floats(sub)
-					9: d["size"] = _decode_floats(sub)
-			WIRE_FIXED32:
-				d["health"] = buf.slice(i, i + 4).to_float32_array()[0]
-				i += 4
-			_:
-				break
-	return d
-
-func _decode_resource(buf: PackedByteArray) -> Dictionary:
-	var d := {"id": 0, "pos": [0.0, 0.0, 0.0], "kind": 0}
-	var i := 0
-	while i < buf.size():
-		var tag: Array = _read_varint(buf, i)
-		i = int(tag[1])
-		var field: int = int(tag[0]) >> 3
-		var wire: int = int(tag[0]) & 0x07
-		match wire:
-			WIRE_VARINT:
-				var r: Array = _read_varint(buf, i)
-				i = int(r[1])
-				var v: int = int(r[0])
-				match field:
-					1: d["id"] = v
-					3: d["kind"] = v
-			WIRE_LEN:
-				var rl: Array = _read_varint(buf, i)
-				i = int(rl[1])
-				var n: int = int(rl[0])
-				var sub: PackedByteArray = buf.slice(i, i + n)
-				i += n
-				if field == 2:
-					d["pos"] = _decode_floats(sub)
-			_:
-				break
-	return d
-
-func _decode_player(buf: PackedByteArray) -> Dictionary:
-	var d := {"pos": [0.0, 0.0, 0.0], "health": 100.0, "yaw": 0.0}
-	var i := 0
-	while i < buf.size():
-		var tag: Array = _read_varint(buf, i)
-		i = int(tag[1])
-		var field: int = int(tag[0]) >> 3
-		var wire: int = int(tag[0]) & 0x07
-		match wire:
-			WIRE_LEN:
-				var rl: Array = _read_varint(buf, i)
-				i = int(rl[1])
-				var n: int = int(rl[0])
-				var sub: PackedByteArray = buf.slice(i, i + n)
-				i += n
-				if field == 1:
-					d["pos"] = _decode_floats(sub)
-			WIRE_FIXED32:
-				var f := buf.slice(i, i + 4).to_float32_array()[0]
-				i += 4
-				match field:
-					2: d["health"] = f
-					3: d["yaw"] = f
 			_:
 				break
 	return d
@@ -357,6 +409,13 @@ func _decode_floats(bytes: PackedByteArray) -> Array:
 		out.append(f)
 	return out
 
+## 一个 LEN 型字段（string / bytes / 嵌入消息）：tag + varint 长度 + 内容。
+func _tag_len(field: int, payload: PackedByteArray) -> PackedByteArray:
+	var out := _varint((field << 3) | WIRE_LEN)
+	out.append_array(_varint(payload.size()))
+	out.append_array(payload)
+	return out
+
 # ---- 帧 / 消息编解码 ----
 
 ## 拼一帧：1 字节 type + 3 字节大端长度 + data。
@@ -411,8 +470,9 @@ func _on_handshake(data: PackedByteArray) -> void:
 	_send_frame(TYPE_HANDSHAKE_ACK, JSON.stringify({
 		"sys": {}, "user": {},
 	}).to_utf8_buffer())
-	# 进入匹配队列：match 服务配对后推 onMatched（JoinMsg 空消息，payload 空）。
-	_send_notify("match.match.join", PackedByteArray())
+	# 进入匹配队列：match 服务配对后推 onMatched。必须带持久化 token —— 服务端把它
+	# 当会话 UID，重连时才能走 game.rejoin 找回原来的对局实例。
+	send_match_join()
 
 ## 解析 Data 帧内的 message：flag 得类型，Push 读 route + protobuf payload。
 func _on_data(data: PackedByteArray) -> void:
@@ -431,5 +491,5 @@ func _on_data(data: PackedByteArray) -> void:
 		"onMatched":
 			_matched = true
 			matched_received.emit(_decode_match_result(payload))
-		"onSnapshot":
-			state_received.emit(_decode_snapshot(payload))
+		"onFrame":
+			frame_received.emit(_decode_frame(payload))
