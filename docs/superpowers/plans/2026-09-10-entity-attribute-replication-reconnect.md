@@ -56,7 +56,7 @@ Task 1–6 是服务端复制核心，Task 7–10 是重连链路，Task 11–13
 | `joltgo/sim/simulation.go` | 持有 `rep *replication.Store` 与单例实体；删除 `Snapshot()` |
 | `joltgo/sim/systems.go` | 各变更点加 `rep.Set` |
 | `joltgo/sim/sim_test.go` | 接管 `State` 类型与 `snapshotWorld` 构造器；`s.Snapshot()` → `snapshotWorld(s)` |
-| `joltgo/game/protos/game.proto` | 删 `Snapshot`/`BodyInfo`/`ResourceInfo`/`PlayerState`/`InputMsg`/`ShootMsg`；加 `Frame` 族、`CommandMsg`、`RejoinMsg`/`RejoinReply`；`JoinMsg` 加 `token` |
+| `joltgo/game/protos/game.proto` | 删 `Snapshot`/`BodyInfo`/`ResourceInfo`/`PlayerState`；加 `Frame` 族、`CommandMsg`、`RejoinMsg`/`RejoinReply`；`JoinMsg` 加 `token`。`InputMsg`/`ShootMsg` 留到 Task 7 删 |
 | `joltgo/game/component.go` | `toSnapshot` → `toFrame`；`Input`/`Shoot`/`Reset` → `Cmd`；新增 `Rejoin`/`Resync` |
 | `joltgo/game/instance.go` | `broadcast` → `Drain`/`Full`；`pendingFull`；`RequestFull`；空闲回收 |
 | `joltgo/match/match.go` | `join` 用 token 当 uid；`tryRejoin` fan-out |
@@ -1979,7 +1979,13 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 - [ ] **Step 1: 改 proto**
 
-把 `joltgo/game/protos/game.proto` 里 `BodyInfo` / `ResourceInfo` / `PlayerState` / `Snapshot` / `InputMsg` / `ShootMsg` 全部删除，`JoinMsg` 加 token，新增下列消息。文件头部的注释块同步改写：
+把 `joltgo/game/protos/game.proto` 里 `BodyInfo` / `ResourceInfo` / `PlayerState` / `Snapshot` 四个**快照**消息全部删除，新增 `Schema` / `SchemaField` / `AttrValue` / `EntityDelta` / `Frame`。
+
+> **本步还要一并加上** `CommandMsg` / `RejoinMsg` / `RejoinReply`，并给 `JoinMsg` 加 `token` 字段 —— 它们分别由 Task 7/8 使用，先定义好可以少改一次 proto、少重新生成一次。
+>
+> **但本步不要删 `InputMsg` / `ShootMsg`。** `game.Component` 的 `Input` / `Shoot` handler 还在用它们，删了直接编译不过；Task 7 把三个 handler 合并成 `Cmd` 时再删这两个消息。
+
+文件头部的注释按**本步交付后的状态**改写（Task 7/8 落地时各自再补上 `game.cmd` / `game.resync` / `game.rejoin` 那几行）：
 
 ```proto
 // 游戏协议消息（wire 契约）。gate / match / game 三服务与 Godot 客户端都遵守：
