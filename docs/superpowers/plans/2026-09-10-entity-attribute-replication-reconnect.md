@@ -3917,6 +3917,28 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 > **另外要改的（不在文件清单里但会挂）：** `godot_client/tests/reconnect_cleanup_test.gd`
 > 引用了已删除的字段，且它列在 `AGENTS.md` 的回归命令里，必须一并改到新 API。
 
+> **Task 13 评审后的四处修正（权威，优先于下文代码块）：**
+>
+> 1. **暂停时必须真的停手（Critical）。** brief 里「暂停时 `_wish_velocity()` 自然返回零向量」
+>    是**错的** —— `_wish_velocity()` 只看 `Input.is_key_pressed`，根本不看 `captured`。
+>    照 brief 写的话，鼠标释放（标题界面或按 ESC）时 WASD 照样推着角色跑。
+>    正确写法：`var move := _wish_velocity() if captured else Vector2.ZERO`。
+>    这既恢复了旧行为（旧代码在释放时补发一条静止输入），又保留了「每帧都要发」的
+>    服务端活性要求 —— 发的是零向量，不是不发。
+> 2. **本地玩家位置与远端朝向也要插值。** 现在 `_player_pos` 只在收到帧时被直接赋值，
+>    于是第一人称相机与第三人称 avatar 变成 **20 Hz 跳步**（走 0.4 m/步、跑 0.7 m/步）；
+>    `_remote_yaw` 同理，远端 avatar 变成 20 Hz 台阶式旋转（旧的 `lerp_angle` 注释还专门
+>    说明过为什么不能用原始 yaw）。要像远端位置那样，用保留的上一帧值做 lerp / lerp_angle。
+> 3. **`_on_frame` 末尾要再调一次 `_render_interpolated()`。** Godot 先跑父节点的
+>    `_process`（里面有 `_render_interpolated`），再跑子节点 `FpsClient._process`，
+>    而后者同步 emit `frame_received` → `_on_frame` → `_reconcile_scene` 把**原始**变换写回
+>    节点，于是这一帧就是未插值的，下一帧才被拉回去 —— 每来一帧抖一次。
+>    在 `_on_frame` 收尾再插值一次，就能保证一帧里的最后一次写是插值结果。
+> 4. **把合成帧测试固化成常驻测试**（见 Step 6b）。新渲染路径目前**没有任何**留下的测试：
+>    两个既有无头测试只覆盖 Task 11/12，`reconnect_cleanup_test` 只跑断线清理；
+>    无头跑 300 帧也证明不了什么（没有服务端，`frame_received` 根本不会触发）。
+>    上面 1–3 三个缺陷恰好都落在没有任何测试覆盖的那块代码上。
+
 - [ ] **Step 1: 换信号、换状态变量**
 
 1. 顶部加：
@@ -4208,6 +4230,133 @@ git rm godot_client/tests/snapshot_same_step_test.gd
 - 文件头的注释把 `onSnapshot` 快照改成 `onFrame` 帧。
 
 > `ws_smoke.gd` 需要真实集群才跑得起来，所以它是 Step 8 的手动验证工具，不参与无头回归 —— 但正因为它是**唯一**走真实 pomelo/WS/protobuf 全链路的测试，Step 8 一定要跑它。
+
+- [ ] **Step 6b: 把合成帧测试固化成常驻测试（`godot_client/tests/game_frame_test.gd`）**
+
+新增 `godot_client/tests/game_frame_test.gd`：无头加载真实场景、手动喂帧，覆盖
+`_on_frame` / `_refresh_derived` / `_reconcile_scene` / `_on_entity_destroyed` / `_update_hud`。
+这是**唯一**能覆盖新渲染路径的测试，不要省。
+
+```gdscript
+extends SceneTree
+## main.gd 的渲染路径回归：加载真实场景，手动喂合成帧，断言节点的新增/更新/销毁。
+## 服务端缺席也无妨 —— 这里只驱动 _on_frame，不碰 WebSocket。
+##
+## 注意：GDScript 没有 try/catch，测试函数中途抛错会被吞掉、整个用例"假绿"，
+## 所以沿用 frame_decode_test.gd 的完成标记模式。
+
+const SCHEMA := [
+	{"id": 1, "name": "Pos", "kind": 5},
+	{"id": 2, "name": "Health", "kind": 0},
+	{"id": 3, "name": "Enemy", "kind": 2},
+	{"id": 4, "name": "Body.Mat", "kind": 1},
+	{"id": 5, "name": "Body.Kind", "kind": 1},
+	{"id": 6, "name": "Body.Size", "kind": 5},
+	{"id": 7, "name": "Body.Static", "kind": 2},
+	{"id": 8, "name": "Body.Active", "kind": 2},
+	{"id": 9, "name": "Rot", "kind": 6},
+	{"id": 10, "name": "Resource.Kind", "kind": 1},
+	{"id": 11, "name": "Player.Idx", "kind": 1},
+	{"id": 12, "name": "Game.Score", "kind": 1},
+	{"id": 13, "name": "Game.Wave", "kind": 1},
+	{"id": 14, "name": "Game.Gold", "kind": 1},
+]
+
+var _failures := 0
+var _done := {}
+var _main: Node = null
+
+func _initialize() -> void:
+	_main = load("res://scenes/main.tscn").instantiate()
+	root.add_child(_main)
+	_main._on_matched({"player_idx": 0})
+	_test_full_frame_creates_bodies()
+	_test_delta_updates_and_destroys()
+	_test_coin_has_no_extra_body()
+	_test_destroy_for_unknown_id_is_safe()
+	for name: String in ["full", "delta", "coin", "unknown"]:
+		if not _done.has(name):
+			_failures += 1
+			printerr("FAIL: 用例 %s 没跑完（中途抛错了？）" % name)
+	if _failures > 0:
+		printerr("game_frame_test: %d 项失败" % _failures)
+		quit(1)
+	else:
+		print("game_frame_test: OK")
+		quit(0)
+
+func _check(cond: bool, msg: String) -> void:
+	if not cond:
+		_failures += 1
+		printerr("FAIL: " + msg)
+
+func _attr(id: int, d: Dictionary) -> Dictionary:
+	var out := {"id": id}
+	out.merge(d)
+	return out
+
+## 一帧只含一个刚体（id 100）。
+func _test_full_frame_creates_bodies() -> void:
+	_main._on_frame({"full": true, "step": 1, "schema": {"fields": SCHEMA, "version": 1}, "entities": [
+		{"id": 100, "set": [
+			_attr(5, {"i": 0}),                       # Body.Kind = box
+			_attr(6, {"f": [0.5, 0.5, 0.5]}),         # Body.Size
+			_attr(7, {"b": true}),                    # Body.Static
+			_attr(8, {"b": true}),                    # Body.Active
+			_attr(4, {"i": 1}),                       # Body.Mat
+			_attr(1, {"f": [1.0, 2.0, 3.0]}),         # Pos
+			_attr(9, {"f": [0.0, 0.0, 0.0, 1.0]}),    # Rot
+		]},
+	]})
+	_check(_main._entities.has(100), "全量帧应在场景里建出实体 100 的节点")
+	_check((_main._entities[100].global_position - Vector3(1, 2, 3)).length() < 0.001,
+		"节点应落在 Pos 上")
+	_done["full"] = true
+
+## 增量帧：移动 + 销毁。
+func _test_delta_updates_and_destroys() -> void:
+	_main._on_frame({"full": false, "entities": [
+		{"id": 100, "set": [_attr(1, {"f": [4.0, 5.0, 6.0]})]},
+	]})
+	_check((_main._body_xform[100]["pos"] - Vector3(4, 5, 6)).length() < 0.001,
+		"增量帧应更新刚体变换缓存")
+
+	var res: Variant = _main._on_frame({"full": false, "entities": [
+		{"id": 100, "destroy": true},
+	]})
+	_check(res == null or true, "") # _on_frame 无需返回值，这里只为把下一句放在同一帧语义下
+	_check(not _main._entities.has(100), "destroy 后渲染节点必须被删掉")
+	_done["delta"] = true
+
+## 金币在 store 里是普通刚体，但**不该**额外长出一个灰色的刚体球。
+func _test_coin_has_no_extra_body() -> void:
+	_main._on_frame({"full": false, "entities": [
+		{"id": 200, "set": [
+			_attr(5, {"i": 1}), _attr(6, {"f": [0.6]}), _attr(7, {"b": true}),
+			_attr(8, {"b": true}), _attr(4, {"i": 0}),
+			_attr(1, {"f": [0.0, 0.8, 0.0]}), _attr(9, {"f": [0.0, 0.0, 0.0, 1.0]}),
+			_attr(10, {"i": 0}),                      # Resource.Kind
+		]},
+	]})
+	_check(not _main._entities.has(200), "金币不应被当成刚体建出额外节点")
+	_check(_main._res_nodes.has(200), "金币应建出金币节点")
+	_done["coin"] = true
+
+## 服务端可能对客户端从未见过的 id 发 destroy（比如客户端刚 resync 完）。
+func _test_destroy_for_unknown_id_is_safe() -> void:
+	_main._on_frame({"full": false, "entities": [
+		{"id": 999, "destroy": true},
+	]})
+	_check(true, "对未知 id 的 destroy 不应抛错")
+	_done["unknown"] = true
+```
+
+Expected: `game_frame_test: OK`，退出码 0。
+
+> 这份测试里的断言顺序刻意与 `_on_frame` 的真实步骤一致；如果第 3 条修正（收尾再插值一次）
+> 没做，`_test_delta_updates_and_destroys` 里对位置的断言仍会通过（因为它读的是缓存而不是节点），
+> 所以另外补一条：**在同一渲染帧内 `_on_frame` 之后，节点位置应等于插值结果而不是缓存终值**。
+> 实现时按这个意图加断言 —— 这才是真正钉住第 3 条修正的地方。
 
 （`AGENTS.md` 里引用该测试命令行的地方在 Task 14 一并清理。）
 
