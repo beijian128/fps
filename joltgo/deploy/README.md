@@ -11,13 +11,15 @@ pitaya Cluster 模式的硬依赖（etcd 做服务发现，NATS 做 RPC）。生
 ## 一键启动（PowerShell）
 
 ```powershell
-.\start-infra.ps1          # 后台起 etcd + nats
-.\stop-infra.ps1           # 全部停掉
+.\start-infra.ps1          # 起 etcd + nats（先停旧 etcd 并清空 etcd-data；nats 已在跑则沿用）
+.\stop-infra.ps1           # 全部停掉（等到端口真正释放再返回）
 ```
 
-或手动：
+或手动（同样要先清空数据目录，原因见下方「为什么每次启动都清空 etcd-data」）：
 
 ```powershell
+if (Test-Path .\etcd-data) { Remove-Item -Recurse -Force .\etcd-data }   # 需先确认 etcd 没在跑
+
 .\etcd.exe --data-dir .\etcd-data `
   --listen-client-urls http://localhost:2379 `
   --advertise-client-urls http://localhost:2379
@@ -64,5 +66,32 @@ cd joltgo
 .\joltgo.exe -type game    # 游戏逻辑（对局实例）
 ```
 
-每个进程各自注册到 etcd，通过 NATS 互相 RPC。服务发现采用 60s 租约：进程被强杀后
-旧租约要等约 60s 才过期，期间会短暂出现在服务列表里（这是 etcd 语义，不是 bug）。
+每个进程各自注册到 etcd，通过 NATS 互相 RPC。`start-all.ps1` 把三个角色的日志分别写到
+`gate.log` / `match.log` / `game.log` —— **pitaya 的日志走 stderr 而不是 stdout**，所以这三个
+对应的是 `-RedirectStandardError`（stdout 另存为同名的 `*.out.log`，基本为空；两个流不能指向
+同一个文件，各自从头写会互相覆盖）。排查问题时 `tail -f deploy/game.log` 即可；日志是 debug
+级别、涨得很快（几分钟就 ~10 MB）且不轮转，长时间跑记得清一下。
+
+## 为什么每次启动都清空 etcd-data
+
+etcd 的租约倒计时**只在 etcd 进程运行期间走**：重启时它把租约按 checkpoint 恢复到后端里存的
+剩余 TTL，并从「恢复那一刻」重新倒计时，停机时间不计入。隔离实验（deploy 里的 etcd v3.5.14，
+独立端口 + 临时数据目录）实测：
+
+| 时刻 | 事件 | 结果 |
+| --- | --- | --- |
+| 21:46:18 | 写入者进程退出（模拟强杀），租约还剩 18s | 键在，ttl 18s |
+| 21:46:20 | 杀掉 etcd，关闭 66s（远超 18s） | — |
+| 21:47:26 | 重启 etcd | 键**还在**，ttl 被重置为 19s |
+| 21:47:36 | 再杀、关 12s、再启 | 键**还在**，ttl 18s（此时主人已死 78s） |
+| 21:48:17 | 连续运行满一个 TTL | 才真正消失 |
+
+所以「进程被强杀后 ~60s 才过期」只在 **etcd 不重启** 时成立。而 `stop-infra.ps1` →
+`start-all.ps1` 这种整套重启，残留会一直活到 etcd 回来之后再满一个 TTL；在 TTL 内反复重启
+还会反复续命。这是有实际危害的：`match.startMatch` 从 `GetServersByType("game")` 取 map 的
+第一个元素且不校验可达性，选中残留节点时 RPC 失败，而玩家此刻**已经被移出队列**（配对与
+10s 兜底两条路径都是先出队），于是既不在队列里也收不到 `onMatched`，客户端永久卡在匹配等待。
+
+etcd 里只有服务注册这类临时数据，所以本地每次启动直接推倒重来，`start-infra.ps1` 会先停掉
+旧 etcd（不停掉的话新 etcd 会因端口被占而静默退出，清空就白做了）再清目录。生产环境请改用
+另外两条：把心跳 TTL 从默认 60s 调小，并给选节点逻辑加重试与回退（见 `match/match.go`）。

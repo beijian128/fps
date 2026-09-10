@@ -97,10 +97,10 @@ fps/
 - **cgo**：显式 `C.float(...)` / `C.uint32_t(...)` 转换；`physics/` 之外的 Go 代码不出现 `import "C"`。
 - **pitaya**：框架源码内置在 `joltgo/third_party/pitaya/`（`go.mod` 用 `replace` 指向本地目录），不在其上改业务。**Cluster 模式**需本地 etcd（服务发现）+ nats-server（RPC），见 `deploy/`。协议是 pomelo 帧 + **protobuf** payload（不是 raw JSON 文本帧），客户端编解码在 `fps_client.gd`。改动 proto 后重跑 `protoc --go_out` 重新生成 Go 码。
 - **route 三段式**：`server.service.method`（如 `match.match.join`、`game.game.create`）。RPC 调用（`RPCTo`）也必须是三段式，否则报 `no server type chosen for sending RPC`。
-- **etcd 租约 60s**：服务进程被强杀后旧租约要 ~60s 才过期，期间会短暂残留（etcd 语义，不是 bug）；`GetServersByType` 可能返回已死的旧节点，生产要做健康检查/重试。
+- **etcd 租约与残留**：租约只在 etcd 运行期间倒计时，etcd 重启会把上一轮的孤儿租约按 checkpoint 恢复并**重新计时**（v3.5.14 实测：进程已死 + etcd 停机 66s 后重启，注册项仍带 19s TTL 复活；TTL 内反复重启会反复续命）。所以本地 `start-infra.ps1` 每次启动都清空 `etcd-data`（详见 `deploy/README.md`），整套重启后服务列表一定干净；生产则要调小 TTL 并给选节点加健康检查/重试——`GetServersByType` 可能返回已死的旧节点，`match.startMatch` 选中它就会把玩家静默丢出队列。
 - **构建**：Jolt 必须经 CMake `add_subdirectory` 编译（保证 NDEBUG/指令集宏与静态库一致）；UCRT64 与 MINGW64 不能混用；`build.ps1` 硬编码 `C:\msys64`；运行需 `joltgo.exe` 与 `libjolt_c.dll` 同目录。
 - **Godot 4**：材质属性用 `metallic`（不是 Godot 3 的 `metalness`）；命令行运行用 `preload` 而非 `class_name`；typed for 循环需 4.2+。
-- **多进程部署**：单二进制 `joltgo.exe -type gate|match|game` 三角色，先起 etcd+nats（`deploy/start-all.ps1`）。
+- **多进程部署**：单二进制 `joltgo.exe -type gate|match|game` 三角色，先起 etcd+nats（`deploy/start-all.ps1`）；服务日志在 `deploy/gate.log` / `match.log` / `game.log`（pitaya 写 stderr，`*.out.log` 是 stdout 基本为空）。
 - **同步属性（`sim/replicate.go`）**：加同步字段 = `declareAttributes` 加一行 `Declare` + 在每个变更点 `rep.Set`。**属性表必须在 `Simulation.New()` 里一次声明完整**——`Set`/`Remove`/`Get` 遇到未声明属性直接 panic（`Declare` 重复同名也 panic）；客户端在 full 帧里一次拿到完整属性表，之后靠它解码所有增量，所以不能等首次 `Set` 才登记。
 - **就近 `rep.Set` 漏写不会在运行时暴露**：Store 不反查 ECS 世界，漏写只会让客户端**静默停在旧值**（没有报错、没有日志）。唯一能抓住它的是 `sim/replicate_test.go` 的 oracle 测试（`expectedAttrs` 从 ECS 世界独立推期望值，与 store 全量逐项比对）。所以加同步字段时**先补 `rep.Set`、再在 `expectedAttrs` 里补断言**——这是「变更点显式 Set」这套设计的固有代价。
 - **full 帧不得修改增量基线**：`Store.Full()` 刻意不碰 `sent`（已下发基线）——全量是发给**单个**客户端（重连 / resync）的消息，其他在线客户端的基线不受影响；又因为所有 op 携带的是**终值**而非相对增量，无论基线如何，客户端都会收敛到同一状态。
