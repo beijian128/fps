@@ -141,7 +141,10 @@ func processHandlerMessage(
 		return nil, err
 	}
 
-	logger.Debugf("SID=%d, Data=%s", session.ID(), data)
+	// 同 handler_pool.go 里的同名行：**不能**打印 data —— account 的
+	// register/login 载荷里是明文密码、resume 里是 bearer token。本仓库以 vendored
+	// 方式内置 pitaya（见 AGENTS.md），这是对该副本的极少数直接改动之一。
+	logger.Debugf("SID=%d, DataLen=%d", session.ID(), len(data))
 	args := []reflect.Value{handler.Receiver, reflect.ValueOf(ctx)}
 	if arg != nil {
 		args = append(args, reflect.ValueOf(arg))

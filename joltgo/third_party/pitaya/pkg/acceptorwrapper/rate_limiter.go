@@ -83,7 +83,10 @@ func (r *RateLimiter) GetNextMessage() (msg []byte, err error) {
 
 		now := time.Now()
 		if r.shouldRateLimit(now) {
-			logger.Log.Errorf("Data=%s, Error=%s", msg, constants.ErrRateLimitExceeded)
+			// msg 是整条 pomelo 帧，载荷里可能是明文密码（account 的 register/login）
+			// 或 bearer token（resume）。本仓库以 vendored 方式内置 pitaya（见
+			// AGENTS.md），这是对该副本的极少数直接改动之一：只改日志内容。
+			logger.Log.Errorf("DataLen=%d, Error=%s", len(msg), constants.ErrRateLimitExceeded)
 			metrics.ReportExceededRateLimiting(r.reporters)
 			continue
 		}

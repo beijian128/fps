@@ -86,7 +86,14 @@ func (h *HandlerPool) ProcessHandlerMessage(
 		return nil, err
 	}
 
-	logger.Debugf("SID=%d, Data=%s", session.ID(), data)
+	// 本仓库以 vendored 方式内置 pitaya（见 AGENTS.md），这是对该副本的极少数直接
+	// 改动之一，只改日志内容、不碰任何协议行为。
+	//
+	// 这里**不能**打印 data：它是最原始的请求载荷，account 的 register/login 会带着
+	// 明文密码、resume 会带着 bearer token，一旦落到日志里整套凭证设计就作废了
+	// （Redis 里只存 bcrypt 哈希是刻意的，deploy/README.md 又让人 tail -f 这些日志）。
+	// 长度已经够排查「载荷到没到、形状对不对」。
+	logger.Debugf("SID=%d, DataLen=%d", session.ID(), len(data))
 	args := []reflect.Value{handler.Receiver, reflect.ValueOf(ctx)}
 	if arg != nil {
 		args = append(args, reflect.ValueOf(arg))

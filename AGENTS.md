@@ -117,6 +117,11 @@ fps/
 - **C 包装层**：函数 `extern "C"`，只用 C 类型/定长数组/opaque 指针，禁止跨边界传 `std::string`/`vector`/C++ 对象/异常。
 - **cgo**：显式 `C.float(...)` / `C.uint32_t(...)` 转换；`physics/` 之外的 Go 代码不出现 `import "C"`。
 - **pitaya**：框架源码内置在 `joltgo/third_party/pitaya/`（`go.mod` 用 `replace` 指向本地目录），不在其上改业务。**Cluster 模式**需本地 etcd（服务发现）+ nats-server（RPC），共享状态另需 redis-server，见 `deploy/`。协议是 pomelo 帧 + **protobuf** payload（不是 raw JSON 文本帧），客户端编解码在 `fps_client.gd`。改动 proto 后重跑 `protoc --go_out` 重新生成 Go 码。
+  - **⚠️ 本地改动（重新 vendor / 升级 pitaya 时必须重新打上，否则凭证会重新明文进日志）**：上游把**原始请求载荷**打进日志（`logger.Debugf("SID=%d, Data=%s", session.ID(), data)`），而 account 的 register/login 载荷里是**明文密码**、resume 里是 **bearer token**；日志级别又硬编码为 debug（`pkg/logger/logger.go`），`deploy/*.log` 里因此直接躺着玩家密码。已把这三处改为只打**长度**（`DataLen=%d`，保留「载荷到没到、形状对不对」的排查能力，不牺牲 debug 流的其余价值）：
+    - `pkg/service/handler_pool.go`（后端 RPC 的 handler 调用路径）
+    - `pkg/service/util.go`（同一条日志的本地副本）
+    - `pkg/acceptorwrapper/rate_limiter.go`（限流丢弃帧时打整条 pomelo 帧；本项目未启用 acceptor 包装器，属预防）
+    这是**安全脱敏**，不是业务逻辑——该目录仍然不放业务代码。改动只影响日志内容，不影响任何协议行为。
 - **Request/Response vs Notify/Push**：pitaya 靠 handler **有没有返回值**来判定类型（有返回值 = Request，无返回值 = Notify）。
   `account.*` 三条路必须走 Request/Response —— 登录**失败**时会话根本没有 uid，而 NATS 后端推送要求 uid 已绑定
   （`ErrNoUIDBind`），Push 发不出去。这是本项目第一处用 Request/Response 的地方。
