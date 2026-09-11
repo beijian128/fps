@@ -11,10 +11,12 @@ package main
 //
 // 启动顺序：先起 etcd + nats-server + redis-server（见 deploy/），再起四个进程：
 //
-//	joltgo.exe -type gate    -port 8080
+//	joltgo.exe -type gate
 //	joltgo.exe -type account
 //	joltgo.exe -type match
 //	joltgo.exe -type game
+//
+// 只有 -type 与 -redis 两个 flag（gate 的 WS 端口 8080 目前写死在 run 里）。
 //
 // 优雅退出由 pitaya 的 app.Start() 内部处理（SIGINT/SIGTERM → shutdownComponents）。
 

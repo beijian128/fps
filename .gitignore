@@ -21,6 +21,9 @@ joltgo/*.log
 # Local cluster infra data (etcd)
 joltgo/deploy/etcd-data/
 
+# Local cluster infra data (Redis: accounts + credentials -- never wiped, see deploy/README.md)
+joltgo/deploy/redis-data/
+
 # Binaries and build artifacts
 *.exe
 *.dll
