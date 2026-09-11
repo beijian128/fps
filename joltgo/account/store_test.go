@@ -291,3 +291,22 @@ func TestAllowNormalizesUsername(t *testing.T) {
 		t.Fatal("大小写不同不应绕开限流（限流键用规范化用户名）")
 	}
 }
+
+func TestCurrentToken(t *testing.T) {
+	s, _ := newTestStore(t)
+	id := createTestAccount(t, s, "alice", "hunter2")
+	ctx := context.Background()
+
+	// 还没签发过：空串，不是错误。
+	if tok, err := s.CurrentToken(ctx, id); err != nil || tok != "" {
+		t.Fatalf("未签发时应返回空串且无错，得到 %q err=%v", tok, err)
+	}
+
+	issued, err := s.IssueToken(ctx, id)
+	if err != nil {
+		t.Fatalf("IssueToken 报错: %v", err)
+	}
+	if tok, _ := s.CurrentToken(ctx, id); tok != issued {
+		t.Fatalf("应返回当前凭证 %q，得到 %q", issued, tok)
+	}
+}

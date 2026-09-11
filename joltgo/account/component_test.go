@@ -70,6 +70,7 @@ type testEnv struct {
 	online *online.Store
 	app    *fakeApp
 	sess   *fakeSession
+	mr     *miniredis.Miniredis
 }
 
 func newTestComponent(t *testing.T) *testEnv {
@@ -88,6 +89,7 @@ func newTestComponent(t *testing.T) *testEnv {
 		online: onl,
 		app:    app,
 		sess:   sess,
+		mr:     mr,
 	}
 }
 
@@ -308,5 +310,76 @@ func TestLoginReportsBindFailure(t *testing.T) {
 	}
 	if r.Ok || r.Reason != ReasonInternal {
 		t.Fatalf("Bind 失败应回 internal，得到 %+v", r)
+	}
+}
+
+// 同一连接上重复登录必须幂等：不能轮换凭证（客户端正在用它），也不能失败。
+func TestLoginOnAlreadyBoundSessionIsIdempotent(t *testing.T) {
+	env := newTestComponent(t)
+	ctx := context.Background()
+	env.mustRegister(t, "alice", "hunter2")
+
+	before, err := env.store.CurrentToken(ctx, "1")
+	if err != nil || before == "" {
+		t.Fatalf("准备失败: token=%q err=%v", before, err)
+	}
+
+	r, err := env.comp.Login(ctx, &protos.LoginMsg{Username: "alice", Password: "hunter2"})
+	if err != nil || !r.Ok {
+		t.Fatalf("重复登录应幂等成功，得到 %+v err=%v", r, err)
+	}
+	if r.Token != before {
+		t.Fatalf("不能轮换凭证（客户端正拿它连着），得到 %q 期望 %q", r.Token, before)
+	}
+	if _, ok, _ := env.store.ResolveToken(ctx, before); !ok {
+		t.Fatal("原凭证必须仍然有效")
+	}
+}
+
+// 会话绑在别的账号上时登录应被拒，且不能动被登录账号的凭证。
+func TestLoginOnSessionBoundToAnotherAccountFails(t *testing.T) {
+	env := newTestComponent(t)
+	ctx := context.Background()
+	env.mustRegister(t, "alice", "hunter2") // 这个会话绑到 "1"
+
+	env.app.sess = &fakeSession{}         // 换一个未绑定的会话
+	env.mustRegister(t, "bob", "hunter2") // 它绑到 "2"
+
+	before, _ := env.store.CurrentToken(ctx, "1")
+
+	r, err := env.comp.Login(ctx, &protos.LoginMsg{Username: "alice", Password: "hunter2"})
+	if err != nil {
+		t.Fatalf("不该返回 Go error: %v", err)
+	}
+	if r.Ok || r.Reason != ReasonInternal {
+		t.Fatalf("应回 internal，得到 %+v", r)
+	}
+	if after, _ := env.store.CurrentToken(ctx, "1"); after != before {
+		t.Fatal("被拒的登录不能改动 alice 的凭证")
+	}
+}
+
+// 绑定之后再读登记失败时不能踢：读不到完全可能发生在刚绑到「同一个 gate」
+// 之后，此时若把 me 当成空串，oldGate 非空就会去踢，那一脚正好踢掉自己刚
+// 建立的会话 —— 而凭证已经轮换过，客户端连 resume 都回不来。
+func TestLoginDoesNotKickWhenSecondOnlineReadFails(t *testing.T) {
+	env := newTestComponent(t)
+	ctx := context.Background()
+	env.mustRegister(t, "alice", "hunter2")
+
+	if err := env.online.Set(ctx, "1", "gate-A"); err != nil {
+		t.Fatalf("准备 online 失败: %v", err)
+	}
+	// onBind 在第 3 步 Bind 里触发，正好夹在两次 online 读之间：
+	// 让 redis 从这一刻起报错，第 4 步的复读就必然失败。
+	env.app.sess = &fakeSession{onBind: func(string) { env.mr.SetError("boom") }}
+	t.Cleanup(func() { env.mr.SetError("") })
+
+	r, err := env.comp.Login(ctx, &protos.LoginMsg{Username: "alice", Password: "hunter2"})
+	if err != nil || !r.Ok {
+		t.Fatalf("复读失败不该影响登录本身，得到 %+v err=%v", r, err)
+	}
+	if len(env.app.calls) != 0 {
+		t.Fatalf("读不到当前归属时宁可漏踢也不能误踢，得到 %+v", env.app.calls)
 	}
 }

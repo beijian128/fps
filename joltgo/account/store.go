@@ -182,6 +182,21 @@ func (s *Store) ResolveToken(ctx context.Context, token string) (string, bool, e
 	return id, true, nil
 }
 
+// CurrentToken 返回账号当前的凭证（没有则返回空串）。
+//
+// 用于「同一连接上重复登录」的幂等返回：那时会话已经绑定，不能再次轮换 ——
+// 那会把上一次刚签发、客户端正在使用的凭证删掉。
+func (s *Store) CurrentToken(ctx context.Context, accountID string) (string, error) {
+	tok, err := s.rdb.Get(ctx, keySessAcct(accountID)).Result()
+	if err == redis.Nil {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return tok, nil
+}
+
 // RevokeToken 删除凭证（登出）。幂等：凭证不存在也算成功。
 func (s *Store) RevokeToken(ctx context.Context, token string) error {
 	id, err := s.rdb.Get(ctx, keySess(token)).Result()

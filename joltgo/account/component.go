@@ -140,6 +140,31 @@ func (c *Component) Resume(ctx context.Context, msg *protos.ResumeMsg) (*protos.
 // sessionsByUID 逻辑），所以第 4 步只需要处理「旧会话在另一个 gate」的情况 ——
 // 而那一脚绝不会打到自己，顶号竞态因此从设计上消失，不靠自愈。
 func (c *Component) finishLogin(ctx context.Context, accountID, username string) (*protos.LoginReply, error) {
+	// 同一连接上的重复登录（双击、慢响应重试）会走到这里，而此时会话已经绑定过。
+	// pitaya 的 Bind 对已绑定会话返回 ErrSessionAlreadyBound，且凭证轮换发生在
+	// Bind 之前 —— 不挡的话第二次调用会先删掉第一次刚签发、客户端正在用的凭证，
+	// 再回一个失败，客户端手里只剩死凭证，且每次重试都重复这个过程。
+	s := c.app.GetSessionFromCtx(ctx)
+	if cur := s.UID(); cur != "" {
+		if cur != accountID {
+			// 会话绑的是别的账号：客户端状态错乱，返回失败让它重连，
+			// 但绝不能动任何一个账号的凭证。
+			log.Printf("account: session already bound to %q, refusing to bind %q", cur, accountID)
+			return fail(ReasonInternal), nil
+		}
+		token, err := c.store.CurrentToken(ctx, accountID)
+		if err != nil || token == "" {
+			log.Printf("account: current token for %s unavailable: %v", accountID, err)
+			return fail(ReasonInternal), nil
+		}
+		return &protos.LoginReply{
+			Ok:        true,
+			Token:     token,
+			Username:  username,
+			AccountId: accountID,
+		}, nil
+	}
+
 	// 1) 记下这次登录之前，该账号登记的 gate（可能是空 = 没在线）。
 	oldGate, err := c.online.Gate(ctx, accountID)
 	if err != nil {
@@ -156,7 +181,6 @@ func (c *Component) finishLogin(ctx context.Context, accountID, username string)
 	}
 
 	// 3) 绑定会话。未绑定就没有身份，一切后续消息都会被当成未登录。
-	s := c.app.GetSessionFromCtx(ctx)
 	if err := s.Bind(ctx, accountID); err != nil {
 		log.Printf("account: bind session to %s failed: %v", accountID, err)
 		// Bind 失败必须如实回 internal：若报成功，客户端会去发 match.join，
@@ -168,7 +192,13 @@ func (c *Component) finishLogin(ctx context.Context, accountID, username string)
 	//    登记（跨节点 RPC，天然有序），所以这里读到的是本节点。
 	me, err := c.online.Gate(ctx, accountID)
 	if err != nil {
+		// 读不到当前归属就不能踢：把 me 视作 oldGate，让下面的判断退化为「不踢」。
+		// 若让 me 留空，oldGate 非空时就会去踢 —— 而「读不到」完全可能发生在
+		// 刚绑定到同一个 gate 之后，那一脚会踢掉自己刚建立的会话；此时凭证已经
+		// 轮换过，客户端连 resume 都回不来。宁可漏踢（旧连接多活一会儿，
+		// 反正它的凭证已经作废），也不能误踢。
 		log.Printf("account: online re-read for %s failed: %v", accountID, err)
+		me = oldGate
 	}
 	if oldGate != "" && oldGate != me {
 		if err := c.kickOn(ctx, oldGate, accountID); err != nil {
