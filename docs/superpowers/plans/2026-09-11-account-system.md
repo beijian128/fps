@@ -2009,7 +2009,13 @@ func run(svType *string, builder *pitaya.Builder, redisAddr string) error {
 		}
 		// 会话归属：绑定后写 online:{uid} → 本节点，断开时清除。
 		gate.RegisterSessionHooks(builder.SessionPool, app.GetServerID(), online.NewStore(rdb))
-		app.Register(gate.NewSessionComponent(app, builder.SessionPool),
+		// 必须用 RegisterRemote，不能用 Register：match 是用 app.RPCTo 调过来的，
+		// 而 RPCTo 走 RPCType_User → handleRPCUser → remotes 表，那张表**只由
+		// RegisterRemote 填充**。注册成 handler 的话路由在 remotes 里找不到，
+		// match 的 bindgame 会拿 ErrNotFoundCode（见 service/remote.go:246/254）。
+		// 反过来这也正好关掉了攻击面：客户端发的 gate.gate.bindgame 会被路由到
+		// handler 池、找不到而报错，压根到不了这里。
+		app.RegisterRemote(gate.NewSessionComponent(app, builder.SessionPool),
 			component.WithName("gate"),
 			component.WithNameFunc(strings.ToLower),
 		)
