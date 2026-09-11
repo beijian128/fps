@@ -333,13 +333,23 @@ func TestValidateTokenRejectsGarbage(t *testing.T) {
 	bad := []string{
 		"",
 		"short",
-		strings.Repeat("a", 43),           // 合法长度但解码后不是 32 字节
-		"!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!", // 非法字符
+		strings.Repeat("a", 42),                       // 合法 base64url，但解码只有 31 字节
+		strings.Repeat("a", 44),                       // 解码 33 字节
+		strings.Repeat("!", 43),                       // 非法字符
 	}
 	for _, s := range bad {
 		if err := ValidateToken(s); err == nil {
 			t.Fatalf("%q 应被判为非法 token", s)
 		}
+	}
+}
+
+// 边界：43 个 base64url 字符解码正好是 32 字节，必须被接受 ——
+// 别把它写成「非法」用例（那会让上面的测试以错误理由通过）。
+func TestValidateTokenAcceptsExactly32Bytes(t *testing.T) {
+	s := strings.Repeat("a", 43)
+	if err := ValidateToken(s); err != nil {
+		t.Fatalf("43 字符 = 32 字节，应是合法形态，得到 %v", err)
 	}
 }
 
