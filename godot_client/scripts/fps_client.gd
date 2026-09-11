@@ -12,7 +12,8 @@ extends Node
 ##     game.resync（空，请求全量）；
 ##     下行 onMatched（MatchResult）/ onFrame（Frame，实体-属性增量）
 ##   - 握手：连接后发 Handshake{json} → 收 Handshake 响应 → 发 HandshakeAck →
-##     发 match.join 进入匹配，收到 onMatched 后进入对局
+##     有本地凭证则发 account.resume，否则等 UI 登录/注册；认证成功后才发
+##     match.join 进入匹配，收到 onMatched 后进入对局
 ##   - 心跳：按固定间隔发 Heartbeat 空帧，防止服务端超时踢人
 ##
 ## 活性保障：服务端每 tick（50 ms）都推送同步帧，因此用"N 秒收不到任何数据"作为
@@ -45,7 +46,8 @@ const WIRE_VARINT := 0
 const WIRE_FIXED32 := 5
 const WIRE_LEN := 2
 
-const TOKEN_PATH := "user://client_id.txt"
+const TOKEN_PATH := "user://auth_token.txt"      # 服务端签发的会话凭证
+const USERNAME_PATH := "user://last_username.txt" # 上次登录的用户名，用于预填
 
 var _ws := WebSocketPeer.new()
 var _retry_at := 0.0
@@ -55,40 +57,48 @@ var _handshaken := false # 是否已完成握手（连接后置 false，收到�
 var _matched := false    # 是否已匹配进入对局（匹配前无帧流，看门狗不生效）
 var connected := false
 var client_token := ""
+var last_username := ""
 var _pending := {}    # mid -> {"route": String, "at": float}，用于响应关联与超时
 var _next_mid := 1
 
 func _ready() -> void:
-	client_token = _load_or_create_token()
+	client_token = _load_token()
+	last_username = _load_username()
 	_ws.connect_to_url(WS_URL)
 
-## _load_or_create_token 读取持久化的客户端身份；首次运行生成一个 UUID 并落盘。
-## 服务端把它当会话 UID，重连时据此找回原来的对局实例。
-func _load_or_create_token() -> String:
-	if FileAccess.file_exists(TOKEN_PATH):
-		var f := FileAccess.open(TOKEN_PATH, FileAccess.READ)
-		if f != null:
-			var t := f.get_as_text().strip_edges()
-			if t != "":
-				return t
-	var t := _uuid4()
-	var f := FileAccess.open(TOKEN_PATH, FileAccess.WRITE)
-	if f != null:
-		f.store_string(t)
-	return t
+## _load_token 读本地持久化的凭证。空串表示没登录过（要显示登录面板）。
+##
+## 不复用旧的 client_id.txt：那里面是客户端自己生成的 UUID，服务端不认，
+## 拿它去 resume 必然失败 —— 不如不认，直接走登录面板。
+func _load_token() -> String:
+	if not FileAccess.file_exists(TOKEN_PATH):
+		return ""
+	var f := FileAccess.open(TOKEN_PATH, FileAccess.READ)
+	if f == null:
+		return ""
+	return f.get_as_text().strip_edges()
 
-## _uuid4 生成一个 RFC 4122 v4 UUID 字符串。
-func _uuid4() -> String:
-	var b := PackedByteArray()
-	for i in 16:
-		b.append(randi() & 0xFF)
-	b[6] = (b[6] & 0x0F) | 0x40
-	b[8] = (b[8] & 0x3F) | 0x80
-	var hex := b.hex_encode()
-	return "%s-%s-%s-%s-%s" % [
-		hex.substr(0, 8), hex.substr(8, 4), hex.substr(12, 4),
-		hex.substr(16, 4), hex.substr(20, 12),
-	]
+## _save_token 落盘凭证与用户名。写失败不致命（下次仍要重新登录）。
+func _save_token(token: String, username: String) -> void:
+	if token != "":
+		client_token = token
+		var f := FileAccess.open(TOKEN_PATH, FileAccess.WRITE)
+		if f != null:
+			f.store_string(token)
+	if username != "":
+		last_username = username
+		var g := FileAccess.open(USERNAME_PATH, FileAccess.WRITE)
+		if g != null:
+			g.store_string(username)
+
+## _load_username 读上次登录的用户名（预填输入框用）。
+func _load_username() -> String:
+	if not FileAccess.file_exists(USERNAME_PATH):
+		return ""
+	var f := FileAccess.open(USERNAME_PATH, FileAccess.READ)
+	if f == null:
+		return ""
+	return f.get_as_text().strip_edges()
 
 func _process(_delta: float) -> void:
 	var now := Time.get_ticks_msec() / 1000.0
@@ -109,6 +119,11 @@ func _process(_delta: float) -> void:
 			if _handshaken and now - _last_beat >= HEARTBEAT_EVERY:
 				_last_beat = now
 				_send_frame(TYPE_HEARTBEAT, PackedByteArray())
+			# 登录类请求超时：响应丢了不能一直转圈，退回登录面板。
+			for mid in _pending.keys():
+				if now - float(_pending[mid]["at"]) > LOGIN_TIMEOUT:
+					_pending.erase(mid)
+					login_result.emit({"ok": false, "reason": "timeout"})
 			# 接收看门狗只在匹配后（有 20Hz 帧流）生效：匹配等待期间没有帧，
 			# 2.5s 无数据是正常的（单人兜底要等 10s）。
 			if _matched and now - _last_recv > RECV_TIMEOUT:
@@ -117,6 +132,7 @@ func _process(_delta: float) -> void:
 			if connected:
 				connected = false
 				connection_changed.emit(false)
+				_pending = {}
 			if now >= _retry_at:
 				_retry_at = now + RETRY_SECS
 				_ws = WebSocketPeer.new()
@@ -132,6 +148,7 @@ func _force_reconnect() -> void:
 	_retry_at = 0.0
 	_handshaken = false
 	_matched = false
+	_pending = {}
 	_ws.connect_to_url(WS_URL)
 
 # ---- 上行：业务接口（main.gd 调用） ----
@@ -140,6 +157,36 @@ func _force_reconnect() -> void:
 func send_match_join() -> void:
 	var payload := _tag_len(1, client_token.to_utf8_buffer())
 	_send_notify("match.match.join", payload)
+
+## send_register 注册新账号；结果经 login_result 信号回来。
+func send_register(username: String, password: String) -> void:
+	_send_login_request("account.account.register", username, password)
+
+## send_login 用已有账号登录。
+func send_login(username: String, password: String) -> void:
+	_send_login_request("account.account.login", username, password)
+
+func _send_login_request(route: String, username: String, password: String) -> void:
+	var payload := PackedByteArray()
+	payload.append_array(_tag_len(1, username.to_utf8_buffer()))
+	payload.append_array(_tag_len(2, password.to_utf8_buffer()))
+	_send_tracked(route, payload)
+
+## send_resume 用本地凭证换回会话。
+func send_resume() -> void:
+	_send_tracked("account.account.resume", _tag_len(1, client_token.to_utf8_buffer()))
+
+## _send_tracked 发一条需要关联响应的请求（登记 mid 以便超时与配对）。
+func _send_tracked(route: String, payload: PackedByteArray) -> void:
+	var mid := _next_mid
+	_next_mid += 1
+	if _next_mid > 0xFFFFFF:
+		_next_mid = 1
+	if _send_request(mid, route, payload):
+		_pending[mid] = {"route": route, "at": Time.get_ticks_msec() / 1000.0}
+	else:
+		# 连接还没就绪：立刻当作失败，让 UI 退回登录面板而不是干等超时。
+		login_result.emit({"ok": false, "reason": "no_connection"})
 
 ## CommandMsg：把一帧的上行命令合并成一条消息发送（帧是最小发送单位）。
 ## 编码拆成 _encode_command 是为了能脱离 WebSocket 单测字段号 —— `reset` 在服务端
@@ -503,9 +550,15 @@ func _on_handshake(data: PackedByteArray) -> void:
 	_send_frame(TYPE_HANDSHAKE_ACK, JSON.stringify({
 		"sys": {}, "user": {},
 	}).to_utf8_buffer())
-	# 进入匹配队列：match 服务配对后推 onMatched。必须带持久化 token —— 服务端把它
-	# 当会话 UID，重连时才能走 game.rejoin 找回原来的对局实例。
-	send_match_join()
+	# 有本地凭证就先试 resume（用户无感，重连回同一局的体验与之前一致）；
+	# 没有就交给 UI 显示登录面板。
+	#
+	# 关键：没有凭证时**绝不**发 match.join —— 会话未绑定时服务端会忽略它，
+	# 客户端会卡在「正在匹配…」而无从排查。
+	if client_token != "":
+		send_resume()
+	else:
+		login_result.emit({"ok": false, "reason": "no_token"})
 
 ## 解析 Data 帧内的 message：flag 低 3 位得类型（Push / Response 两种），
 ## 高位 0x20 是 pitaya 的错误标记。
@@ -561,8 +614,12 @@ func _on_response(data: PackedByteArray, is_err: bool) -> void:
 		printerr("登录请求失败（服务端错误）: " + payload.get_string_from_utf8())
 		login_result.emit({"ok": false, "reason": "internal"})
 		return
-	# 成功时由登录流程负责落盘凭证（见 Task 9 的 _save_token）。
-	login_result.emit(_decode_login_reply(payload))
+	var reply := _decode_login_reply(payload)
+	if bool(reply.get("ok", false)):
+		# 登录/注册/resume 成功才落盘凭证：失败时服务端不发 token，
+		# 写空串会把上一次的有效凭证也抹掉。
+		_save_token(String(reply.get("token", "")), String(reply.get("username", "")))
+	login_result.emit(reply)
 
 ## LoginReply：ok=1(varint) token=2 username=3 account_id=4 reason=5（均为 string）。
 func _decode_login_reply(buf: PackedByteArray) -> Dictionary:

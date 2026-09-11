@@ -92,6 +92,14 @@ var _hud_winner := -1
 var _last_health := 100.0
 var _last_opp_health := 100.0
 var _hit_flash: ColorRect
+# 登录/注册面板（未认证时遮住 HUD，认证成功后隐藏并发 match.join）。
+# 类型是 CanvasLayer 而非 Control：面板整体挂在自己的 CanvasLayer 上（与 HUD 同构），
+# 显隐直接切图层的 visible，一次开关整块 UI。
+var _login_panel: CanvasLayer
+var _login_user: LineEdit
+var _login_pass: LineEdit
+var _login_error: Label
+var _login_busy := false
 # 自动化测试钩子：无头环境无法真正捕获鼠标，设置该环境变量后视作已捕获。
 var _capture_override := OS.get_environment("JOLT_FORCE_CAPTURE") != ""
 
@@ -104,6 +112,8 @@ func _ready() -> void:
 	fps_client.frame_received.connect(_on_frame)
 	fps_client.matched_received.connect(_on_matched)
 	fps_client.connection_changed.connect(_on_connection)
+	fps_client.login_result.connect(_on_login_result)
+	_build_login_panel()
 
 func _on_matched(result: Dictionary) -> void:
 	_my_player_idx = int(result.get("player_idx", 0))
@@ -118,7 +128,8 @@ func _on_matched(result: Dictionary) -> void:
 
 func _on_connection(connected: bool) -> void:
 	if connected:
-		conn_label.text = "正在匹配…"
+		# 登录成功之前不能写「正在匹配…」——那时候还没有发 join。
+		conn_label.text = "正在登录…"
 		conn_label.visible = true
 	else:
 		conn_label.text = "正在连接服务器…"
@@ -225,6 +236,8 @@ func _input(event: InputEvent) -> void:
 func _unhandled_input(event: InputEvent) -> void:
 	if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 		return
+	if _login_panel != null and _login_panel.visible:
+		return  # 登录面板上的点击归面板，不该当成「进入游戏」
 	if event is InputEventMouseButton and event.pressed:
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
@@ -781,6 +794,135 @@ func _build_viewmodel() -> void:
 	_muzzle_flash.position = Vector3(0, 0.045, -0.47)
 	_muzzle_flash.visible = false
 	_viewmodel.add_child(_muzzle_flash)
+
+## _build_login_panel 搭登录/注册面板。用 Control + 手动定位，与 _build_hud 一致
+## （本项目不依赖任何外部场景资源）。
+func _build_login_panel() -> void:
+	var layer := CanvasLayer.new()
+	layer.name = "Login"
+	add_child(layer)
+
+	# 半透明遮罩：挡住 HUD，也吃掉点击（避免点到底下的东西）。
+	var dim := ColorRect.new()
+	dim.color = Color(0, 0, 0, 0.55)
+	dim.set_anchors_preset(Control.PRESET_FULL_RECT)
+	dim.mouse_filter = Control.MOUSE_FILTER_STOP
+	layer.add_child(dim)
+
+	var box := VBoxContainer.new()
+	box.set_anchors_preset(Control.PRESET_CENTER)
+	box.offset_left = -160.0
+	box.offset_top = -110.0
+	box.offset_right = 160.0
+	box.offset_bottom = 110.0
+	box.add_theme_constant_override("separation", 10)
+	layer.add_child(box)
+
+	var title := Label.new()
+	title.text = "Jolt FPS"
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.add_theme_font_size_override("font_size", 26)
+	box.add_child(title)
+
+	_login_user = LineEdit.new()
+	_login_user.placeholder_text = "用户名（3-16 位字母/数字/下划线）"
+	_login_user.text = fps_client.last_username
+	_login_user.max_length = 16
+	box.add_child(_login_user)
+
+	_login_pass = LineEdit.new()
+	_login_pass.placeholder_text = "密码（6-64 位）"
+	_login_pass.secret = true
+	_login_pass.max_length = 64
+	box.add_child(_login_pass)
+
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 10)
+	box.add_child(row)
+
+	var btn_login := Button.new()
+	btn_login.text = "登录"
+	btn_login.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	btn_login.pressed.connect(_submit_login)
+	row.add_child(btn_login)
+
+	var btn_reg := Button.new()
+	btn_reg.text = "注册"
+	btn_reg.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	btn_reg.pressed.connect(_submit_register)
+	row.add_child(btn_reg)
+
+	_login_error = Label.new()
+	_login_error.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_login_error.add_theme_color_override("font_color", Color("e5484d"))
+	_login_error.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	box.add_child(_login_error)
+
+	# 回车直接登录，省一次点击。
+	_login_pass.text_submitted.connect(func(_t: String) -> void: _submit_login())
+
+	_login_panel = layer
+	_show_login_panel(true, "")
+
+## _show_login_panel 显示/隐藏登录面板。
+func _show_login_panel(show_it: bool, err: String) -> void:
+	_login_panel.visible = show_it
+	_login_error.text = err
+	_login_busy = false
+	if show_it:
+		conn_label.visible = false
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+		_login_user.grab_focus()
+
+func _submit_login() -> void:
+	_submit(false)
+
+func _submit_register() -> void:
+	_submit(true)
+
+func _submit(register: bool) -> void:
+	if _login_busy:
+		return
+	var user := _login_user.text.strip_edges()
+	var pw := _login_pass.text
+	if user == "" or pw == "":
+		_login_error.text = "请填写用户名和密码"
+		return
+	_login_busy = true
+	_login_error.text = "请稍候…"
+	if register:
+		fps_client.send_register(user, pw)
+	else:
+		fps_client.send_login(user, pw)
+
+## _reason_text 把服务端的原因码翻成给玩家看的文案。
+func _reason_text(reason: String) -> String:
+	match reason:
+		"bad_credentials": return "用户名或密码错误"
+		"name_taken": return "该用户名已被注册"
+		"bad_username": return "用户名需 3-16 位字母/数字/下划线"
+		"bad_password": return "密码需 6-64 位"
+		"rate_limited": return "操作过于频繁，请稍后再试"
+		"token_invalid": return "登录已过期，请重新登录"
+		"timeout": return "服务器无响应，请重试"
+		"no_connection": return "未连接到服务器"
+		"internal": return "服务暂时不可用"
+		_: return ""
+
+## _on_login_result 登录/注册/resume 的统一回调。
+func _on_login_result(result: Dictionary) -> void:
+	if bool(result.get("ok", false)):
+		_show_login_panel(false, "")
+		conn_label.text = "正在匹配…"
+		conn_label.visible = true
+		fps_client.send_match_join()
+	else:
+		var reason := String(result.get("reason", ""))
+		if reason == "no_token":
+			# 没登录过：安静地显示面板，不报错。
+			_show_login_panel(true, "")
+		else:
+			_show_login_panel(true, _reason_text(reason))
 
 func _build_hud() -> void:
 	var layer := CanvasLayer.new()
