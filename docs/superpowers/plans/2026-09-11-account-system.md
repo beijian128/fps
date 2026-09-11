@@ -1295,10 +1295,13 @@ import (
 	"testing"
 
 	"github.com/alicebob/miniredis/v2"
+	// pitaya 的 RPCTo 用的是老的 github.com/golang/protobuf/proto.Message
+	// （见 third_party/pitaya/pkg/app.go:32 —— 别换成 google.golang.org/protobuf
+	// 的同名类型，那样 fake 就满足不了 pitaya.Pitaya 接口）。
+	"github.com/golang/protobuf/proto"
+	"github.com/redis/go-redis/v9"
 	pitaya "github.com/topfreegames/pitaya/v3/pkg"
 	"github.com/topfreegames/pitaya/v3/pkg/session"
-	"github.com/redis/go-redis/v9"
-	"google.golang.org/protobuf/proto"
 	"joltgo/game/protos"
 	"joltgo/online"
 )
