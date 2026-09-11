@@ -1984,21 +1984,32 @@ func main() {
 		builder.AddAcceptor(acceptor.NewWSAcceptor(":8080"))
 	}
 
-	log.Fatalf("启动失败: %v", run(svType, builder, *redisAddr))
+	if err := run(svType, builder, *redisAddr); err != nil {
+		log.Fatalf("启动失败: %v", err)
+	}
 }
 
 // run 组装并启动指定角色的服务。抽成函数是为了让 flag 解析与 defer 清理分离 ——
 // main 里 log.Fatal 会跳过 defer，Redis 连接必须在这里关。
+//
+// 注意别写成 log.Fatalf("启动失败: %v", run(...))：app.Start() 在 SIGINT/SIGTERM
+// 时是**正常返回**，那样写会把每次优雅退出都报成「启动失败: <nil>」并以 1 退出，
+// 让部署脚本和冒烟测试读到并不存在的失败。
 func run(svType *string, builder *pitaya.Builder, redisAddr string) error {
-	// Redis 是三个角色的共享依赖（gate 写会话归属、account 存取账号与凭证、
-	// match 存排队队列），但不是每个角色都必须在启动时连上：gate 的归属登记是
-	// best-effort，连不上只降级；account/match 没有 Redis 则无法工作。
-	// 这里统一「连不上就启动失败」——早失败比运行中途才暴露好排查。
-	rdb, err := kv.Open(context.Background(), redisAddr)
-	if err != nil {
-		return err
+	// Redis 是 gate/account/match 的共享依赖（gate 写会话归属、account 存取账号与
+	// 凭证、match 存排队队列）。game 完全不碰 Redis —— 不给它建连接，免得 Redis
+	// 抖动连带把对局节点也拖得起不来。
+	// 三个需要 Redis 的角色统一「连不上就启动失败」——早失败比运行中途才暴露好排查。
+	// game 不连（见上）。
+	var rdb *redis.Client
+	if *svType != "game" {
+		var err error
+		rdb, err = kv.Open(context.Background(), redisAddr)
+		if err != nil {
+			return err
+		}
+		defer rdb.Close()
 	}
-	defer rdb.Close()
 
 	app := builder.Build()
 
@@ -2404,12 +2415,18 @@ func clearOnline(s session.Session, onl *online.Store) {
 // 比跨进程改别人的状态更正确；而且 match 手里只有 uid，根本拿不到会话对象。
 //
 // 安全守卫：客户端可以直接发 gate.gate.bindgame，把自己的会话绑到任意 game
-// 节点，从而绕过匹配、对着别人的对局发命令。客户端消息走 localProcess（会话是
-// 前端会话，IsFrontend()==true），后端 RPC 走 handleRPCSys（会话是 pitaya 的
-// Remote，IsFrontend()==false），据此把客户端挡在门外。
+// 节点，从而绕过匹配、对着别人的对局发命令。
+//
+// 挡它的**第一层是注册方式**：本组件只经 RegisterRemote 暴露（见 main.go），
+// 客户端消息会被路由进 gate 的 handler 池、找不到这个 route 而直接报错。
+// 下面这行是纵深防御 —— 万一将来有人把 app.Register 也加上，它就是唯一拦截点。
+//
+// 注意必须 nil 安全：**真实调用路径（后端 RPC）的 ctx 里根本没有会话**，
+// GetSessionFromCtx 返回 nil（app.go 在缺 SessionCtxKey 时返回裸 nil 并打 Debug 日志）。
+// 写成 `s.GetIsFrontend()` 会直接 panic —— 被 util.Pcall 兜成通用错误，
+// 表现为 Found 永远为 false，且极难排查。
 func (c *SessionComponent) BindGame(ctx context.Context, msg *protos.BindGameMsg) (*protos.BindGameReply, error) {
-	s := c.app.GetSessionFromCtx(ctx)
-	if s.GetIsFrontend() {
+	if s := c.app.GetSessionFromCtx(ctx); s != nil && s.GetIsFrontend() {
 		log.Printf("gate: reject bindgame from client session uid=%s", s.UID())
 		return &protos.BindGameReply{Found: false}, nil
 	}
