@@ -1966,7 +1966,7 @@ func main() {
 
 // run 组装并启动指定角色的服务。抽成函数是为了让 flag 解析与 defer 清理分离 ——
 // main 里 log.Fatal 会跳过 defer，Redis 连接必须在这里关。
-func run(svType *string, builder pitaya.Builder, redisAddr string) error {
+func run(svType *string, builder *pitaya.Builder, redisAddr string) error {
 	// Redis 是三个角色的共享依赖（gate 写会话归属、account 存取账号与凭证、
 	// match 存排队队列），但不是每个角色都必须在启动时连上：gate 的归属登记是
 	// best-effort，连不上只降级；account/match 没有 Redis 则无法工作。
@@ -2026,7 +2026,16 @@ func run(svType *string, builder pitaya.Builder, redisAddr string) error {
 }
 ```
 
-⚠️ 需要 `import "fmt"`（用于 `fmt.Errorf`）。同时注意 `pitaya.Builder` 是**具体结构体**（`*builder.Builder`）——`NewDefaultBuilder` 返回 `*builder.Builder`。用 `*builder.Builder` 作参数类型，import `"github.com/topfreegames/pitaya/v3/pkg/builder"`。
+⚠️ `run` 的第二个参数类型是 `*pitaya.Builder`（**不是** `*builder.Builder`——pitaya
+没有 `pkg/builder` 子包，`pkg/builder.go` 的包名就是 `pitaya`）。`pitaya.NewDefaultBuilder`
+的签名是：
+
+```go
+func NewDefaultBuilder(isFrontend bool, serverType string, serverMode ServerMode,
+	serverMetadata map[string]string, pitayaConfig config.PitayaConfig) *Builder
+```
+
+同时需要 `import "fmt"`（用于 `fmt.Errorf`）。
 
 - [ ] **Step 3: 编译（预期失败：gate.SessionComponent 还不存在）**
 
@@ -2406,7 +2415,7 @@ Expected: `ok  	joltgo/gate`
 cd joltgo && PATH="$PWD:$PATH" go build ./... 2>&1 | head -20
 ```
 
-Expected: 无输出（Task 5 的 `main.go` 现在能编过了）。若报 `builder` 相关类型错误，确认 `run` 的第二个参数写的是 `*builder.Builder` 并 import 了 `"github.com/topfreegames/pitaya/v3/pkg/builder"`。
+Expected: 无输出（Task 5 的 `main.go` 现在能编过了）。
 
 - [ ] **Step 6: 提交**
 
