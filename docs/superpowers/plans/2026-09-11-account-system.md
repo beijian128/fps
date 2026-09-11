@@ -2982,17 +2982,33 @@ func (c *Component) tryMatchTimeout(ctx context.Context) {
 	c.startMatch(ctx, []string{uid})
 }
 
+// errPlayerGone 表示对方 gate 应答 found=false：该 gate 上已经没有这个会话
+// （掉线，或被顶号顶掉了）。RPC 本身是成功的，所以不能只看 error —— 探活的
+// 全部意义就在这个字段上：online 登记允许陈旧（见 online 包的说明），
+// 「登记还在但人已经没了」正是它要挡下来的情况。
+var errPlayerGone = errors.New("player not on that gate")
+
 // bindGameOn 请指定 gate 把对局归属写进玩家的会话数据。
 // gameServerID 为空表示回滚（清掉归属）。
+//
+// 必须看 reply.Found：RPC 通了不代表人还在 —— 那个 gate 上可能已经没有这个
+// 会话了（掉线 / 被顶号），此时它回 found=false 且 err==nil。只判 error 的话
+// 探活永远不会剔除任何人，幽灵玩家会一直占着槽位。
 func (c *Component) bindGameOn(ctx context.Context, gateID, uid, matchID, gameServerID string, playerIdx int) error {
-	return c.app.RPCTo(ctx, gateID, bindGameRoute,
-		&protos.BindGameReply{},
+	reply := &protos.BindGameReply{}
+	if err := c.app.RPCTo(ctx, gateID, bindGameRoute, reply,
 		&protos.BindGameMsg{
 			Uid:          uid,
 			GameServerId: gameServerID,
 			MatchId:      matchID,
 			PlayerIdx:    int32(playerIdx),
-		})
+		}); err != nil {
+		return err
+	}
+	if !reply.Found {
+		return errPlayerGone
+	}
+	return nil
 }
 
 // pushMatched 把匹配结果推给客户端。
