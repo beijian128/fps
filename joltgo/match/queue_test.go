@@ -186,3 +186,29 @@ func TestPopStaleIsAtomic(t *testing.T) {
 		}
 	}
 }
+
+// Enqueue 在正常路径上绝不能返回 redis.Nil。
+//
+// 脚本没有返回值时 go-redis 会把服务端的 nil bulk 报成 redis.Nil，于是
+// 「正常入队」与「真出错」在调用方看来一模一样 —— 而 startMatch 里四条重新
+// 入队路径全靠这个判断，误判会让玩家被静默丢弃（已原子弹出、无人再管，
+// 客户端只发一次 match.join 然后永远等 onMatched）。
+func TestEnqueueReturnsNilOnSuccess(t *testing.T) {
+	q, _ := newTestQueue(t)
+	if err := q.Enqueue(context.Background(), "a"); err != nil {
+		t.Fatalf("正常入队不该报错，得到 %v", err)
+	}
+	// 确认确实入队了，而不是「错误被吞掉、其实什么也没做」。
+	if got, _ := q.rdb.ZRange(context.Background(), queueKey, 0, -1).Result(); len(got) != 1 || got[0] != "a" {
+		t.Fatalf("队列里应有 a，得到 %v", got)
+	}
+}
+
+// 真出错时必须如实报错，不能被当成「成功但没返回值」吞掉。
+func TestEnqueuePropagatesRealError(t *testing.T) {
+	q, mr := newTestQueue(t)
+	mr.SetError("LOADING Redis is loading the dataset in memory")
+	if err := q.Enqueue(context.Background(), "a"); err == nil {
+		t.Fatal("Redis 报错时 Enqueue 必须返回错误")
+	}
+}

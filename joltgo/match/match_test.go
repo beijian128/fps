@@ -99,6 +99,12 @@ func TestJoinRejectsUnboundSession(t *testing.T) {
 
 // ---- startMatch：瞬时故障不能把已经弹出队列的活人丢掉 ----
 
+// bindReply 是一次 bindgame 的应答（两者互斥：err 非 nil 时忽略 found）。
+type bindReply struct {
+	err   error
+	found bool
+}
+
 // startMatchTestApp 驱动 startMatch：servers 决定有没有可用 game 节点，
 // bindErr/bindFound 决定 gate.bindgame 的结果，createErr 决定 game.create 的结果。
 type startMatchTestApp struct {
@@ -108,6 +114,13 @@ type startMatchTestApp struct {
 	bindFound bool  // bindgame 应答里的 found（false = 那个 gate 上已经没这个会话）
 	createErr error // 非 nil：game.create 失败
 	pushed    []string
+
+	// bindSeq 按调用次序指定 bindgame 的应答；用完之后回落到上面的
+	// bindErr/bindFound。存在的理由：建局失败后的**回滚**会对同一个 uid 再调
+	// 一次 bindgame，而「探活成功、回滚时人已走」这类分支要求两次应答不同 ——
+	// 单一字段表达不了。
+	bindSeq  []bindReply
+	bindCall int
 }
 
 func (a *startMatchTestApp) GetServersByType(string) (map[string]*cluster.Server, error) {
@@ -120,6 +133,16 @@ func (a *startMatchTestApp) GetServersByType(string) (map[string]*cluster.Server
 func (a *startMatchTestApp) RPCTo(_ context.Context, _, route string, reply proto.Message, _ proto.Message) error {
 	switch route {
 	case bindGameRoute:
+		i := a.bindCall
+		a.bindCall++
+		if i < len(a.bindSeq) {
+			r := a.bindSeq[i]
+			if r.err != nil {
+				return r.err
+			}
+			reply.(*protos.BindGameReply).Found = r.found
+			return nil
+		}
 		if a.bindErr != nil {
 			return a.bindErr
 		}
@@ -280,5 +303,51 @@ func TestStartMatchSuccessDoesNotRequeue(t *testing.T) {
 	sort.Strings(app.pushed)
 	if len(app.pushed) != 2 || app.pushed[0] != "a" || app.pushed[1] != "b" {
 		t.Fatalf("两人都该收到 onMatched，得到 %v", app.pushed)
+	}
+}
+
+// 建局失败后的回滚：探活时人还在（第一次 bindgame 应答 found=true，所以他拿到了
+// 槽位），回滚时他已经走了（第二次应答 found=false）—— 此时会话本来就没了，
+// 既不用回滚也不用重新入队（重新入队等于往队列里塞一个根本不在线的幽灵）。
+func TestCreateGameFailureRollbackSkipsRequeueWhenPlayerGone(t *testing.T) {
+	app := &startMatchTestApp{
+		servers:   oneGameServer(),
+		createErr: errors.New("game node down"),
+		bindSeq:   []bindReply{{found: true}, {found: false}},
+	}
+	c, _ := newStartMatchComponent(t, app)
+	ctx := context.Background()
+	if err := c.online.Set(ctx, "a", "gate-1"); err != nil {
+		t.Fatalf("Set 报错: %v", err)
+	}
+
+	c.startMatch(ctx, []string{"a"})
+
+	if got := queued(t, c); len(got) != 0 {
+		t.Fatalf("回滚时已经离线的人不该重新入队，得到 %v", got)
+	}
+	if app.bindCall != 2 {
+		t.Fatalf("应恰好调两次 bindgame（探活 + 回滚），得到 %d", app.bindCall)
+	}
+}
+
+// 建局失败后的回滚本身也失败（RPC 不通）：人还在线，仍要重新入队 ——
+// 会话里那份指向不存在对局的归属会在下一次成功开局时被覆盖。
+func TestCreateGameFailureRollbackRequeuesOnTransportError(t *testing.T) {
+	app := &startMatchTestApp{
+		servers:   oneGameServer(),
+		createErr: errors.New("game node down"),
+		bindSeq:   []bindReply{{found: true}, {err: errors.New("nats: timeout")}},
+	}
+	c, _ := newStartMatchComponent(t, app)
+	ctx := context.Background()
+	if err := c.online.Set(ctx, "a", "gate-1"); err != nil {
+		t.Fatalf("Set 报错: %v", err)
+	}
+
+	c.startMatch(ctx, []string{"a"})
+
+	if got := queued(t, c); len(got) != 1 || got[0] != "a" {
+		t.Fatalf("回滚失败时人还在线，必须重新入队，得到 %v", got)
 	}
 }
