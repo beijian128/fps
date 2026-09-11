@@ -9,7 +9,9 @@
 5. 改 ECS 核心：只动 `joltgo/ecs/`，注意它必须是零依赖、可单测的
 6. 改物理接口：动 `joltgo/wrapper/` 或 `joltgo/physics/`，必须重跑完整 `build.ps1`
 7. 加/改一个**同步属性**：只动 `joltgo/sim/replicate.go`（`declareAttributes` 加一行 + 变更点 `rep.Set`）+ `sim/replicate_test.go`，**不需要**改 proto、生成码或客户端解码（见下）
-8. 改**协议结构**（增删消息 / route、改 Frame/Schema 字段号）：动 `joltgo/game/protos/game.proto`（重跑 `protoc --go_out` 重新生成）+ `joltgo/game/` + `joltgo/match/` + 同步改 `godot_client/scripts/fps_client.gd`（protobuf 编解码）
+8. 改**协议结构**（增删消息 / route、改 Frame/Schema 字段号）：动 `joltgo/game/protos/game.proto`（重跑 `protoc --go_out` 重新生成）+ `joltgo/game/` + `joltgo/match/` + `joltgo/account/` + 同步改 `godot_client/scripts/fps_client.gd`（protobuf 编解码）
+9. 改**账号/登录/凭证**：动 `joltgo/account/`（`token.go` 纯函数 / `store.go` Redis / `component.go` handler）+ 客户端 `fps_client.gd`（Request/Response）与 `main.gd`（登录面板），跑 `go test ./account`
+10. 改**会话归属 / 多节点行为**：动 `joltgo/online/` + `joltgo/gate/session.go`，跑 `go test ./online ./gate ./account ./match`
 
 ## 如何扩展一个功能
 
@@ -35,10 +37,11 @@
      停在旧值；唯一能抓住它的是 `sim/replicate_test.go` 的 oracle 测试（`expectedAttrs`
      从 ECS 世界独立推期望值，与 store 全量逐项比对）。所以**先补 `rep.Set`、再补断言**
 3. **客户端** `godot_client/scripts/`
-   - 传输层：`fps_client.gd`（上行只有三条：`match.join` / `game.cmd`（输入+射击+重置
-     合并成一条）/ `game.resync`；需要新消息时加一个 `send_xxx` 方法，注意 route 三段式
-     `server.service.method` 与服务端 handler 方法名小写对应；新消息要在 protobuf
-     编解码函数里读写）
+   - 传输层：`fps_client.gd`（上行有 Notify 三条：`match.join`（空消息）/ `game.cmd`
+     （输入+射击+重置合并成一条）/ `game.resync`，以及 Request 三条：`account.register` /
+     `account.login` / `account.resume`；需要新消息时加一个 `send_xxx` 方法，注意 route
+     三段式 `server.service.method` 与服务端 handler 方法名小写对应；新消息要在 protobuf
+     编解码函数里读写。**Request 要自己记 mid**，Response 帧里没有 route）
    - 世界状态：`world_store.gd` 按**属性名**累积；渲染层 `main.gd` / `body_entity.gd`
      通过 `_store.attr(id, "属性名")` 取值 —— 新增同步属性时客户端取新值只需这一句
 
@@ -73,8 +76,12 @@
   实体 id 由物理桥发放并维护与 Jolt BodyID 的映射；每个对局实例各建一个 Jolt 世界
 - `joltgo/game/` 是对局实例层：`instance.go` 每局一个 goroutine 顺序执行；`component.go`
   的 handler 方法对应 route（三段式），只做协议 ↔ sim 翻译，不写玩法逻辑
-- `joltgo/gate/` / `joltgo/match/` 是分布式路由与匹配层：gate 只 AddRoute，match 配对后
-  RPC game.create
+- `joltgo/gate/` / `joltgo/match/` / `joltgo/account/` 是分布式接入、匹配与账号层：
+  gate 只 AddRoute + 在会话绑定/断开时登记会话归属（`session.go`），match 从 Redis 队列
+  配对后 RPC game.create，account 管注册/登录/凭证轮换。共享状态一律走 Redis
+  （`joltgo/kv/` 连接、`joltgo/online/` 会话归属、`match/queue.go` 队列）
+- **会话 UID = accountID**：身份由 account 服务签发，客户端不再自报。任何按 uid 索引的
+  地方（game 实例注册表、push 目标、回局 fan-out）语义不变，只是那个字符串换了来源
 - `joltgo/third_party/pitaya/` 是内置第三方源码，不要在其上改业务代码；
   升级时重跑 `go mod tidy`
 - `sim.Simulation` **无锁**：单线程所有，由实例 goroutine 独占访问；不要加锁、也不要
@@ -99,12 +106,15 @@
 
 ## 测试
 
-- 服务端单元测试（不依赖 cgo / Jolt DLL，直接跑）：
+- 服务端单元测试（不依赖 cgo / Jolt DLL，直接跑；Redis 用例走 miniredis，不需要真 Redis）：
 
   ```bash
-  cd joltgo && go test ./ecs ./sim ./replication
+  cd joltgo && go test ./account ./online ./kv ./gate ./match ./ecs ./sim ./replication
   ```
 
+  `account` 覆盖凭证生成/校验、bcrypt、Redis 存储与轮换、三个 handler 的分支；
+  `online` / `kv` 覆盖会话归属读写与连接；`gate` 覆盖会话钩子与 bindgame remote；
+  `match` 覆盖 Redis 队列（配对原子性、超时兜底）与开局链路；
   `ecs` 覆盖组件存储语义；`replication` 覆盖同步层（终值表 / 脏集去重 / full 帧不推进
   增量基线 / destroy 清基线 / 帧编码）；`sim` 用 fake 物理（只做运动学积分 + 地板钳制）
   覆盖各系统行为：初始同步属性与角色/重力配置、射击校验（归一化 + LinearCast/摩擦配置）、
@@ -117,7 +127,7 @@
   `joltgo/` 下已构建）：
 
   ```bash
-  cd joltgo && PATH="$PWD:$PATH" go vet ./gate ./match ./game ./physics ./sim ./replication ./ecs
+  cd joltgo && PATH="$PWD:$PATH" go vet ./gate ./account ./kv ./online ./match ./game ./physics ./sim ./replication ./ecs
   PATH="$PWD:$PATH" go test ./...
   ```
 
@@ -140,8 +150,10 @@
 
 ### 服务端
 
-- 看服务日志：gate/match/game 三进程各自有日志（`deploy/start-all.ps1` 写 `deploy/*.log`），
+- 看服务日志：gate/account/match/game 四进程各自有日志（`deploy/start-all.ps1` 写 `deploy/*.log`），
   pitaya 默认 logrus 会打印 handler 注册、服务发现、RPC 等日志
+- 看 Redis 数据：`deploy/redis-cli.exe` —— 账号 `acct:*`、凭证 `sess:*`、
+  会话归属 `online:*`、匹配队列 `match:queue`（ZSET）
 - Jolt 的断言/日志默认关闭；如需排查物理问题，可在 CMake 里开 `USE_ASSERTS=ON`（Debug）重编
 - 抓包：用带 WebSocket 支持的工具连 `ws://localhost:8080/`（gate）观察 pomelo 二进制帧；
   协议细节见 [API.md](API.md)
@@ -153,39 +165,44 @@
   ```bash
   Godot_v4.7.2-stable_win64_console.exe --headless --path godot_client --script res://tests/world_store_test.gd
   Godot_v4.7.2-stable_win64_console.exe --headless --path godot_client --script res://tests/frame_decode_test.gd
+  Godot_v4.7.2-stable_win64_console.exe --headless --path godot_client --script res://tests/login_reply_decode_test.gd
   Godot_v4.7.2-stable_win64_console.exe --headless --path godot_client --script res://tests/game_frame_test.gd
   Godot_v4.7.2-stable_win64_console.exe --headless --path godot_client --script res://tests/reconnect_cleanup_test.gd
   ```
 
   分别覆盖：世界存储语义（full / removed / destroy / 未知属性）、`Frame`/`Schema` 解码、
+  Response 帧（LEB128 mid、无 route、errorMask）与 `LoginReply` 解码、
   渲染路径（喂合成帧，不碰 WebSocket）、断线清理本地世界与插值状态。
-- 冒烟测试（需要分布式服务端已启动：etcd + NATS + gate/match/game 三进程）：
+- 冒烟测试（需要分布式服务端已启动：etcd + NATS + redis + gate/account/match/game 四进程）：
 
   ```bash
+  Godot_v4.7.2-stable_win64_console.exe --headless \
+    --path godot_client --script res://tests/login_smoke.gd
   Godot_v4.7.2-stable_win64_console.exe --headless \
     --path godot_client --script res://tests/ws_smoke.gd
   Godot_v4.7.2-stable_win64_console.exe --headless \
     --path godot_client --script res://tests/rejoin_smoke.gd
   ```
 
-  `ws_smoke` 验证匹配 + 20 Hz 增量帧推送，预期输出 `SMOKE matched` +
+  `login_smoke` 验证「注册 → LoginReply(token) → 断线 → resume → onMatched」整条链路。
+  `ws_smoke` 验证登录后匹配 + 20 Hz 增量帧推送，预期输出 `SMOKE matched` +
   `SMOKE unique_steps=80 span=79 elapsed_ms=4000` 左右。`rejoin_smoke` 验证断线重连回到
   **同一 match_id + 同一 player_idx** 并收到 full 帧——它是新协议下唯一端到端验证
   「重连回同一局」的测试，改匹配/回局/resync 链路后必跑。
 
   **验证 2 人匹配**（match 日志出现 `with 2 players`、slot 1、双人广播）时，必须让两个
-  客户端拿到**不同的 token**。token 就是会话 UID（持久化在 `user://client_id.txt`），而
-  Godot 的 `user://` 是**每项目一个目录**（Windows 下 `%APPDATA%\Godot\app_userdata\<项目名>`），
-  同机所有实例共用：两个客户端会读到同一个 token、绑到同一个 pitaya UID——后连的那个会
-  把先连的会话顶掉，匹配队列又按 UID 去重、只剩一条，于是 1 号槽位与双人广播永远测不到，
-  两个客户端还会互相踢下线。Godot 4.7.2 **没有** `--user-data-dir` 参数（传了会被静默
-  忽略），但 `user://` 落在 `%APPDATA%` 下，所以给额外实例换一个 `APPDATA` 就能让它拥有
-  独立的 `client_id.txt`：
+  客户端用**两个不同的账号**，而且各自有独立的 `user://` 目录。两件事都要做：
+  同一账号登两次是顶号（后连的把先连的踢掉，队列又按 UID 去重，只剩一条）；
+  而 Godot 的 `user://` 是**每项目一个目录**（Windows 下
+  `%APPDATA%\Godot\app_userdata\<项目名>`），同机所有实例共用，第二个客户端会读到第一个
+  的 `auth_token.txt` 而自动登成同一个账号。Godot 4.7.2 **没有** `--user-data-dir` 参数
+  （传了会被静默忽略），但 `user://` 落在 `%APPDATA%` 下，所以给额外实例换一个 `APPDATA`
+  就能让它拥有独立的 `auth_token.txt`：
 
   ```bash
-  # 第一个客户端：默认 user 目录
+  # 第一个客户端：默认 user 目录，用账号 A 登录
   Godot_v4.7.2-stable_win64_console.exe --path godot_client
-  # 第二个客户端：独立 APPDATA → 独立 user://client_id.txt → 独立会话 UID
+  # 第二个客户端：独立 APPDATA → 独立 user://auth_token.txt → 可以注册/登录账号 B
   APPDATA="$PWD/.client2" Godot_v4.7.2-stable_win64_console.exe --path godot_client
   ```
 

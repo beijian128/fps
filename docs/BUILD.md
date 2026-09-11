@@ -13,6 +13,13 @@
 | Go | 1.26+ | cgo 需要 GCC |
 | protoc | 3.5+ | 仅在改动 `.proto` 后重新生成 Go 码时需要 |
 | protoc-gen-go | 与 `google.golang.org/protobuf` 匹配 | `go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.34.2` |
+| etcd | 3.5.x | 服务发现；本机二进制由 `joltgo/deploy/` 提供 |
+| nats-server | 2.x | 服务间 RPC 总线；本机二进制由 `joltgo/deploy/` 提供 |
+| Redis | 8.x | 共享状态（账号/凭证/会话归属/匹配队列）；本机二进制由 `joltgo/deploy/` 提供 |
+
+> 后三项只在**运行**时需要，构建不依赖它们。三个二进制（以及 Redis 的 msys2 运行库
+> DLL）都已放在 `joltgo/deploy/`，`start-infra.ps1` 一把起齐，详见
+> [deploy/README.md](../joltgo/deploy/README.md)。
 
 MSYS2 假定安装在 `C:\msys64`（`build.ps1` 中有硬编码，换路径需同步修改）。
 
@@ -51,8 +58,9 @@ replace github.com/topfreegames/pitaya/v3 => ./third_party/pitaya
   需网络可达（本项目用 `GOPROXY=goproxy.cn,direct`）
 - 若改动/升级内置的 pitaya，重跑 `go mod tidy` 同步 `go.sum`；二进制体积较大是
   pitaya 的固有代价
-- **Cluster 模式**：gate/match/game 三服务经 etcd（服务发现）+ nats-server（RPC）通信，
-  本地运行见 `joltgo/deploy/README.md`
+- **Cluster 模式**：gate/account/match/game 四服务经 etcd（服务发现）+ nats-server（RPC）
+  通信，账号/凭证/会话归属/匹配队列这些共享状态放 Redis，本地运行见
+  `joltgo/deploy/README.md`
 
 ## protobuf 消息（game/protos/）
 
@@ -100,22 +108,30 @@ joltgo/
 
 ## 运行
 
-服务端是分布式三服务，先起基础设施再起三个角色：
+服务端是分布式四服务，先起基础设施再起四个角色：
 
 ```powershell
-# 1. 起 etcd + nats-server（服务发现 + RPC 总线）
+# 1. 起 etcd + nats-server + redis-server（服务发现 + RPC 总线 + 共享状态）
 cd joltgo\deploy
-.\start-all.ps1          # 内含 start-infra + 三进程；或手动起
+.\start-all.ps1          # 内含 start-infra + 四进程；或手动起
 
-# 手动起三个服务（同一二进制按 -type 区分）：
+# 手动起四个服务（同一二进制按 -type 区分）：
 cd joltgo
-.\joltgo.exe -type gate    # frontend，监听 ws://localhost:8080
-.\joltgo.exe -type match   # 匹配服务
-.\joltgo.exe -type game    # 游戏逻辑（对局实例）
+.\joltgo.exe -type gate      # frontend，监听 ws://localhost:8080
+.\joltgo.exe -type account   # 账号注册/登录/凭证恢复
+.\joltgo.exe -type match     # 匹配服务
+.\joltgo.exe -type game      # 游戏逻辑（对局实例）
 ```
 
+**只有两个 flag**（gate 的 WS 端口 8080 目前写死在 `main.go` 里，没有 `-port`）：
+
+| flag | 默认值 | 说明 |
+|---|---|---|
+| `-type` | `gate` | 角色：`gate` / `account` / `match` / `game`，其它值直接报错退出 |
+| `-redis` | `localhost:6379` | Redis 地址。`gate` / `account` / `match` 启动时 Ping 一次，**连不上就退出**；`game` 不碰 Redis，这个 flag 对它无效 |
+
 gate 监听 <ws://localhost:8080/>，用 Godot 客户端连接游玩（见根目录 README）。
-停服务用 `deploy\stop-infra.ps1`。
+停服务用 `deploy\stop-infra.ps1`（它不删任何数据目录）。
 
 ## 常见问题
 
@@ -128,6 +144,9 @@ gate 监听 <ws://localhost:8080/>，用 Godot 客户端连接游玩（见根目
 | 运行时缺 `libstdc++-6.dll` 等 | 说明 DLL 没静态链接运行库，检查 CMake 里 MINGW 分支的 `-static` 是否被改动 |
 | `no server type chosen for sending RPC` | RPC route 不是三段式（应为 `server.service.method`，如 `game.game.create`） |
 | `nats: no responders available for request` | 目标服务未注册/已死；或 etcd 里残留了强杀进程的旧租约（60s 过期），`GetServersByType` 挑到了死节点 |
+| gate/account/match 起来一下就退出 | 连不上 Redis（三者启动时都会 Ping）。确认 `redis-server` 在 6379 上真的在监听，或用 `-redis` 指对地址。`game` 不碰 Redis，所以只有那三个会挂 |
+| 登录报 `bad_credentials`，但账号刚注册过 | Redis 数据没了。`redis-data` **永不清空**（这一点和每次都清空的 `etcd-data` 相反），并且必须开 `--appendonly yes`，否则强杀会丢掉最近几分钟的写入 |
+| 客户端一直停在「正在匹配…」 | 没登录就发了 `match.join`：会话没有 uid，服务端静默忽略（只在 match 日志里留一行）。也可能是 etcd 残留旧 game 节点，见上一条 |
 | 启动后服务端世界在动（步数增长） | 正常：实例创建后 20 Hz 模拟 tick 无条件运行，无论客户端是否在线 |
 
 ## 手动构建（不使用 build.ps1）

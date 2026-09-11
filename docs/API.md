@@ -1,12 +1,13 @@
 # 网络协议
 
 客户端只连一个 WebSocket 端点：`ws://localhost:8080/`（gate 服务）。服务端是
-**分布式三服务**（gate / match / game），客户端只感知 route，不感知后端节点分布。
+**分布式四服务**（gate / account / match / game），客户端只感知 route，不感知后端节点分布。
 传输走 **pitaya 的 pomelo 帧格式**（二进制），payload 用 **protobuf** 序列化
 （schema 见 `joltgo/game/protos/game.proto`）。
 
 > 改动任何 route 或改 proto 的**字段定义**，必须同步改 `joltgo/game/protos/game.proto`、
-> `joltgo/game/`、`joltgo/match/` 与 `godot_client/scripts/fps_client.gd`（protobuf 编解码）。
+> `joltgo/game/`、`joltgo/match/`、`joltgo/account/` 与 `godot_client/scripts/fps_client.gd`
+> （protobuf 编解码）。
 > **但新增一个同步属性不走这条路**——属性是数据不是字段：加一行 `Declare` + 变更点
 > `rep.Set` + 客户端按名字取值即可（见下文「属性表」与 `AGENTS.md` §3）。
 > route 一律**三段式** `server.service.method`。
@@ -32,16 +33,50 @@
 
 ## message 编码（Data 帧的 data）
 
+Notify（上行）与 Push（下行）**带 route**：
+
 ```text
 flag (1B) ─ route 长度 (1B) ─ route 字符串 ─ protobuf payload
 ```
 
-- `flag = 消息类型 << 1`：Notify=0x02、Request=0x00、Response=0x04、Push=0x06
-- route 采用**未压缩**形式：1 字节长度 + 字符串（服务端不设 route 字典）
-- 本 demo 客户端只发 Notify、只收 Push；消息无 id
-- payload 是 protobuf wire 编码（proto3），非 JSON
+Request（上行）与 Response（下行）**带 message id（mid）**，Response **没有 route**：
 
-## 握手流程
+```text
+Request ： flag (1B) ─ mid (LEB128 变长) ─ route 长度 (1B) ─ route 字符串 ─ protobuf payload
+Response： flag (1B) ─ mid (LEB128 变长) ─ protobuf payload
+```
+
+- `flag = 消息类型 << 1`：Request=0x00、Notify=0x02、Response=0x04、Push=0x06
+- route 采用**未压缩**形式：1 字节长度 + 字符串（服务端不设 route 字典）
+- **Response 帧里没有 route** —— 客户端靠自己发 Request 时分配的 mid 认领响应，
+  所以必须自己维护 `mid → route` 表（见 `fps_client.gd` 的 `_pending`）
+- `mid` 是 LEB128 变长无符号整数（每字节低 7 位有效，最高位为「还有后续字节」）
+- **`flag & 0x20`（errorMask）置位时**，Response 的 payload **不是**业务消息，而是 pitaya
+  的错误内容（客户端按字符串打印）。当作 `LoginReply` 解会得到垃圾字段，必须先判这一位
+- payload 是 protobuf wire 编码（proto3），非 JSON
+- 本项目里：帧同步与匹配结果走 Notify/Push（无 mid），`account.*` 三条路走 Request/Response
+
+## 路由一览
+
+| route | 类型 | 方向 | payload → 应答 |
+|---|---|---|---|
+| `account.account.register` | Request | 客户端 → account | `RegisterMsg` → `LoginReply` |
+| `account.account.login` | Request | 客户端 → account | `LoginMsg` → `LoginReply` |
+| `account.account.resume` | Request | 客户端 → account | `ResumeMsg` → `LoginReply` |
+| `match.match.join` | Notify | 客户端 → match | `JoinMsg`（空） |
+| `game.game.cmd` | Notify | 客户端 → game | `CommandMsg` |
+| `game.game.resync` | Notify | 客户端 → game | 空 |
+| `onMatched` | Push | game/match → 客户端 | `MatchResult` |
+| `onFrame` | Push | game → 客户端 | `Frame` |
+| `game.game.create` | RPC | match → game | `CreateGameMsg` → `CreateGameReply` |
+| `game.game.rejoin` | RPC | match → game | `RejoinMsg` → `RejoinReply` |
+| `gate.gate.bindgame` | RPC | match → gate | `BindGameMsg` → `BindGameReply` |
+| `gate.sys.kick` | RPC | account → gate | pitaya 内置 `KickMsg` → `KickAnswer` |
+
+`gate.gate.bindgame` 注册用的是 `RegisterRemote` 而不是 `Register`，所以它只在 remote 表里、
+只能被 `RPCTo` 命中；客户端发同名 route 会被路由到 handler 池、找不到而报错。
+
+## 握手与登录流程
 
 1. 客户端连接后发 `Handshake`，data 为：
    ```jsonc
@@ -52,8 +87,44 @@ flag (1B) ─ route 长度 (1B) ─ route 字符串 ─ protobuf payload
    { "code": 200, "sys": { "heartbeat": 30, "dict": {}, "serializer": "protobuf" } }
    ```
 3. 客户端发 `HandshakeAck`（data `{"sys":{},"user":{}}`），会话进入 Working 状态
-4. 客户端发 `match.match.join`（Notify，`JoinMsg`，带持久化 `token`）进入匹配队列
-5. 之后客户端按固定间隔发 `Heartbeat` 空帧保活
+4. **登录**（Request/Response）：本地有凭证就发 `account.account.resume`，否则等玩家在登录面板上
+   选择 `account.account.register` 或 `.login`。服务端回 `LoginReply`；`ok=true` 时会话已被
+   `Bind` 到账号 ID，客户端保存 `token` 备下次免登录
+5. 拿到 `LoginReply.ok=true` **之后**才发 `match.match.join` 进入匹配队列。
+   **未登录不得发 join** —— 会话没有 uid，`match.join` 会被服务端直接忽略（没有任何应答），
+   玩家会永远卡在「正在匹配…」
+6. 之后客户端按固定间隔发 `Heartbeat` 空帧保活
+
+## 账号（Request/Response，route `account.account.*`）
+
+```proto
+message RegisterMsg { string username = 1; string password = 2; }
+message LoginMsg    { string username = 1; string password = 2; }
+message ResumeMsg   { string token = 1; }
+
+message LoginReply {
+  bool   ok = 1;
+  string token = 2;      // ok=true 时签发的凭证（base64url，43 字符）
+  string username = 3;   // 服务端记录的原始大小写
+  string account_id = 4; // 会话 UID
+  string reason = 5;     // ok=false 时的原因码
+}
+```
+
+约束与语义：
+
+- 用户名 `^[a-zA-Z0-9_]{3,16}$`，**大小写不敏感**（占名与查名都按小写归一，`username`
+  字段回的是注册时的原始大小写）；密码 6–64 字节，服务端用 bcrypt 存哈希
+- `token` 是 32 字节随机数的 base64url（无 padding，43 字符），TTL **7 天**，
+  每次 `resume` 成功都会续期；一次 `register` / `login` 会**轮换** token 并作废旧的
+  —— 同一账号只有一个活凭证，第二个客户端登录会把第一个顶下线
+- **原因码**（`reason`，服务端不给自由文本）：`bad_credentials`（用户名不存在与密码错误
+  共用，不泄露账号是否存在）/ `name_taken` / `bad_username` / `bad_password` /
+  `rate_limited` / `token_invalid` / `internal`
+- **限流按用户名**（1 分钟 10 次），不是按 IP：account 是 backend 服务，它拿到的 pitaya
+  agent 是 `Remote`，`RemoteAddr()` 返回 nil，看不见客户端 IP
+- 传输层错误（会话已绑定别的账号等）走 Response 的 errorMask 或 `reason=internal`，
+  客户端两条都要处理
 
 ## 匹配结果（Push，route `onMatched`）
 
@@ -68,10 +139,10 @@ message MatchResult {
 }
 ```
 
-**重连也走这条 push**：断线后客户端用同一 `token` 重新 `match.join`，match 服务向各
-game 节点 fan-out `game.rejoin`，命中存量实例时用同一条收尾路径（写会话数据 +
-推 `onMatched`），客户端回到**同一对局、同一 `player_idx`**、不再进匹配队列；收到
-`onMatched` 后客户端主动发 `game.resync` 请求全量帧（见下）。
+**重连也走这条 push**：断线后客户端先用本地凭证 `account.account.resume` 登回同一个账号，
+再发 `match.join`；match 服务向各 game 节点 fan-out `game.rejoin`，命中存量实例时用同一条
+收尾路径（写会话数据 + 推 `onMatched`），客户端回到**同一对局、同一 `player_idx`**、
+不再进匹配队列；收到 `onMatched` 后客户端主动发 `game.resync` 请求全量帧（见下）。
 
 ## 服务端 → 客户端：同步帧（Push，route `onFrame`）
 
@@ -177,14 +248,13 @@ route 三段式 `server.service.method`，payload 是 protobuf。
 ### match.match.join —— 加入匹配队列 / 重连回局
 
 ```proto
-message JoinMsg {
-  string token = 1;
-}
+message JoinMsg {}
 ```
 
-`token` 是客户端持久化的身份（首次运行生成 UUID 并写入 `user://client_id.txt`）。
-服务端把它当作**会话 UID**：重连时同一个 token 能找回原来的对局实例（见上文
-`onMatched` 的重连说明）。
+**空消息** —— 身份不再由客户端携带，而是取自会话绑定（`account.*` 登录成功时
+`session.Bind(accountID)` 写入的会话 UID）。未绑定的会话发 join 会被**静默忽略**
+（只在服务端日志里留一行），所以客户端必须先拿到 `LoginReply.ok=true`。
+重连时用同一个账号登录/resume 就能找回原来的对局实例（见上文 `onMatched` 的重连说明）。
 
 ### game.game.cmd —— 一帧上行命令（约 60 Hz）
 
@@ -218,7 +288,7 @@ payload 空（Notify）。客户端在重连拿到 `onMatched` 后发一次：�
 
 ## 服务端内部 RPC（客户端不可见）
 
-match 与 game 节点之间走 pitaya `RPCTo`（三段式 route），payload 也在同一 proto 里：
+match / account / gate / game 节点之间走 pitaya `RPCTo`（三段式 route），payload 也在同一 proto 里：
 
 ```proto
 // match → game，创建对局（route "game.game.create"）
@@ -228,14 +298,31 @@ message CreateGameMsg {
 }
 message CreateGameReply { int32 code = 1; } // 0 = 成功
 
-// match → game，回局查询（route "game.game.rejoin"）：该节点是否托管此 token 的存量实例
-message RejoinMsg  { string token = 1; }
+// match → game，回局查询（route "game.game.rejoin"）：该节点是否托管此会话 UID 的存量实例
+message RejoinMsg  { string token = 1; }    // 字段名是历史遗留，装的是会话 UID（账号 ID）
 message RejoinReply {
   bool found = 1;
   string match_id = 2;
   int32 player_idx = 3; // 原本的玩家槽位（0/1）
 }
+
+// match → gate，请玩家所属的 gate 把对局信息写进会话数据（route "gate.gate.bindgame"）
+message BindGameMsg {
+  string uid = 1;            // 会话 UID（账号 ID）
+  string game_server_id = 2; // 托管该对局的 game 节点 id
+  string match_id = 3;
+  int32  player_idx = 4;
+}
+message BindGameReply { bool found = 1; } // false = 这个 gate 上已经没有该会话（顺带探活）
 ```
+
+`gate.gate.bindgame` 之所以必须由 gate 来做：会话数据（`gameServerId`）是 gate 的 AddRoute
+用来给 `game.game.*` 做定点路由的依据，只有持有那条连接的 gate 能写。match 通过
+`online:{accountID}` 找到是哪个 gate，`found=false` 就说明人已经不在（掉线或被顶号），
+这是 online 登记允许陈旧的兜底。
+
+account → gate 的踢人用的是 pitaya 内置的 `gate.sys.kick`（`KickMsg` / `KickAnswer`），
+本项目的 proto 里没有、也不该自己造一套。
 
 ## 对局规则（PVP）
 

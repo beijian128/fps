@@ -5,8 +5,8 @@
 ```text
 ┌──────────────────────────────────────────────┐
 │  Godot 客户端（godot_client/）                │
-│  main.gd      输入/相机/双玩家渲染/HUD/音效   │
-│  fps_client.gd  传输层：pomelo 握手/匹配/编解码│
+│  main.gd      输入/相机/双玩家渲染/HUD/登录面板│
+│  fps_client.gd  传输层：pomelo 握手/登录/编解码│
 │  body_entity.gd 每个刚体一个渲染节点          │
 └──────────────────────┬───────────────────────┘
                        │ WebSocket（pomelo 帧 + protobuf payload）
@@ -14,32 +14,37 @@
 │  gate（frontend）                             │
 │    pitaya acceptor / agent / session          │
 │    gate.go：AddRoute 路由                     │
+│      account.account.* → account 节点（轮询） │
 │      match.match.join → match 节点（轮询）    │
 │      game.game.* → 定点 game 节点（会话数据） │
-└──────────┬──────────────────┬────────────────┘
-           │ NATS RPC         │ NATS RPC
-┌──────────▼─────────┐  ┌─────▼────────────────────┐
-│  match（backend）   │  │  game（backend）          │
-│  配对队列          │  │  实例注册表（uid→Instance）│
-│  分配 game 节点     │  │  instance.go：★每局一 goroutine│
-│  RPC game.create   │  │   顺序执行、无锁          │
-└────────────────────┘  │  sim/ ECS 模拟层（双玩家）│
-                        │  ecs/ ECS 核心            │
-                        │  physics/ cgo 物理桥      │
-                        └──────────┬───────────────┘
-                                   │ cgo
-                        ┌──────────▼───────────────┐
-                        │  C 包装层（wrapper/）      │
-                        │  纯物理桥（双角色）        │
-                        └──────────┬───────────────┘
-                                   │ C++ API
-                        ┌──────────▼───────────────┐
-                        │  Jolt Physics（libjolt_c.dll）│
-                        └──────────────────────────┘
+│    session.go：会话绑定/断开 → 写/清在线登记  │
+│      + remote gate.gate.bindgame（供 match 调）│
+└───┬──────────┬──────────────────┬────────────┘
+    │ NATS RPC │ NATS RPC         │ NATS RPC
+┌───▼────────┐ │            ┌─────▼────────────────────┐
+│ account    │ │            │  game（backend）          │
+│ (backend)  │ │            │  实例注册表（uid→Instance）│
+│ 注册/登录/ │ │            │  instance.go：★每局一 goroutine│
+│ resume     │ │            │   顺序执行、无锁          │
+│ bcrypt+token│ │           │  sim/ ECS 模拟层（双玩家）│
+└─────┬──────┘ │            │  ecs/ ECS 核心            │
+      │  ┌─────▼──────────┐ │  physics/ cgo 物理桥      │
+      │  │ match（backend）│ └──────────┬───────────────┘
+      │  │ 队列在 Redis    │            │ cgo
+      │  │ 分配 game 节点  │ ┌──────────▼───────────────┐
+      │  │ RPC game.create │ │  C 包装层（wrapper/）      │
+      │  └─────┬──────────┘ │  纯物理桥（双角色）        │
+      │        │            └──────────┬───────────────┘
+┌─────▼────────▼─────┐                 │ C++ API
+│  Redis（共享状态）  │      ┌──────────▼───────────────┐
+│  账号 / 凭证        │      │  Jolt Physics（libjolt_c.dll）│
+│  会话归属 / 匹配队列│      └──────────────────────────┘
+└────────────────────┘
 ```
 
-三个服务由**单二进制** `joltgo.exe` 用 `-type gate|match|game` 区分角色，经
-**etcd**（服务发现）+ **NATS**（RPC）互相通信，见 `joltgo/deploy/`。
+四个服务由**单二进制** `joltgo.exe` 用 `-type gate|account|match|game` 区分角色，经
+**etcd**（服务发现）+ **NATS**（RPC）互相通信，共享状态放 **Redis**（`-redis`，默认
+`localhost:6379`），见 `joltgo/deploy/`。`game` 是纯计算节点，不连 Redis。
 
 ## 对局实例模型（★ 无锁核心）
 
@@ -104,7 +109,7 @@ sim/ 各系统（变更点）──rep.Set(实体, 属性, 终值)──▶ repl
 ```
 
 - **属性表（Schema）**：属性名是扁平字符串（约定 `组件.字段`，如 `Body.Mat`），在
-  `sim.Simulation.New()` 里由 `declareAttributes` **一次性声明**（当前 17 个，清单见
+  `sim.Simulation.New()` 里由 `declareAttributes` **一次性声明**（当前 14 个，清单见
   [API.md](API.md)）。Schema **只随 full 帧下发**（full 帧自带一份，避免「schema 与全量帧
   分两条消息、顺序可能颠倒」的竞态）；`version` 是属性表（名字 + Kind）的 FNV-1a 哈希，
   随 Schema 一起携带、**仅供诊断**，客户端**不比对**它——属性表有差异也不会崩（不认识
@@ -130,8 +135,8 @@ sim/ 各系统（变更点）──rep.Set(实体, 属性, 终值)──▶ repl
   （store 不反查 ECS 世界）。这是「变更时显式 Set」换 O(变化量) 的固有代价，由
   `sim/replicate_test.go` 的 oracle 测试兜底（`expectedAttrs` 从 ECS 世界独立推期望值，
   与 store 全量逐项比对）——加同步字段时先补 `rep.Set`、再补断言。
-- **已知安全取舍**：`JoinMsg.token` 是持有即可冒用的一次性身份，且被直接当作会话 UID；
-  生产环境应换成服务端签发、可吊销、带过期的凭证。本 demo 不做。
+- **身份与同步的关系**：同步帧不含任何身份信息，客户端是谁完全由**会话 UID**（= 账号 ID）
+  决定，见下文「账号与会话」。安全取舍也集中在那里，不在同步层。
 
 ### 每 tick 只同步一次变换
 
@@ -182,7 +187,9 @@ Go 侧（sim）；包装层内部只保留两个物理层自身的状态：刚�
 
 游戏状态由服务端持有，客户端是「输入 + 展示」的瘦客户端，模拟节奏由服务端驱动：
 
-1. 客户端连接 gate（WS）→ pomelo 握手 → 发 `match.match.join`（带持久化 `token`）进入匹配。
+1. 客户端连接 gate（WS）→ pomelo 握手 → **先登录**：发 `account.account.register` /
+   `.login` / `.resume`（Request/Response）拿到 `LoginReply`，会话被 `Bind` 到账号 ID；
+   然后才发 `match.match.join`（`JoinMsg` 是空消息，身份取自会话）进入匹配。
 2. match 服务配对（2 人，或 10s 兜底单人）→ `GetServersByType("game")` 挑一个 game
    节点 → `RPCTo("game.game.create")` 让该节点创建对局实例。
 3. game 节点的实例 goroutine 以固定 **20 Hz** tick 推进：消费最新输入 → 更新两个
@@ -196,13 +203,82 @@ Go 侧（sim）；包装层内部只保留两个物理层自身的状态：刚�
    平滑。服务端不会重复推送同一 tick，客户端也不再靠快照 diff 推断「谁消失了」。
 6. 客户端每渲染帧上报一条 `game.game.cmd`（输入 + 射击 + 重置**合并成一条**），
    由 gate 定点路由到托管该对局的 game 节点。
-7. 连接断开后客户端每秒自动重连：重新握手 + 用**同一个 token** 发 `match.match.join`；
+7. 连接断开后客户端每秒自动重连：重新握手 → 用本地保存的凭证 `account.account.resume`
+   （会话重新 `Bind` 到**同一个账号 ID**）→ 发 `match.match.join`；
    match 先向各 game 节点 fan-out `game.rejoin`，命中存量实例则走与首次匹配相同的收尾
    （写会话数据 + 推 `onMatched`），客户端回到**同一对局、同一槽位**、不入匹配队列；
    客户端随后发 `game.resync` 请求 full 帧把本地世界整体重建（未命中则按新玩家重新匹配）。
 
 这种「服务端权威 + 固定 tick + 推送 + 客户端插值」让物理/游戏逻辑只存在于一处，
 模拟快慢与客户端数量/帧率无关，客户端换引擎也不影响逻辑。
+
+### 账号与会话
+
+客户端不再自带身份（旧版是首次运行生成一个 UUID 存在本地，谁拿到谁就是谁）。
+现在身份由 `account` 服务签发，三条路都以同一个 `LoginReply` 收尾：
+
+```text
+register(username, password) ─▶ 校验格式 → 限流 → bcrypt 哈希 → 占名 → 建账号 ─┐
+login(username, password)    ─▶ 限流 → 查名 → bcrypt 校验 ────────────────────┤
+resume(token)                ─▶ 解析 token（Redis sess:{token}）─────────────┤
+                                                                             ▼
+                                          finishLogin：记下旧 gate → 轮换 token
+                                          → session.Bind(accountID) → 定点踢旧连接
+                                          → LoginReply{ok, token, username, account_id}
+```
+
+- **传输是 Request/Response，不是 Notify/Push**。这不是风格选择：pitaya 的 NATS 后端 agent
+  在 uid 未绑定时 `Push` 直接返回 `ErrNoUIDBind`，而登录**失败**时 uid 恰恰是空的，
+  结果根本推不回去。pitaya 靠 handler 有没有返回值判定类型（有返回值 = Request），
+  所以三个 handler 都返回 `(*protos.LoginReply, error)`。这是本项目第一处用 Request/Response。
+- **会话 UID = accountID**。这一条是「`game.rejoin` 为何零改动」的全部答案：
+  `game.Component` 的实例注册表、`SendPushToUsers` 的目标、`match` 的回局 fan-out，
+  历来都按会话 UID 索引，只是那个字符串以前来自客户端、现在来自账号表。
+  `RejoinMsg.token` 这个 wire 字段名是历史遗留，它装的是 accountID（改名要动 proto 与客户端，
+  收益为零）。
+- **凭证形态**：32 字节 `crypto/rand` + base64url（43 字符），存 `sess:{token}` → accountID，
+  反向 `sess:acct:{id}` → token，TTL 7 天、每次 resume 两边一起续期。
+  一次 `login`/`register` 会**轮换** token 并在同一个事务里删掉旧的 —— 一个账号只有一个活凭证。
+- **密码**：bcrypt DefaultCost（约 50 ms，这也是为什么限流必须在校验之前）。用户名
+  `^[a-zA-Z0-9_]{3,16}$`，占名与查名都按小写归一，密码 6–64 字节。
+  「用户名不存在」与「密码错误」返回同一个 `bad_credentials`，不泄露账号是否存在。
+- **已知安全取舍**（诚实说明，本 demo 不做）：token 是 **bearer 凭证** —— 拿到即可使用，
+  服务端无法区分持有者。当前是明文 WS + 7 天 TTL，生产环境应上 TLS（否则凭证在链路上裸奔）
+  并把 TTL 缩到分钟级 + 配一条刷新路径。
+- **限流按用户名，不按 IP**（`rl:user:{name}`，1 分钟 10 次）。不是偷懒：account 是 backend，
+  它拿到的 pitaya agent 是 `Remote`，`RemoteAddr()` 返回 nil —— 它**看不见客户端 IP**。
+  要按 IP 限流得让 gate 把地址透传进来，那是另一层改造。
+
+### 多节点正确性
+
+每个角色都可以起多份。哪些状态是节点本地的、因此必须靠路由或共享存储兜住：
+
+| 角色 | 节点本地状态 | 共享状态（Redis） | 多节点怎么正确 |
+| --- | --- | --- | --- |
+| gate | pitaya session / agent（就是那条 TCP 连接，天然本地） | `online:{accountID}` → 本节点 id | 连接在哪就是哪；别人要找它靠在线登记 |
+| account | 无 | `acct:*`、`sess:*`、`rl:user:*` | 完全无状态，随便扩 |
+| match | 只有 10s 兜底的 ticker | `match:queue`（ZSET + Lua 原子脚本） | 队列在 Redis，两个 match 节点能互相配对 |
+| game | **对局实例**（`uid→Instance`、`matchId→Instance`），有状态且不可迁移 | 无（game 不连 Redis） | 靠 gate 会话数据里的 `gameServerId` 定点路由 |
+
+三个机制把它们串起来：
+
+- **在线登记**：gate 在 `OnAfterSessionBind` 写 `online:{accountID}` → 本节点 id，
+  `OnSessionClose` 清除（TTL 24h 兜底）。account 靠它把顶号踢到**正确的那个 gate**
+  （`gate.sys.kick`）；match 靠它找到玩家所在的 gate，请那个 gate 写会话数据
+  （remote `gate.gate.bindgame`，顺带探活）。
+- **定点踢 + 凭证轮换**：`finishLogin` 的顺序是「先记下旧 gate → 轮换 token → Bind → 再踢」。
+  `Bind` 本身会关掉**同一个 gate 上**的旧会话（框架的 `sessionsByUID`），所以那一脚只用来处理
+  「旧会话在另一个 gate」，且绝不会打到自己。
+  **权威是凭证轮换，不是踢**：旧 token 在 Bind 之前就已经从 Redis 删掉了，旧客户端断线后
+  resume 必然失败。踢只是让它早点闭嘴。因此在线登记是 **best-effort** —— Redis 读写失败
+  最多漏踢一次（旧连接多活一会儿），既不会挡住新连接，也不会让顶号失效。
+  读不到当前归属时代码宁可**不踢**：误踢会打掉刚建立的会话，而此时凭证已经轮换，
+  那个客户端连 resume 都回不来。
+- **推送双发窗口（明确不修）**：从旧连接被踢到它真正关闭之间有个短窗口，同一账号在两个 gate
+  上都有会话，pitaya 的 NATS 用户频道没有 queue group，两个 gate 都会收到同一份 push、
+  各自推给自己那条连接。加 queue group 能消掉双发，但代价是**两个客户端各收一半帧流** ——
+  那是彻底坏掉，比多发一份糟得多。所以这里保留双发：旧连接反正马上就断，
+  而它期间收到的帧只是被丢弃。
 
 ## 核心机制
 
@@ -367,8 +443,10 @@ Jolt 的 Release 构建定义 `NDEBUG`、`JPH_DEBUG_RENDERER`、`JPH_PROFILE_ENA
   匹配进新对局，无脑删会把新对局的 uid 映射一起抹掉。
 - 慢客户端：pitaya agent 每连接一个写者 + 有界发送缓冲，写不出去则断开连接，
   不会拖慢 20 Hz 模拟。
-- 服务间通信：etcd（服务发现，60s 租约）+ NATS（RPC）。route 三段式
-  `server.service.method`（`match.match.join` / `game.game.cmd` / `game.game.resync`）。
+- 服务间通信：etcd（服务发现，60s 租约）+ NATS（RPC）+ Redis（共享状态）。route 三段式
+  `server.service.method`（`account.account.login` / `match.match.join` / `game.game.cmd` /
+  `game.game.resync`）；服务间 RPC 同样三段式（`game.game.create` / `game.game.rejoin` /
+  `gate.gate.bindgame` / `gate.sys.kick`）。
 
 ### 客户端插值
 
