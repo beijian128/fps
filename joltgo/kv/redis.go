@@ -18,7 +18,15 @@ func Open(ctx context.Context, addr string) (*redis.Client, error) {
 	if addr == "" {
 		addr = DefaultAddr
 	}
-	c := redis.NewClient(&redis.Options{Addr: addr})
+	c := redis.NewClient(&redis.Options{
+		Addr: addr,
+		// 不开这个开关的话 go-redis 会在读写 socket 前把 ctx 换成 Background
+		// （baseClient.context()，redis.go:641），调用方设的 deadline 只能拦住
+		// 连接池等待与重试间隔，拦不住一次挂死的读 —— 那条路只受 ReadTimeout(3s)
+		// 约束。gate 的会话归属读写跑在登录/断连的关键路径上，必须能靠 ctx 掐断
+		// （见 gate.onlineTimeout）。
+		ContextTimeoutEnabled: true,
+	})
 	if err := c.Ping(ctx).Err(); err != nil {
 		_ = c.Close()
 		return nil, fmt.Errorf("kv: ping %s: %w", addr, err)

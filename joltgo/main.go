@@ -25,6 +25,7 @@ import (
 	"log"
 	"strings"
 
+	"github.com/redis/go-redis/v9"
 	pitaya "github.com/topfreegames/pitaya/v3/pkg"
 	"github.com/topfreegames/pitaya/v3/pkg/acceptor"
 	"github.com/topfreegames/pitaya/v3/pkg/component"
@@ -63,21 +64,31 @@ func main() {
 		builder.AddAcceptor(acceptor.NewWSAcceptor(":8080"))
 	}
 
-	log.Fatalf("启动失败: %v", run(svType, builder, *redisAddr))
+	// app.Start() 收到 SIGINT/SIGTERM 时是**正常返回**的，run 也就返回 nil。
+	// 无条件 log.Fatalf 会把每一次优雅退出都打成「启动失败: <nil>」并以 1 退出，
+	// 部署脚本与冒烟测试会读到不存在的失败。
+	if err := run(svType, builder, *redisAddr); err != nil {
+		log.Fatalf("启动失败: %v", err)
+	}
 }
 
 // run 组装并启动指定角色的服务。抽成函数是为了让 flag 解析与 defer 清理分离 ——
 // main 里 log.Fatal 会跳过 defer，Redis 连接必须在这里关。
 func run(svType *string, builder *pitaya.Builder, redisAddr string) error {
-	// Redis 是三个角色的共享依赖（gate 写会话归属、account 存取账号与凭证、
-	// match 存排队队列），但不是每个角色都必须在启动时连上：gate 的归属登记是
-	// best-effort，连不上只降级；account/match 没有 Redis 则无法工作。
-	// 这里统一「连不上就启动失败」——早失败比运行中途才暴露好排查。
-	rdb, err := kv.Open(context.Background(), redisAddr)
-	if err != nil {
-		return err
+	// Redis 是 gate / account / match 三个角色的共享依赖（gate 写会话归属、
+	// account 存取账号与凭证、match 存排队队列）。game 不碰 Redis，就不给它开连接 ——
+	// 否则 Redis 一挂，连纯计算的 game 节点都起不来。
+	// 对需要它的三个角色统一「连不上就启动失败」——早失败比运行中途才暴露好排查
+	// （gate 的归属登记虽是 best-effort、运行期写失败只降级，但地址配错仍应在启动时炸）。
+	var rdb *redis.Client
+	if *svType != "game" {
+		var err error
+		rdb, err = kv.Open(context.Background(), redisAddr)
+		if err != nil {
+			return err
+		}
+		defer rdb.Close()
 	}
-	defer rdb.Close()
 
 	app := builder.Build()
 
@@ -88,7 +99,13 @@ func run(svType *string, builder *pitaya.Builder, redisAddr string) error {
 		}
 		// 会话归属：绑定后写 online:{uid} → 本节点，断开时清除。
 		gate.RegisterSessionHooks(builder.SessionPool, app.GetServerID(), online.NewStore(rdb))
-		app.Register(gate.NewSessionComponent(app, builder.SessionPool),
+		// 必须用 RegisterRemote，不能用 Register：match 是用 app.RPCTo 调过来的，
+		// 而 RPCTo 走 RPCType_User → handleRPCUser → remotes 表，那张表**只由
+		// RegisterRemote 填充**。注册成 handler 的话路由在 remotes 里找不到，
+		// match 的 bindgame 会拿 ErrNotFoundCode（见 service/remote.go:246/254）。
+		// 反过来这也正好关掉了攻击面：客户端发的 gate.gate.bindgame 会被路由到
+		// handler 池、找不到而报错，压根到不了这里。
+		app.RegisterRemote(gate.NewSessionComponent(app, builder.SessionPool),
 			component.WithName("gate"),
 			component.WithNameFunc(strings.ToLower),
 		)

@@ -10,6 +10,7 @@ package gate
 import (
 	"context"
 	"log"
+	"time"
 
 	pitaya "github.com/topfreegames/pitaya/v3/pkg"
 	"github.com/topfreegames/pitaya/v3/pkg/component"
@@ -18,8 +19,16 @@ import (
 	"joltgo/online"
 )
 
-// SessionComponent 是 gate 上的会话组件。它不处理客户端消息：客户端不该发
-// gate.*，真发了也会被 BindGame 的守卫挡住。
+// onlineTimeout 是会话归属读写的超时上限。
+//
+// 这两个调用都跑在关键路径上：markOnline 在 Bind 内部（登录链路），
+// clearOnline 在连接关闭时、且持有 agent 的 closeMutex。默认 ctx 没有 deadline，
+// 遇到 Redis 被黑洞（丢包而非拒连）时 go-redis 会耗掉整个重试预算（~10s），
+// 把登录或连接关闭卡住 —— 而这条登记是 best-effort 的，宁可快速放弃。
+const onlineTimeout = 1500 * time.Millisecond
+
+// SessionComponent 是 gate 上的会话组件。它只经 RegisterRemote 注册（供后端
+// RPC 调用），不进 handler 池：客户端发 gate.* 会在路由阶段就找不到而报错。
 type SessionComponent struct {
 	component.Base
 	app  pitaya.Pitaya
@@ -55,6 +64,8 @@ func markOnline(ctx context.Context, s session.Session, serverID string, onl *on
 	if uid == "" {
 		return
 	}
+	ctx, cancel := context.WithTimeout(ctx, onlineTimeout)
+	defer cancel()
 	if err := onl.Set(ctx, uid, serverID); err != nil {
 		// best-effort：登记失败不阻塞连接建立，只降级。
 		log.Printf("gate: set online for %s failed: %v", uid, err)
@@ -85,7 +96,8 @@ func clearOnline(pool session.SessionPool, s session.Session, serverID string, o
 		return
 	}
 
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), onlineTimeout)
+	defer cancel()
 	gateID, err := onl.Gate(ctx, uid)
 	if err != nil {
 		log.Printf("gate: online lookup for %s failed, keeping entry: %v", uid, err)
@@ -100,19 +112,17 @@ func clearOnline(pool session.SessionPool, s session.Session, serverID string, o
 	}
 }
 
-// BindGame 是远端 RPC handler（route "gate.gate.bindgame"）：后端（match）请本
+// BindGame 是远端 RPC remote（route "gate.gate.bindgame"）：后端（match）请本
 // gate 把对局归属写进玩家自己的会话数据。
 //
 // 让 gate 改而不是 match 隔着 NATS 用 PushToFront 改：会话属于前端，请它自己改
 // 比跨进程改别人的状态更正确；而且 match 手里只有 uid，根本拿不到会话对象。
-//
-// 安全守卫：客户端可以直接发 gate.gate.bindgame，把自己的会话绑到任意 game
-// 节点，从而绕过匹配、对着别人的对局发命令。客户端消息走 localProcess（会话是
-// 前端会话，IsFrontend()==true），后端 RPC 走 handleRPCSys（会话是 pitaya 的
-// Remote，IsFrontend()==false），据此把客户端挡在门外。
 func (c *SessionComponent) BindGame(ctx context.Context, msg *protos.BindGameMsg) (*protos.BindGameReply, error) {
-	s := c.app.GetSessionFromCtx(ctx)
-	if s.GetIsFrontend() {
+	// 纵深防御。正常情况下客户端到不了这里 —— 本组件只经 RegisterRemote 暴露
+	// （见 main.go），客户端发的 gate.gate.bindgame 会进 gate 的 handler 池、
+	// 找不到而报错。但若将来有人把 app.Register 也加上，这条守卫就是唯一的
+	// 拦截点：客户端会话 IsFrontend()==true，后端 RPC 的 ctx 里没有会话（nil）。
+	if s := c.app.GetSessionFromCtx(ctx); s != nil && s.GetIsFrontend() {
 		log.Printf("gate: reject bindgame from client session uid=%s", s.UID())
 		return &protos.BindGameReply{Found: false}, nil
 	}

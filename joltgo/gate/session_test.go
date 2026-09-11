@@ -2,7 +2,9 @@ package gate
 
 import (
 	"context"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
@@ -88,6 +90,24 @@ func TestBindGameFromBackendWritesSessionData(t *testing.T) {
 	})
 	if err != nil || !reply.Found {
 		t.Fatalf("后端请求应成功，得到 %+v err=%v", reply, err)
+	}
+	if got := target.data["gameServerId"]; got != "g-1" {
+		t.Fatalf("会话数据应写入 g-1，得到 %v", got)
+	}
+}
+
+// 后端 RPC 的 ctx 里没有会话（GetSessionFromCtx 返回 nil）—— 这是真实调用路径，
+// 守卫必须 nil 安全，否则 match 的 bindgame 会 panic（被 Pcall 兜成通用错误，
+// 但 Found=true 永远到不了）。
+func TestBindGameWithNoSessionInCtx(t *testing.T) {
+	target := &fakeSession{uid: "1"}
+	pool := &fakePool{byUID: map[string]session.Session{"1": target}}
+	app := &fakeApp{sess: nil} // 无会话
+	c := NewSessionComponent(app, pool)
+
+	reply, err := c.BindGame(context.Background(), &protos.BindGameMsg{Uid: "1", GameServerId: "g-1"})
+	if err != nil || !reply.Found {
+		t.Fatalf("无会话时应正常写入，得到 %+v err=%v", reply, err)
 	}
 	if got := target.data["gameServerId"]; got != "g-1" {
 		t.Fatalf("会话数据应写入 g-1，得到 %v", got)
@@ -215,5 +235,72 @@ func TestClearOnlineClearsOwnEntry(t *testing.T) {
 
 	if got, _ := onl.Gate(ctx, "7"); got != "" {
 		t.Fatalf("自己的登记应被清掉，得到 %q", got)
+	}
+}
+
+// deadlineProbe 是挂在 go-redis 上的钩子，记录每条命令拿到的 ctx 有没有 deadline。
+// 用钩子而不是掐表：go-redis 自己的 ReadTimeout(3s) 已经给「读挂死」兜了底，
+// 掐表分不清 1.5s 和 3s（要分清就得把阈值卡到两者之间，在慢机器上必抖）。
+// 钩子直接盯住本次修复真正改的东西 —— 传给 Redis 的 ctx 带不带 deadline。
+type deadlineProbe struct {
+	mu   sync.Mutex
+	cmds []string        // 观察到的命令名
+	left []time.Duration // 对应的剩余时间；无 deadline 记 -1
+}
+
+func (h *deadlineProbe) DialHook(next redis.DialHook) redis.DialHook { return next }
+
+func (h *deadlineProbe) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		d := time.Duration(-1)
+		if dl, ok := ctx.Deadline(); ok {
+			d = time.Until(dl)
+		}
+		h.mu.Lock()
+		h.cmds = append(h.cmds, cmd.Name())
+		h.left = append(h.left, d)
+		h.mu.Unlock()
+		return next(ctx, cmd)
+	}
+}
+
+func (h *deadlineProbe) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
+}
+
+// 两个钩子发往 Redis 的每条命令都必须带 deadline，且不超过 onlineTimeout。
+//
+// markOnline 跑在 Bind 内部（登录链路），clearOnline 跑在连接关闭时、且持有
+// agent 的 closeMutex。pitaya 给的请求 ctx 和 context.Background() 都没有
+// deadline；没有 onlineTimeout 的话，Redis 被黑洞（丢包而非拒连）时这两处会
+// 一路等到 go-redis 把 dial/read/重试预算耗光，把登录或连接关闭卡住。
+func TestOnlineHooksBoundRedisCallsWithDeadline(t *testing.T) {
+	mr := miniredis.RunT(t)
+	probe := &deadlineProbe{}
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	rdb.AddHook(probe)
+	t.Cleanup(func() { _ = rdb.Close() })
+
+	onl := online.NewStore(rdb)
+	s := &fakeSession{id: 1, uid: "7"}
+	pool := &fakePool{byUID: map[string]session.Session{"7": s}}
+
+	// markOnline 拿到的是 pitaya 的请求 ctx —— 它自己没有 deadline。
+	markOnline(context.Background(), s, "gate-A", onl)
+	// clearOnline 不接 ctx，内部自己起一个。
+	clearOnline(pool, s, "gate-A", onl)
+
+	probe.mu.Lock()
+	defer probe.mu.Unlock()
+	if len(probe.cmds) == 0 {
+		t.Fatal("探针没抓到任何命令，测试本身失效了")
+	}
+	for i, name := range probe.cmds {
+		switch d := probe.left[i]; {
+		case d < 0:
+			t.Errorf("%s 的 ctx 没有 deadline —— Redis 黑洞时会卡住登录/断连", name)
+		case d > onlineTimeout:
+			t.Errorf("%s 的 deadline 还剩 %v，超过 onlineTimeout(%v)", name, d, onlineTimeout)
+		}
 	}
 }
