@@ -326,6 +326,79 @@ func TestResumeHappyPathAndInvalid(t *testing.T) {
 	}
 }
 
+// 凭证有效但账号数据没了（被清库 / 手工删）—— 这才是真的恢复不了，按凭证无效处理。
+func TestResumeWithMissingAccountIsTokenInvalid(t *testing.T) {
+	env := newTestComponent(t)
+	ctx := context.Background()
+	env.mustRegister(t, "alice", "hunter2")
+	tok, err := env.store.CurrentToken(ctx, "1")
+	if err != nil || tok == "" {
+		t.Fatalf("准备 token 失败: %q err=%v", tok, err)
+	}
+	// 只把账号哈希删掉：凭证与指针都还在。
+	env.mr.Del("acct:1")
+
+	r, err := env.comp.Resume(ctx, &protos.ResumeMsg{Token: tok})
+	if err != nil {
+		t.Fatalf("不该返回 Go error: %v", err)
+	}
+	if r.Ok || r.Reason != ReasonTokenInvalid {
+		t.Fatalf("账号不存在应回 token_invalid，得到 %+v", r)
+	}
+}
+
+// failCmdHook 让指定命令在发往 Redis 之前就失败，用来精确构造「只有这一条命令
+// 瞬时失败」的场景。
+type failCmdHook struct{ name string }
+
+func (h failCmdHook) DialHook(next redis.DialHook) redis.DialHook { return next }
+
+func (h failCmdHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		if cmd.Name() == h.name {
+			return errors.New("boom: 模拟瞬时失败")
+		}
+		return next(ctx, cmd)
+	}
+}
+
+func (h failCmdHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
+}
+
+// 读账号数据时遇到瞬时故障必须回 internal，**不能**回 token_invalid。
+//
+// 客户端的失效凭证清理正是按 token_invalid 删本地 token 的
+// （godot_client/scripts/fps_client.gd 的 _clear_token）：把一次 Redis 抖动报成
+// token_invalid，等于服务端亲手把一份好凭证判死，用户得重新输密码。
+func TestResumeMapsTransientStoreErrorToInternal(t *testing.T) {
+	env := newTestComponent(t)
+	ctx := context.Background()
+	env.mustRegister(t, "alice", "hunter2")
+	tok, err := env.store.CurrentToken(ctx, "1")
+	if err != nil || tok == "" {
+		t.Fatalf("准备 token 失败: %q err=%v", tok, err)
+	}
+
+	// 只让 HGETALL 失败。**不能**用 mr.SetError()：那会让所有命令都失败，
+	// ResolveToken 的 GET 也失败，于是测试走的是上面「resolve token failed」那条
+	// 分支，GetAccount 的错误映射根本没被走到 —— 假绿。
+	env.store.rdb.AddHook(failCmdHook{name: "hgetall"})
+
+	r, err := env.comp.Resume(ctx, &protos.ResumeMsg{Token: tok})
+	if err != nil {
+		t.Fatalf("不该返回 Go error: %v", err)
+	}
+	if r.Ok || r.Reason != ReasonInternal {
+		t.Fatalf("瞬时读失败应回 internal（回 token_invalid 会让客户端删掉好凭证），得到 %+v", r)
+	}
+
+	// 服务端这边不许连累凭证本身：抖动过去后同一份凭证必须还能用。
+	if id, ok, err := env.store.ResolveToken(ctx, tok); err != nil || !ok || id != "1" {
+		t.Fatalf("瞬时读失败不能连累凭证，得到 id=%q ok=%v err=%v", id, ok, err)
+	}
+}
+
 // Bind 失败时不能把「登录成功」报给客户端：会话没绑上，之后的 match.join
 // 会被当成未登录而忽略，玩家会卡在「正在匹配…」无从排查。
 func TestLoginReportsBindFailure(t *testing.T) {

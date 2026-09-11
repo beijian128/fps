@@ -3,6 +3,7 @@ package account
 import (
 	"context"
 	"errors"
+	"log"
 	"strconv"
 	"time"
 
@@ -11,7 +12,8 @@ import (
 
 // 键空间与参数。集中在这里，避免键名散落在各处拼字符串。
 const (
-	keySeq = "acct:seq"
+	keySeq        = "acct:seq"
+	keySessPrefix = "sess:" // 凭证键 sess:{token} 的前缀（Lua 脚本要用它拼旧键）
 
 	keySessTTL = 7 * 24 * time.Hour // 凭证有效期（每次 resume 续满）
 	keyRateTTL = time.Minute        // 限流窗口
@@ -34,9 +36,34 @@ const (
 
 func keyName(username string) string { return "acct:name:" + NormalizeUsername(username) }
 func keyAcct(id string) string       { return "acct:" + id }
-func keySess(token string) string    { return "sess:" + token }
+func keySess(token string) string    { return keySessPrefix + token }
 func keySessAcct(id string) string   { return "sess:acct:" + id }
 func keyRate(username string) string { return "rl:user:" + NormalizeUsername(username) }
+
+// issueTokenScript 原子地完成一次凭证轮换：读旧指针 → 写新凭证 → 换指针 → 删旧凭证。
+//
+// **必须原子**。拆成「先 GET 旧指针，再 pipeline 写新凭证/换指针/删旧 token」时，
+// 同一账号的两个并发登录会读到同一个旧指针、各自删掉它，于是**两个 token 都活着**
+// —— 而指针只指向其中一个，另一个从此再也不会被任何一次轮换删掉（孤儿凭证永久
+// 有效）。轮换是单会话强制的权威机制，这个窗口直接把它作废。Redis 串行执行脚本，
+// 把「读旧值 + 换指针 + 删旧值」合成一次操作就不存在这个窗口。
+//
+// KEYS[1] = sess:acct:{accountID}（指针）  KEYS[2] = sess:{newToken}
+// ARGV[1] = newToken  ARGV[2] = TTL 秒  ARGV[3] = accountID  ARGV[4] = 凭证键前缀
+//
+// 前缀要经 ARGV 传进来：旧凭证的键名（sess:{old}）在调用前是不知道的，而脚本里
+// 不能拼字符串字面量。本项目是单实例 Redis，不涉及 Cluster 的跨槽位限制。
+// 结尾必须 return 一个非 nil 值：脚本无返回值时 go-redis 会把这次 EVAL 读成
+// redis.Nil（"no value"），调用方会把每一次成功轮换都当成失败。
+const issueTokenScript = `
+local old = redis.call('GET', KEYS[1])
+redis.call('SET', KEYS[2], ARGV[3], 'EX', ARGV[2])
+redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
+if old then
+  redis.call('DEL', ARGV[4] .. old)
+end
+return 1
+`
 
 // ErrNameTaken 表示用户名已被占用。
 var ErrNameTaken = errors.New("account: name taken")
@@ -138,23 +165,18 @@ func (s *Store) GetAccount(ctx context.Context, id string) (Account, bool, error
 // 也 resume 不回来、只能回到登录面板。定点踢（见 online 包）只负责让它及时
 // 闭嘴，不负责正确性。
 func (s *Store) IssueToken(ctx context.Context, accountID string) (string, error) {
-	old, err := s.rdb.Get(ctx, keySessAcct(accountID)).Result()
-	if err != nil && err != redis.Nil {
-		return "", err
-	}
-
 	token, err := NewToken()
 	if err != nil {
 		return "", err
 	}
-
-	pipe := s.rdb.TxPipeline()
-	pipe.Set(ctx, keySess(token), accountID, keySessTTL)
-	pipe.Set(ctx, keySessAcct(accountID), token, keySessTTL)
-	if old != "" {
-		pipe.Del(ctx, keySess(old))
-	}
-	if _, err := pipe.Exec(ctx); err != nil {
+	// 换指针 + 删旧凭证必须在**一次**脚本里完成，见 issueTokenScript 的说明。
+	if err := s.rdb.Eval(ctx, issueTokenScript,
+		[]string{keySessAcct(accountID), keySess(token)},
+		token,
+		strconv.FormatInt(int64(keySessTTL/time.Second), 10),
+		accountID,
+		keySessPrefix,
+	).Err(); err != nil {
 		return "", err
 	}
 	return token, nil
@@ -178,7 +200,14 @@ func (s *Store) ResolveToken(ctx context.Context, token string) (string, bool, e
 	pipe := s.rdb.TxPipeline()
 	pipe.Expire(ctx, keySess(token), keySessTTL)
 	pipe.Expire(ctx, keySessAcct(id), keySessTTL)
-	_, _ = pipe.Exec(ctx)
+	if _, err := pipe.Exec(ctx); err != nil {
+		// 续期失败不当作认证失败（凭证本身是有效的），但**不能静默**：只续上
+		// sess:{token} 而没续上指针时，活跃账号的 sess:acct:{id} 会先过期，下一次
+		// IssueToken 就读不到旧 token、跳过删除 —— 轮换（单会话强制的权威手段）
+		// 从那一刻起静默失效，而症状（旧凭证一直有效）要到几天后才显形，没有这条
+		// 日志就只能靠猜。
+		log.Printf("account: renew ttl for account %s failed: %v", id, err)
+	}
 	return id, true, nil
 }
 

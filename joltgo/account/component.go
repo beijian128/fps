@@ -143,8 +143,18 @@ func (c *Component) Resume(ctx context.Context, msg *protos.ResumeMsg) (*protos.
 		return fail(ReasonTokenInvalid), nil
 	}
 	acct, ok, err := c.store.GetAccount(ctx, id)
-	if err != nil || !ok {
-		log.Printf("account: account %s for a valid token is missing (err=%v)", id, err)
+	if err != nil {
+		// 瞬时读失败**不是**凭证无效。映射成 token_invalid 是破坏性的：客户端的
+		// 失效凭证清理正是按这个原因码删本地 token 的（godot_client/scripts/
+		// fps_client.gd 的 _clear_token），一次 Redis 抖动就会把好凭证删掉、逼用户
+		// 重新输密码。与上面 ResolveToken 的错误映射保持一致（那里也是这样分的）。
+		log.Printf("account: get account %s for a valid token failed: %v", id, err)
+		return fail(ReasonInternal), nil
+	}
+	if !ok {
+		// 凭证有效、指针也对，但账号数据没了（被清库/手工删除）：这才是真的恢复
+		// 不了，按凭证无效处理。
+		log.Printf("account: account %s for a valid token is missing", id)
 		return fail(ReasonTokenInvalid), nil
 	}
 	return c.finishLogin(ctx, id, acct.Username)

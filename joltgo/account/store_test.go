@@ -1,8 +1,12 @@
 package account
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -164,6 +168,217 @@ func TestIssueTokenRotatesAndRevokesOld(t *testing.T) {
 	if got, ok, _ := s.ResolveToken(ctx, t2); !ok || got != id {
 		t.Fatalf("t2 应解析到 %s，得到 %q ok=%v", id, got, ok)
 	}
+}
+
+// assertExactlyOneLiveToken 断言 toks 里恰好有一个还有效，且它正是指针指向的那个。
+func assertExactlyOneLiveToken(t *testing.T, s *Store, id string, toks []string) {
+	t.Helper()
+	ctx := context.Background()
+	live := make([]string, 0, 1)
+	for _, tok := range toks {
+		if _, ok, _ := s.ResolveToken(ctx, tok); ok {
+			live = append(live, tok)
+		}
+	}
+	if len(live) != 1 {
+		t.Fatalf("应恰好剩 1 个凭证有效，实际 %d 个（多出来的孤儿凭证再也不会被轮换删掉）: %v",
+			len(live), live)
+	}
+	cur, err := s.CurrentToken(ctx, id)
+	if err != nil {
+		t.Fatalf("CurrentToken 报错: %v", err)
+	}
+	if cur != live[0] {
+		t.Fatalf("指针应指向唯一活着的凭证 %q，得到 %q", live[0], cur)
+	}
+}
+
+// 并发轮换：多路同时登录，最后必须只剩一个活着的凭证。
+//
+// 回归测试。曾经是「先 GET 旧指针，再 pipeline 写新凭证/换指针/删旧 token」：两个
+// 并发调用读到同一个旧指针、各自删掉它，于是**两个 token 都活着** —— 而指针只指向
+// 其中一个，另一个从此再也不会被任何一次轮换删掉（孤儿凭证永久有效）。轮换是
+// 单会话强制的**权威**手段，这个窗口等于把它作废。
+func TestIssueTokenConcurrentLeavesExactlyOneLiveToken(t *testing.T) {
+	s, _ := newTestStore(t)
+	id := createTestAccount(t, s, "alice", "hunter2")
+	ctx := context.Background()
+
+	// 先放一个存量凭证：第一次签发时没有旧指针可读，竞态窗口根本不存在。
+	if _, err := s.IssueToken(ctx, id); err != nil {
+		t.Fatalf("准备 token 失败: %v", err)
+	}
+
+	const n = 8
+	toks := make([]string, n)
+	errs := make([]error, n)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start // 尽量让 n 路同时进 IssueToken
+			toks[i], errs[i] = s.IssueToken(ctx, id)
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("第 %d 路 IssueToken 报错: %v", i, err)
+		}
+	}
+	assertExactlyOneLiveToken(t, s, id, toks)
+}
+
+// rotateRaceHook 卡住「读 sess:acct:{id} 旧指针」这一步，直到有 n 路调用都读到
+// 同一个旧值才一起放行 —— 也就是把并发轮换的竞态窗口**确定性地**摆出来。
+type rotateRaceHook struct {
+	n        int
+	mu       sync.Mutex
+	seen     int
+	disarmed bool
+	gate     chan struct{}
+}
+
+func (h *rotateRaceHook) Disarm() {
+	h.mu.Lock()
+	h.disarmed = true
+	h.mu.Unlock()
+}
+
+func (h *rotateRaceHook) DialHook(next redis.DialHook) redis.DialHook { return next }
+
+// ProcessHook 对匹配的 GET **先真的执行**（next），再把结果扣住等其余各路也读完，
+// 最后才把结果放回调用方 —— 这样 N 路调用一定是拿着**同一个旧值**继续往下走。
+// 若在 next 之前卡，先被放行的那一路会先完成整套轮换，后一路读到的就是新指针，
+// 竞态窗口等于没被构造出来（第一版就是这么写的，旧实现照样通过）。
+func (h *rotateRaceHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		args := cmd.Args()
+		h.mu.Lock()
+		armed := !h.disarmed
+		h.mu.Unlock()
+		hit := false
+		if armed && cmd.Name() == "get" && len(args) == 2 {
+			if key, ok := args[1].(string); ok && strings.HasPrefix(key, "sess:acct:") {
+				hit = true
+			}
+		}
+		if !hit {
+			return next(ctx, cmd)
+		}
+
+		err := next(ctx, cmd) // 读完成（值已在 cmd 里），但先不还给调用方
+		h.mu.Lock()
+		h.seen++
+		if h.seen == h.n {
+			close(h.gate)
+		}
+		h.mu.Unlock()
+		select {
+		case <-h.gate:
+		case <-time.After(2 * time.Second): // 兜底：绝不让测试挂死
+		}
+		return err
+	}
+}
+
+func (h *rotateRaceHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
+}
+
+// 两路并发的**确定性**复现：钩子保证两路都读到同一个旧指针之后才放行。
+//
+// 新实现把「读旧值 + 换指针 + 删旧值」挪进了一个 Lua 脚本（Redis 串行执行），钩子
+// 再也不会被触发，于是这个测试退化成一次普通的轮换断言；但只要有人改回「先 GET
+// 再 pipeline」，它就会**必然**失败（而不是偶发失败）—— 这正是它存在的意义。
+func TestIssueTokenConcurrentPairForcedInterleaving(t *testing.T) {
+	s, _ := newTestStore(t)
+	id := createTestAccount(t, s, "alice", "hunter2")
+	ctx := context.Background()
+	if _, err := s.IssueToken(ctx, id); err != nil {
+		t.Fatalf("准备 token 失败: %v", err)
+	}
+
+	hook := &rotateRaceHook{n: 2, gate: make(chan struct{})}
+	s.rdb.AddHook(hook)
+
+	toks := make([]string, 2)
+	errs := make([]error, 2)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			toks[i], errs[i] = s.IssueToken(ctx, id)
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	// 断言阶段会自己 GET sess:acct:{id}（CurrentToken）—— 那不是竞态的一部分，
+	// 撤掉钩子免得它在屏障上白等。
+	hook.Disarm()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("第 %d 路 IssueToken 报错: %v", i, err)
+		}
+	}
+	assertExactlyOneLiveToken(t, s, id, toks)
+}
+
+// 续期失败必须留下日志（凭证本身仍然有效，所以不能报错）—— 只续上 token 而没续上
+// 指针时，轮换会从指针过期那一刻起静默失效，没有这条日志就只能靠猜。
+func TestResolveTokenLogsRenewalFailure(t *testing.T) {
+	s, _ := newTestStore(t)
+	id := createTestAccount(t, s, "alice", "hunter2")
+	ctx := context.Background()
+	tok, err := s.IssueToken(ctx, id)
+	if err != nil {
+		t.Fatalf("IssueToken 报错: %v", err)
+	}
+
+	s.rdb.AddHook(failExpireHook{})
+	var logBuf bytes.Buffer
+	restore := redirectLog(&logBuf)
+	defer restore()
+
+	if got, ok, err := s.ResolveToken(ctx, tok); err != nil || !ok || got != id {
+		t.Fatalf("凭证本身有效，续期失败不该改变结果，得到 id=%q ok=%v err=%v", got, ok, err)
+	}
+	if !strings.Contains(logBuf.String(), "renew ttl") {
+		t.Fatalf("续期失败必须记日志，实际日志: %q", logBuf.String())
+	}
+}
+
+// failExpireHook 让整条 EXPIRE 流水线失败（不发往 Redis）。
+type failExpireHook struct{}
+
+func (failExpireHook) DialHook(next redis.DialHook) redis.DialHook { return next }
+
+func (failExpireHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook { return next }
+
+func (failExpireHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return func(ctx context.Context, cmds []redis.Cmder) error {
+		for _, cmd := range cmds {
+			if cmd.Name() == "expire" {
+				return errors.New("boom: 模拟续期失败")
+			}
+		}
+		return next(ctx, cmds)
+	}
+}
+
+// redirectLog 把标准库 log 的输出临时改到 buf（被测代码用的是 log.Printf）。
+func redirectLog(buf *bytes.Buffer) func() {
+	prev := log.Writer()
+	log.SetOutput(buf)
+	return func() { log.SetOutput(prev) }
 }
 
 func TestResolveTokenExtendsTTL(t *testing.T) {
