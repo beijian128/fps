@@ -64,33 +64,30 @@ func New(app pitaya.Pitaya) *Component {
 	return &Component{app: app}
 }
 
-// Join 是远端 RPC handler（route "match.join"）：绑定会话 UID 并加入匹配队列。
-// uid 用客户端持久化的 token 而不是每次新建的 nuid —— 重连时同一个 token 会
-// 让 pitaya 前端把旧会话顶掉（session.go:460-464），从而让对局实例的 uids
-// 数组依然指向正确的连接。
+// Join 是远端 RPC handler（route "match.join"）：把已登录的会话加入匹配队列。
+//
+// 身份来自会话绑定 —— account 服务在登录成功时做过 s.Bind(ctx, accountID)，
+// 这里只读会话 UID，不再看任何客户端传来的凭证。未绑定的会话说明客户端没登录
+// （或登录失败后擅自发了 join），静默忽略并记日志：客户端契约上不会这样，
+// 「未登录」这个状态客户端自己知道，不需要服务端告诉它。
 func (c *Component) Join(ctx context.Context, msg *protos.JoinMsg) {
 	s := c.app.GetSessionFromCtx(ctx)
-	uid := msg.Token
-	persisted := uid != ""
-	if !persisted {
-		uid = nuid.New().Next() // 未带 token 的旧客户端：退化成一次性身份
-	}
-	if err := s.Bind(ctx, uid); err != nil {
-		log.Printf("match: bind session failed: %v", err)
+	uid := s.UID()
+	if uid == "" {
+		log.Printf("match: join rejected: session not bound")
 		return
 	}
 
-	// 只有带 token 的客户端才可能回局；一次性身份去问一定是白跑一趟。
-	if persisted && c.tryRejoin(ctx, s, uid) {
-		return // 已回到存量对局，不入匹配队列
+	// 回局优先：存量对局还在就直接回去，不入匹配队列。
+	if c.tryRejoin(ctx, s, uid) {
+		return
 	}
 
 	c.mu.Lock()
-	// 同一个 token 在**排队等待期间**断线重连会再走一次 Join。不去重的话队列
-	// 里会留下两条同 uid 的记录：`tryMatch` 可能把它们俩配成一对
-	// （game.create 的 Uids 变成 [T, T]，一个人占满两个槽位），单人兜底时更会
-	// 给同一个人先后开两局、推两条 onMatched。旧实现不会暴露这个问题，
-	// 因为每次的 uid 都是新的 nuid。
+	// 同一个 uid 在**排队等待期间**断线重连会再走一次 Join。不去重的话队列
+	// 里会留下两条同 uid 的记录：tryMatch 可能把它们俩配成一对（game.create
+	// 的 Uids 变成 [T, T]，一个人占满两个槽位），单人兜底时更会给同一个人
+	// 先后开两局、推两条 onMatched。
 	c.queue = removeQueued(c.queue, uid)
 	c.queue = append(c.queue, queuedPlayer{uid: uid, session: s, joinedAt: time.Now()})
 	c.mu.Unlock()

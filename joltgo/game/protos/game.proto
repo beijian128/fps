@@ -1,4 +1,6 @@
 // 游戏协议消息（wire 契约）。gate / match / game 三服务与 Godot 客户端都遵守：
+//   - 客户端 → gate → account：account.register / account.login / account.resume
+//     （Request/Response，不是 Notify/Push —— 见 docs/API.md）
 //   - 客户端 → gate → match：match.join（JoinMsg，Notify）
 //   - match → 客户端：onMatched（MatchResult，Push）
 //   - match → game（RPC）：game.create（CreateGameMsg）/ game.rejoin（RejoinMsg）
@@ -28,10 +30,52 @@ message CommandMsg {
   bool reset = 7;            // 重建场景边沿触发
 }
 
-// JoinMsg 是加入匹配的请求。token 是客户端持久化的身份（首次运行生成并存储），
-// 服务端把它当作会话 UID：重连时同一个 token 能找回原来的对局实例。
-message JoinMsg {
+// JoinMsg 是加入匹配的请求。身份来自会话绑定（account 服务在登录时做的），
+// 这里不再携带任何凭证 —— 字段清空后 route 与 handler 签名都不变。
+message JoinMsg {}
+
+// RegisterMsg 是注册请求。用户名 3-16 位 [a-zA-Z0-9_]，密码 6-64 位。
+message RegisterMsg {
+  string username = 1;
+  string password = 2;
+}
+
+// LoginMsg 是登录请求。
+message LoginMsg {
+  string username = 1;
+  string password = 2;
+}
+
+// ResumeMsg 是凭证恢复请求：客户端持有 token，换回会话。
+message ResumeMsg {
   string token = 1;
+}
+
+// LoginReply 是 register / login / resume 的统一应答，客户端用同一段代码处理。
+// ok=false 时 reason 是机器可读的原因码（bad_credentials / name_taken /
+// bad_username / bad_password / rate_limited / token_invalid / internal）。
+message LoginReply {
+  bool ok = 1;
+  string token = 2;      // ok=true 时有效
+  string username = 3;   // 保留用户输入的原始大小写，供 UI 显示
+  string account_id = 4; // 十进制字符串，仅供诊断
+  string reason = 5;     // ok=false 时的原因码
+}
+
+// BindGameMsg 是 match → gate 的 RPC 请求（route "gate.gate.bindgame"）：请玩家
+// 所属的 gate 把对局归属写进它自己的会话数据（gate 据 gameServerId 定点路由
+// game.*）。game_server_id 为空表示回滚（清掉归属）。
+message BindGameMsg {
+  string uid = 1;
+  string game_server_id = 2;
+  string match_id = 3;
+  int32 player_idx = 4;
+}
+
+// BindGameReply 是 gate.gate.bindgame 的应答。found=false 表示该 gate 上没有
+// 这个会话（玩家已掉线）。
+message BindGameReply {
+  bool found = 1;
 }
 
 // MatchResult 是匹配成功结果（match → 客户端 push route "onMatched"）。

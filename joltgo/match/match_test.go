@@ -60,32 +60,38 @@ func (a *joinTestApp) GetServersByType(string) (map[string]*cluster.Server, erro
 	return nil, errors.New("no game server") // 回局查询必然是 miss
 }
 
-// joinTestSession 只实现 Join 用到的 Bind。
+// joinTestSession 只实现 Join 用到的 UID。
 type joinTestSession struct {
 	session.Session
 	uid string
 }
 
-func (s *joinTestSession) Bind(_ context.Context, uid string) error {
-	s.uid = uid
-	return nil
-}
+func (s *joinTestSession) UID() string { return s.uid }
 
-// 排队等待期间断线重连：同一个 token 再 Join 一次，队列里必须还是只有一条
+// 排队等待期间断线重连：同一个 uid 再 Join 一次，队列里必须还是只有一条
 // （不去重的话这里会是 2 条，进而可能自己跟自己配对、或单人兜底时开两局）。
-func TestJoinDedupsQueuedToken(t *testing.T) {
-	c := New(&joinTestApp{sess: &joinTestSession{}})
+func TestJoinDedupsQueuedUid(t *testing.T) {
+	c := New(&joinTestApp{sess: &joinTestSession{uid: "T"}})
 	ctx := context.Background()
 
-	c.Join(ctx, &protos.JoinMsg{Token: "T"})
+	c.Join(ctx, &protos.JoinMsg{})
 	if len(c.queue) != 1 {
 		t.Fatalf("首次 Join 应入队一条，得到 %d", len(c.queue))
 	}
-	c.Join(ctx, &protos.JoinMsg{Token: "T"})
+	c.Join(ctx, &protos.JoinMsg{})
 	if len(c.queue) != 1 {
-		t.Fatalf("同 token 重连不应重复入队，得到 %d", len(c.queue))
+		t.Fatalf("同 uid 重连不应重复入队，得到 %d", len(c.queue))
 	}
 	if c.queue[0].uid != "T" {
 		t.Fatalf("队列里应是最新那条会话，得到 %q", c.queue[0].uid)
+	}
+}
+
+// 未登录（会话未绑定）的 Join 必须被忽略：不 Bind、不入队。
+func TestJoinRejectsUnboundSession(t *testing.T) {
+	c := New(&joinTestApp{sess: &joinTestSession{uid: ""}})
+	c.Join(context.Background(), &protos.JoinMsg{})
+	if len(c.queue) != 0 {
+		t.Fatalf("未绑定会话不应入队，得到 %d 条", len(c.queue))
 	}
 }
