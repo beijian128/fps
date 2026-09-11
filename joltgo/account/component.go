@@ -45,8 +45,25 @@ func New(app pitaya.Pitaya, store *Store, onl *online.Store) *Component {
 	return &Component{app: app, store: store, online: onl}
 }
 
+// boundAccount 返回当前会话已绑定的账号 ID；未绑定（或拿不到会话）返回空串。
+func (c *Component) boundAccount(ctx context.Context) string {
+	if s := c.app.GetSessionFromCtx(ctx); s != nil {
+		return s.UID()
+	}
+	return ""
+}
+
 // Register 是 register handler（route "account.account.register"）。
 func (c *Component) Register(ctx context.Context, msg *protos.RegisterMsg) (*protos.LoginReply, error) {
+	// 注册意味着「建一个新账号并登进去」，在一个已经绑定了账号的会话上做不到。
+	// 必须在这里就挡住：Create 会**真的写出一个新账号**，等 finishLogin 再拒绝时
+	// 它已经成了无主账号 —— 用户名被永久占用、谁都登不进去，而且换个用户名就能
+	// 无限刷（限流是按用户名的，挡不住这个）。
+	// 现实中这条路径来自客户端状态错乱（登录面板在 resume 还没回来时被点了）。
+	if cur := c.boundAccount(ctx); cur != "" {
+		log.Printf("account: register refused: session already bound to %s", cur)
+		return fail(ReasonInternal), nil
+	}
 	if err := ValidateUsername(msg.Username); err != nil {
 		return fail(ReasonBadUsername), nil
 	}

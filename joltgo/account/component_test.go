@@ -151,12 +151,43 @@ func TestRegisterRejectsDuplicate(t *testing.T) {
 	ctx := context.Background()
 	env.mustRegister(t, "alice", "hunter2")
 
+	// 换一个未绑定的会话：抢名字的必然是另一个客户端。同一个会话再注册会先被
+	// 「已绑定」守卫挡掉（见 TestRegisterRefusesOnAlreadyBoundSession），
+	// 那条路径根本走不到重名判断。
+	env.app.sess = &fakeSession{}
+
 	r, err := env.comp.Register(ctx, &protos.RegisterMsg{Username: "alice", Password: "hunter2"})
 	if err != nil {
 		t.Fatalf("重名不该返回 Go error: %v", err)
 	}
 	if r.Ok || r.Reason != ReasonNameTaken {
 		t.Fatalf("应回 name_taken，得到 %+v", r)
+	}
+}
+
+// 已绑定的会话上注册必须被挡在「创建账号」之前 —— 否则会留下一个用户名被永久
+// 占用、谁都登不进去的无主账号，而且换个用户名就能无限刷。
+func TestRegisterRefusesOnAlreadyBoundSession(t *testing.T) {
+	env := newTestComponent(t)
+	ctx := context.Background()
+	env.mustRegister(t, "alice", "hunter2") // 会话绑到 "1"
+
+	// 同一个会话再注册一个新账号。
+	r, err := env.comp.Register(ctx, &protos.RegisterMsg{Username: "bob", Password: "hunter2"})
+	if err != nil {
+		t.Fatalf("不该返回 Go error: %v", err)
+	}
+	if r.Ok || r.Reason != ReasonInternal {
+		t.Fatalf("已绑定会话上的注册应被拒，得到 %+v", r)
+	}
+
+	// 关键断言：bob **没有**被创建出来 —— 名字必须还能正常注册。
+	_, taken, err := env.store.LookupByName(ctx, "bob")
+	if err != nil {
+		t.Fatalf("LookupByName 报错: %v", err)
+	}
+	if taken {
+		t.Fatal("被拒的注册不能留下账号（否则就是占用用户名的无主账号）")
 	}
 }
 
