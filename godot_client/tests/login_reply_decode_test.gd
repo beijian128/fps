@@ -12,15 +12,22 @@ var _c: Node
 # GDScript 没有 try/catch：某个用例内部抛错会让函数中途返回、_failures 还是 0，
 # 整个用例就"假绿"了。所以每个函数末尾打完成标记，_init 逐个核对。
 var _done := {}
+# 帧类用例走真实入口 _on_data，结果只能从 login_result 信号里接。
+var _last_login := {}
+
+func _on_login(result: Dictionary) -> void:
+	_last_login = result
 
 func _init() -> void:
 	_c = FpsClient.new()
+	_c.login_result.connect(_on_login)
 	_test_login_reply_ok()
 	_test_login_reply_failure()
 	_test_login_reply_empty()
 	_test_response_frame_layout()
 	_test_error_mask_flag()
-	for name: String in ["reply_ok", "reply_fail", "reply_empty", "frame_layout", "error_mask"]:
+	_test_truncated_response_frame()
+	for name: String in ["reply_ok", "reply_fail", "reply_empty", "frame_layout", "error_mask", "truncated"]:
 		if not _done.has(name):
 			_failures += 1
 			printerr("FAIL: 用例 %s 没跑完（中途抛错了？）" % name)
@@ -84,31 +91,52 @@ func _test_login_reply_empty() -> void:
 	_check(d["token"] == "" and d["username"] == "" and d["reason"] == "", "空载荷各字段应为空串")
 	_done["reply_empty"] = true
 
-## Response 帧的布局：flag(0x04) + mid(LEB128) + payload —— 没有 route。
+## Response 帧的布局：flag + mid(LEB128) + payload —— **没有 route 字段**。
+##
+## 必须走 _on_data 而不是在测试里自己再解析一遍：自己解析等于断言自己的实现，
+## 生产代码把 Response 当成 Push 解析（读 data[1] 当 route 长度）也照样绿。
+## 这里把构造好的帧喂进真实的入口，断言经 login_result 信号出来的结果。
 func _test_response_frame_layout() -> void:
-	var payload := _f_varint(1, 1)
+	_last_login = {}
+	var payload := _f_varint(1, 1)          # LoginReply{ok:true}
+	payload.append_array(_f_str(3, "Alice"))
 	var frame := PackedByteArray()
 	frame.append(_c.MSG_RESPONSE << 1)
-	frame.append_array(_c._varint(300))   # 需要 2 字节 LEB128（300 > 127）
+	frame.append_array(_c._varint(300))     # 2 字节 LEB128 的 mid
 	frame.append_array(payload)
 
-	# 用与服务端编码器同样的方式还原。
-	var r: Array = _c._read_varint(frame, 1)
-	_check(int(r[0]) == 300, "mid 应 LEB128 还原成 300，得到 %d" % int(r[0]))
-	var rest: PackedByteArray = frame.slice(int(r[1]))
-	_check(rest.size() == payload.size(), "mid 之后应恰好是 payload")
-	_check((frame[0] >> 1) & 0x07 == _c.MSG_RESPONSE, "flag 低 3 位应是 Response")
+	_c._on_data(frame)
 
-	# 关键契约：Response 帧没有 route 字段。payload 的第一个字节是 protobuf tag
-	# （字段 1 varint = 0x08），不是 route 长度 —— 若误按 Push 解析，会把它当成
-	# 长度为 8 的 route 读走 8 个字节，静默解出垃圾。
-	_check(rest[0] == 0x08, "payload 首字节应是 protobuf tag 0x08，得到 %d" % rest[0])
+	var got: Dictionary = _last_login
+	_check(got.get("ok", false) == true, "响应应解出 ok=true，得到 %s" % str(got))
+	_check(got.get("username", "") == "Alice", "username 应解出 Alice，得到 %s" % str(got))
 	_done["frame_layout"] = true
 
-## errorMask(0x20)：pitaya 层错误会置位，此时 payload 是错误字符串而非 LoginReply。
+## errorMask(0x20) 置位时 payload 是 pitaya 的错误字符串，不是 LoginReply ——
+## 绝不能当成一次成功登录（ok 不能变成 true）。
 func _test_error_mask_flag() -> void:
-	# 显式标注类型：_c 是 Node，成员常量取出来是 Variant，:= 推不出类型。
-	var flag: int = (_c.MSG_RESPONSE << 1) | 0x20
-	_check((flag & 0x20) != 0, "errorMask 应被识别")
-	_check((flag >> 1) & 0x07 == _c.MSG_RESPONSE, "置了 errorMask 也仍是 Response 类型")
+	_last_login = {}
+	var frame := PackedByteArray()
+	frame.append((_c.MSG_RESPONSE << 1) | 0x20)
+	frame.append_array(_c._varint(7))
+	frame.append_array("boom".to_utf8_buffer())
+
+	_c._on_data(frame)
+
+	var got: Dictionary = _last_login
+	_check(got.get("ok", true) == false, "错误帧绝不能报成登录成功，得到 %s" % str(got))
+	_check(got.get("reason", "") == "internal", "错误帧应回 internal，得到 %s" % str(got))
 	_done["error_mask"] = true
+
+## 畸形帧（mid 被截断）不能读越界，也不能让调用方一直等 —— 必须明确报失败。
+func _test_truncated_response_frame() -> void:
+	_last_login = {}
+	var frame := PackedByteArray()
+	frame.append(_c.MSG_RESPONSE << 1)
+	frame.append(0x80)   # LEB128 续位，后面没有字节了
+
+	_c._on_data(frame)
+
+	var got: Dictionary = _last_login
+	_check(got.get("ok", true) == false, "截断帧应明确报失败，得到 %s" % str(got))
+	_done["truncated"] = true

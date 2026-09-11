@@ -362,11 +362,13 @@ func _decode_match_result(buf: PackedByteArray) -> Dictionary:
 # ---- protobuf 底层原语 ----
 
 ## 无符号 varint 解码，返回 [值, 下一个字节下标]。
+## 循环以 `i < buf.size()` 为界：畸形/截断的输入（末字节仍带续位 0x80）只会提前收
+## 尾并返回 i == buf.size()，不会越界读。调用方若在意完整性，自行检查末字节的续位。
 func _read_varint(buf: PackedByteArray, start: int) -> Array:
 	var result := 0
 	var shift := 0
 	var i := start
-	while true:
+	while i < buf.size():
 		var b := buf[i]
 		i += 1
 		result |= (b & 0x7F) << shift
@@ -538,9 +540,22 @@ func _on_push(data: PackedByteArray) -> void:
 ## Response 帧：mid（LEB128 变长）+ payload —— **没有 route 字段**。
 ## is_err 为真时 payload 是 pitaya 的错误字符串，不是 LoginReply。
 func _on_response(data: PackedByteArray, is_err: bool) -> void:
+	if data.size() < 2:
+		# 连 mid 的第一个字节都没有：不能读 data[1]。与 _on_push 的
+		# `data.size() < 2 + rl` 守卫对称 —— 畸形帧宁可明确失败，也不能让
+		# 上层一直等一个永远不来的响应。
+		login_result.emit({"ok": false, "reason": "internal"})
+		return
 	var r: Array = _read_varint(data, 1)
+	var next: int = int(r[1])
+	# _read_varint 到缓冲末尾就停。末字节仍带续位 0x80 说明 mid 的 LEB128 没读完，
+	# 帧是截断的：mid 不可信、payload 也不完整，同样明确报失败而不是静默丢弃。
+	if (data[next - 1] & 0x80) != 0:
+		printerr("Response 帧被截断（mid 的 LEB128 不完整）")
+		login_result.emit({"ok": false, "reason": "internal"})
+		return
 	var mid: int = int(r[0])
-	var payload: PackedByteArray = data.slice(int(r[1]))
+	var payload: PackedByteArray = data.slice(next)
 	_pending.erase(mid)
 	if is_err:
 		printerr("登录请求失败（服务端错误）: " + payload.get_string_from_utf8())
