@@ -48,6 +48,23 @@ func New(app pitaya.Pitaya) *Component {
 // Create 是远端 RPC handler（route "game.create"）：match 服务在匹配成功后调用，
 // 用 uids（按槽位顺序）创建一个新对局实例。
 func (c *Component) Create(ctx context.Context, msg *protos.CreateGameMsg) (*protos.CreateGameReply, error) {
+	// 只接受后端 RPC。本组件同时注册为 handler（Cmd/Resync 需要）与 remote（match
+	// 的 game.create / game.rejoin），于是 Create/Rejoin 也进了 handler 池 —— 而
+	// gate 会把客户端发来的 game.* 原样转给本节点，客户端因此能直接调到它们。
+	// 后果不是小事：Create 能用任意 uids 建一个实例，覆盖 uidToInst/uidToIndex，把
+	// 受害者的命令路由进攻击者的实例（他会同时收到两路帧流），而账号 ID 是连续十进制、
+	// 枚举成本为零；每次调用还会真的建一个 Jolt 世界 + 一条 goroutine，且这条路径
+	// 没有任何限流，足以拖垮一个 game 节点。
+	if isClientCall(ctx, c.app) {
+		log.Printf("game: create from client rejected (uid=%s, match=%q)",
+			ctxUID(ctx, c.app), msg.MatchId)
+		// 返回 error 而非仅 Code=1：调用方（match）只看 RPC 是否报错，nil error 会
+		// 让它以为创建成功、照推 onMatched。这里虽然本该只有客户端会撞上，但绝不能让
+		// 任何调用方拿到「成功」的假象。
+		return &protos.CreateGameReply{Code: 1}, fmt.Errorf(
+			"game: create rejected: client call (uid=%s)", ctxUID(ctx, c.app))
+	}
+
 	// broadcast 按槽位索引固定大小的 pendingFull[sim.MaxPlayers]，超过上限的名单
 	// 会在推进帧时越界 panic。match 目前只会发 1~2 个 uid，但这是外部 RPC 入口，
 	// 该 panic 路径是本任务新引入的，必须在建实例前就挡掉。
@@ -80,6 +97,15 @@ func (c *Component) Create(ctx context.Context, msg *protos.CreateGameMsg) (*pro
 // Rejoin 是远端 RPC handler（route "game.rejoin"）：报告本节点是否托管着该
 // token 的存量实例，以及原本的玩家槽位。match 服务用它在重连时找回对局。
 func (c *Component) Rejoin(ctx context.Context, msg *protos.RejoinMsg) (*protos.RejoinReply, error) {
+	// 同 Create：只接受后端 RPC。客户端若能调它，就能拿 uid 去探测「谁在哪局、坐哪个
+	// 槽位」，而且被顶号/换局的玩家会被它领回旧实例。这里只回 found=false（不回
+	// Go error）：与 gate.bindgame 的约定一致 —— 查询类接口不该用错误把「没命中」
+	// 和「被拒绝」搅在一起，调用方（match）也不需要区分。
+	if isClientCall(ctx, c.app) {
+		log.Printf("game: rejoin from client rejected (uid=%s)", ctxUID(ctx, c.app))
+		return &protos.RejoinReply{Found: false}, nil
+	}
+
 	c.mu.Lock()
 	inst := c.uidToInst[msg.Token]
 	idx := c.uidToIndex[msg.Token]
@@ -93,6 +119,41 @@ func (c *Component) Rejoin(ctx context.Context, msg *protos.RejoinMsg) (*protos.
 		MatchId:   inst.MatchID(),
 		PlayerIdx: int32(idx),
 	}, nil
+}
+
+// isClientCall 判断这次调用是否来自客户端（而非后端 RPC）。
+//
+// 本组件同时注册为 handler 与 remote（见 main.go），两条路径在 ctx 里留下的痕迹
+// 不同：
+//
+//   - **客户端**：gate 按 route 把消息转成 RPCType_Sys 转发到本节点
+//     （service/handler.go 的 remoteProcess），pitaya 在目标节点为它建一个 Remote
+//     会话并塞进 ctx（service/remote.go 的 handleRPCSys → handler_pool 里
+//     WithValue(SessionCtxKey, a.Session)）。会话 UID 就是客户端账号 —— 这正是
+//     Cmd/Resync 能按会话 UID 找到实例的原因。
+//   - **后端 RPC**：match 用 app.RPCTo → RPCType_User → handleRPCUser，那条路径
+//     **不往 ctx 里放会话**，GetSessionFromCtx 返回 nil。
+//
+// 所以判据是「ctx 里有没有会话」。**不能**照抄 gate.bindgame 的
+// `s.GetIsFrontend()`：Sys RPC 建出来的 Remote 会话是 agent.NewRemote 里
+// `sessionPool.NewSession(a, false, sess.GetUid())` 建的，IsFrontend 恒为 false
+// （实测见 component_test.go），拿它当判据会把客户端发来的 create 原样放过。
+//
+// 判据偏严是刻意的：将来若有后端改走带会话的路径，会在这里被明确拒绝（调用方拿到
+// RPC 错误），而不是静默把入口留给客户端。
+func isClientCall(ctx context.Context, app pitaya.Pitaya) bool {
+	return app != nil && app.GetSessionFromCtx(ctx) != nil
+}
+
+// ctxUID 取会话 UID，只为打日志（拿不到会话时返回空串）。
+func ctxUID(ctx context.Context, app pitaya.Pitaya) string {
+	if app == nil {
+		return ""
+	}
+	if s := app.GetSessionFromCtx(ctx); s != nil {
+		return s.UID()
+	}
+	return ""
 }
 
 // Cmd 是远端 RPC handler（route "game.cmd"）：一帧上行命令。
