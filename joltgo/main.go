@@ -117,9 +117,9 @@ func run(svType *string, builder *pitaya.Builder, redisAddr string) error {
 		)
 
 	case "match":
-		// TODO(Task 7): 改成 match.New(app, match.NewQueue(rdb), online.NewStore(rdb))
-		// —— Redis 队列与探活还没实现，此处先保持旧的内存队列构造。
-		app.Register(match.New(app),
+		// 队列在 Redis（多个 match 节点共享同一条队列），开局前用 online 登记
+		// 定位每个玩家所属的 gate 并请它写会话数据（顺带探活）。
+		app.Register(match.New(app, match.NewQueue(rdb), online.NewStore(rdb)),
 			component.WithName("match"),
 			component.WithNameFunc(strings.ToLower),
 		)

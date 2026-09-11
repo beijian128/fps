@@ -5,10 +5,13 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/alicebob/miniredis/v2"
+	"github.com/redis/go-redis/v9"
 	pitaya "github.com/topfreegames/pitaya/v3/pkg"
 	"github.com/topfreegames/pitaya/v3/pkg/cluster"
 	"github.com/topfreegames/pitaya/v3/pkg/session"
 	"joltgo/game/protos"
+	"joltgo/online"
 )
 
 func TestFirstFound(t *testing.T) {
@@ -32,22 +35,7 @@ func TestFirstFound(t *testing.T) {
 	}
 }
 
-// 排队期间断线重连会带着同一个 token 再 Join 一次，队列里必须只留最新那条。
-func TestRemoveQueued(t *testing.T) {
-	q := []queuedPlayer{{uid: "a"}, {uid: "b"}, {uid: "a"}}
-	got := removeQueued(q, "a")
-	if len(got) != 1 || got[0].uid != "b" {
-		t.Fatalf("应只留下 b，得到 %+v", got)
-	}
-	if len(q) != 3 || q[0].uid != "a" {
-		t.Fatalf("removeQueued 不应改动入参，得到 %+v", q)
-	}
-	if got := removeQueued(q, "zzz"); len(got) != 3 {
-		t.Fatalf("没有匹配项时队列应原样返回，得到 %+v", got)
-	}
-}
-
-// Component 只需要 pitaya.Pitaya 接口，所以「嵌入接口 + 覆盖用得到的两个方法」
+// Component 只需要 pitaya.Pitaya 接口，所以「嵌入接口 + 覆盖用得到的方法」
 // 就够驱动 Join 了 —— 不必引入 gomock。
 type joinTestApp struct {
 	pitaya.Pitaya
@@ -68,30 +56,41 @@ type joinTestSession struct {
 
 func (s *joinTestSession) UID() string { return s.uid }
 
+func newTestComponent(t *testing.T, sess session.Session) (*Component, *miniredis.Miniredis) {
+	t.Helper()
+	mr := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+	return New(&joinTestApp{sess: sess}, NewQueue(rdb), online.NewStore(rdb)), mr
+}
+
 // 排队等待期间断线重连：同一个 uid 再 Join 一次，队列里必须还是只有一条
-// （不去重的话这里会是 2 条，进而可能自己跟自己配对、或单人兜底时开两局）。
+// （ZSET 按 member 去重）。不去重的话这里会是 2 条，进而可能自己跟自己配对、
+// 或单人兜底时开两局。
 func TestJoinDedupsQueuedUid(t *testing.T) {
-	c := New(&joinTestApp{sess: &joinTestSession{uid: "T"}})
+	c, _ := newTestComponent(t, &joinTestSession{uid: "T"})
 	ctx := context.Background()
 
 	c.Join(ctx, &protos.JoinMsg{})
-	if len(c.queue) != 1 {
-		t.Fatalf("首次 Join 应入队一条，得到 %d", len(c.queue))
+	if n, _ := c.queue.rdb.ZCard(ctx, queueKey).Result(); n != 1 {
+		t.Fatalf("首次 Join 应入队一条，得到 %d", n)
 	}
 	c.Join(ctx, &protos.JoinMsg{})
-	if len(c.queue) != 1 {
-		t.Fatalf("同 uid 重连不应重复入队，得到 %d", len(c.queue))
+	if n, _ := c.queue.rdb.ZCard(ctx, queueKey).Result(); n != 1 {
+		t.Fatalf("同 uid 重连不应重复入队，得到 %d", n)
 	}
-	if c.queue[0].uid != "T" {
-		t.Fatalf("队列里应是最新那条会话，得到 %q", c.queue[0].uid)
+	if got, _ := c.queue.rdb.ZRange(ctx, queueKey, 0, -1).Result(); len(got) != 1 || got[0] != "T" {
+		t.Fatalf("队列里应是 T，得到 %v", got)
 	}
 }
 
-// 未登录（会话未绑定）的 Join 必须被忽略：不 Bind、不入队。
+// 未登录（会话未绑定）的 Join 必须被忽略：不入队。
 func TestJoinRejectsUnboundSession(t *testing.T) {
-	c := New(&joinTestApp{sess: &joinTestSession{uid: ""}})
-	c.Join(context.Background(), &protos.JoinMsg{})
-	if len(c.queue) != 0 {
-		t.Fatalf("未绑定会话不应入队，得到 %d 条", len(c.queue))
+	c, _ := newTestComponent(t, &joinTestSession{uid: ""})
+	ctx := context.Background()
+
+	c.Join(ctx, &protos.JoinMsg{})
+	if n, _ := c.queue.rdb.ZCard(ctx, queueKey).Result(); n != 0 {
+		t.Fatalf("未绑定会话不应入队，得到 %d 条", n)
 	}
 }
