@@ -91,6 +91,21 @@ func _save_token(token: String, username: String) -> void:
 		if g != null:
 			g.store_string(username)
 
+## _clear_token 丢弃已失效的本地凭证。
+##
+## 服务端明确说 token 无效（过期 / 被顶号 / 已吊销）之后必须清掉：留着的话每次
+## 重连、每次重启都会拿同一个死凭证再试一次 —— 界面上的错误提示被反复清空、
+## 密码框的焦点被反复抢走，还白烧限流额度。
+##
+## 只在 token_invalid 时调用。timeout / no_connection / internal / rate_limited
+## 都不能清：那些情况下凭证很可能仍然是好的，清掉等于平白把人踢回登录面板。
+func _clear_token() -> void:
+	client_token = ""
+	if FileAccess.file_exists(TOKEN_PATH):
+		# 删不掉也没关系（只读、被占用……）：真正起作用的是上面清空的
+		# client_token —— 本次运行不会再发它，下次启动最坏是多试一次 resume。
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(TOKEN_PATH))
+
 ## _load_username 读上次登录的用户名（预填输入框用）。
 func _load_username() -> String:
 	if not FileAccess.file_exists(USERNAME_PATH):
@@ -597,7 +612,7 @@ func _on_response(data: PackedByteArray, is_err: bool) -> void:
 		# 连 mid 的第一个字节都没有：不能读 data[1]。与 _on_push 的
 		# `data.size() < 2 + rl` 守卫对称 —— 畸形帧宁可明确失败，也不能让
 		# 上层一直等一个永远不来的响应。
-		login_result.emit({"ok": false, "reason": "internal"})
+		_fail_unreadable_response()
 		return
 	var r: Array = _read_varint(data, 1)
 	var next: int = int(r[1])
@@ -605,7 +620,7 @@ func _on_response(data: PackedByteArray, is_err: bool) -> void:
 	# 帧是截断的：mid 不可信、payload 也不完整，同样明确报失败而不是静默丢弃。
 	if (data[next - 1] & 0x80) != 0:
 		printerr("Response 帧被截断（mid 的 LEB128 不完整）")
-		login_result.emit({"ok": false, "reason": "internal"})
+		_fail_unreadable_response()
 		return
 	var mid: int = int(r[0])
 	var payload: PackedByteArray = data.slice(next)
@@ -619,7 +634,20 @@ func _on_response(data: PackedByteArray, is_err: bool) -> void:
 		# 登录/注册/resume 成功才落盘凭证：失败时服务端不发 token，
 		# 写空串会把上一次的有效凭证也抹掉。
 		_save_token(String(reply.get("token", "")), String(reply.get("username", "")))
+	elif String(reply.get("reason", "")) == "token_invalid":
+		# 服务端明确否掉了这个凭证：丢掉，别再拿它反复试（见 _clear_token）。
+		_clear_token()
 	login_result.emit(reply)
+
+## _fail_unreadable_response 处理「mid 读不出来」的畸形 Response：报一次失败。
+##
+## 关键是先清空 _pending。mid 不可读，没法精确 erase 对应的那一条，留着它就会在
+## LOGIN_TIMEOUT 之后再 emit 一条 timeout —— 用户眼睁睁看着「服务暂时不可用」
+## 5 秒后自己变成「服务器无响应，请重试」。整表清空的粒度正好：在途的登录类请求
+## 最多只有一条（UI 有 _login_busy 单飞守卫，resume 每次握手只发一次）。
+func _fail_unreadable_response() -> void:
+	_pending = {}
+	login_result.emit({"ok": false, "reason": "internal"})
 
 ## LoginReply：ok=1(varint) token=2 username=3 account_id=4 reason=5（均为 string）。
 func _decode_login_reply(buf: PackedByteArray) -> Dictionary:

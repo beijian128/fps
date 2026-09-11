@@ -862,7 +862,12 @@ func _build_login_panel() -> void:
 	_login_pass.text_submitted.connect(func(_t: String) -> void: _submit_login())
 
 	_login_panel = layer
-	_show_login_panel(true, "")
+	# 只在没有本地凭证时才显示：有凭证会自动 resume，设计意图是「开机体验与
+	# 之前完全一致」（用户根本看不到登录面板）。无条件显示的话不仅闪一下，还开了
+	# 一个竞态窗口 —— resume 在飞的同时用户点了注册/登录，两个请求会打架。
+	# 依赖的顺序：FpsClient 是本场景的子节点，Godot 先跑子节点 _ready（那里读好了
+	# client_token）再跑父节点 _ready，所以这里读到的凭证已经是最终值。
+	_show_login_panel(fps_client.client_token == "", "")
 
 ## _show_login_panel 显示/隐藏登录面板。
 func _show_login_panel(show_it: bool, err: String) -> void:
