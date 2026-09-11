@@ -108,7 +108,7 @@ fps/
   一次 `.login` 会**轮换** token 并删掉旧的（同一账号只允许一个活跃会话，顶号）。
 - 上行：输入 + 射击 + 重置**合并成一条** `game.game.cmd`（Notify，帧是最小发送单位）；不再有单独的 `input`/`shoot`/`reset` 消息，重置等即时操作也不额外补推，统一等下一 tick 的帧。
 - **增量帧**每 tick 推 `onFrame`，只含本帧变化的 `(实体, 属性, 终值)`；同一属性一帧内改多次只发终值，值没变的写入不产生流量（连静态几何也每 tick 写、但不下发）。
-- **重连回局**：会话 UID（accountID）就是回局的钥匙 → `match.join` 先向所有 game 节点 fan-out RPC `game.game.rejoin` → 命中则走 `bindGameOn`（RPC 请持有该会话的 gate 把 `gameServerId` 写进会话数据）+ `pushMatched`（推 `onMatched`），与首次匹配同一条收尾路径→ 客户端收到 `onMatched` 后先清空本地世界、再主动发 `game.game.resync` → 服务端把该槽位的**下一帧**标为全量，单独下发 full 帧（含 Schema）。因为 full 帧是**先清空再整体覆盖**，即使中间先到了几帧增量也会被整帧盖掉——不存在「onMatched 与 full 帧谁先到」的竞态。
+- **重连回局**：会话 UID（accountID）就是回局的钥匙 → `match.join` 先向所有 game 节点 fan-out RPC `game.game.rejoin` → 命中则走 `bindGameOn`（RPC 请持有该会话的 gate 把 `gameServerId` 写进会话数据）+ `pushMatched`（推 `onMatched`），与首次匹配同一条收尾路径 → 客户端收到 `onMatched` 后先清空本地世界、再主动发 `game.game.resync` → 服务端把该槽位的**下一帧**标为全量，单独下发 full 帧（含 Schema）。因为 full 帧是**先清空再整体覆盖**，即使中间先到了几帧增量也会被整帧盖掉——不存在「onMatched 与 full 帧谁先到」的竞态。
 - 断线：客户端 1s 重连；**接收看门狗 2.5s 只在匹配后生效**（匹配等待期无帧流，10s 兜底属正常）。
 - 服务间通信走 etcd（服务发现）+ NATS（RPC）+ Redis（共享状态：账号、凭证、会话归属、匹配队列），见 `joltgo/deploy/`。
 
