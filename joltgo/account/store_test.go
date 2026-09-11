@@ -86,6 +86,16 @@ func TestCreateRollsBackNameOnFailure(t *testing.T) {
 	}
 }
 
+// 占名成功后名字键必须是永久的（占位符的 TTL 已被成功路径的 Set(..., 0) 清掉）。
+func TestCreateNameKeyIsPersistentAfterSuccess(t *testing.T) {
+	s, mr := newTestStore(t)
+	createTestAccount(t, s, "alice", "hunter2")
+
+	if ttl := mr.TTL("acct:name:alice"); ttl != 0 {
+		t.Fatalf("占名成功后应无 TTL（0 表示永久），得到 %v", ttl)
+	}
+}
+
 func TestLookupByNameIsCaseInsensitive(t *testing.T) {
 	s, _ := newTestStore(t)
 	id := createTestAccount(t, s, "Alice", "hunter2")
@@ -169,6 +179,40 @@ func TestResolveTokenExtendsTTL(t *testing.T) {
 	}
 	if ttl := mr.TTL("sess:" + tok); ttl != keySessTTL {
 		t.Fatalf("解析后 TTL 应续满 %v，得到 %v", keySessTTL, ttl)
+	}
+}
+
+// 活跃账号跨过第一个 TTL 周期后，轮换必须仍然有效。
+//
+// 回归测试：曾经只续 sess:{token} 而不续 sess:acct:{id}，于是指针先过期、
+// IssueToken 读不到旧 token、跳过删除，旧 token 又多活 7 天 —— 单会话强制失效。
+func TestResolveTokenKeepsRotationWorkingPastFirstTTL(t *testing.T) {
+	s, mr := newTestStore(t)
+	id := createTestAccount(t, s, "alice", "hunter2")
+	ctx := context.Background()
+
+	t1, err := s.IssueToken(ctx, id)
+	if err != nil {
+		t.Fatalf("IssueToken 报错: %v", err)
+	}
+
+	// 每天 resume 一次，持续 8 天（跨过 7 天的 TTL）。
+	for day := 0; day < 8; day++ {
+		mr.FastForward(24 * time.Hour)
+		if _, ok, _ := s.ResolveToken(ctx, t1); !ok {
+			t.Fatalf("第 %d 天 resume 应仍然有效", day+1)
+		}
+	}
+
+	t2, err := s.IssueToken(ctx, id)
+	if err != nil {
+		t.Fatalf("IssueToken 报错: %v", err)
+	}
+	if _, ok, _ := s.ResolveToken(ctx, t1); ok {
+		t.Fatal("活跃账号换设备登录后旧 token 仍有效 —— 轮换失效了")
+	}
+	if _, ok, _ := s.ResolveToken(ctx, t2); !ok {
+		t.Fatal("新 token 应有效")
 	}
 }
 

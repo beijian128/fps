@@ -16,6 +16,12 @@ const (
 	keySessTTL = 7 * 24 * time.Hour // 凭证有效期（每次 resume 续满）
 	keyRateTTL = time.Minute        // 限流窗口
 
+	// placeholderTTL 是占名占位符的存活时间。占名是两步的（先占位、再回填
+	// accountID），若中途失败且补偿的 DEL 也失败（多数时候是同一个原因：
+	// Redis 断连），占位符会留在那里 —— 这个名字就再也注册不了也别想登录
+	// （SETNX 说它存在，LookupByName 说它不存在）。带 TTL 就能自愈。
+	placeholderTTL = 30 * time.Second
+
 	// RateLimit 是每个用户名在 keyRateTTL 窗口内的最大尝试次数。
 	//
 	// 按**用户名**而不是 IP：account 服务拿不到客户端 IP —— 后端 agent 是
@@ -61,7 +67,7 @@ func NewStore(rdb *redis.Client) *Store { return &Store{rdb: rdb} }
 // 任一步失败都回滚占名，否则会留下「名字被占了、却没有任何账号」的僵尸名。
 func (s *Store) Create(ctx context.Context, username, passHash string) (string, error) {
 	nameKey := keyName(username)
-	ok, err := s.rdb.SetNX(ctx, nameKey, "", 0).Result()
+	ok, err := s.rdb.SetNX(ctx, nameKey, "", placeholderTTL).Result()
 	if err != nil {
 		return "", err
 	}
@@ -165,7 +171,14 @@ func (s *Store) ResolveToken(ctx context.Context, token string) (string, bool, e
 		return "", false, err
 	}
 	// 续期失败不当作认证失败：凭证本身是有效的，只是 TTL 没续上。
-	_ = s.rdb.Expire(ctx, keySess(token), keySessTTL).Err()
+	//
+	// 两个键都要续：只续 sess:{token} 的话，活跃账号的 sess:acct:{id} 指针会在
+	// 第 7 天过期，下一次 IssueToken 就读不到旧 token、跳过删除 —— 轮换
+	// （单会话强制的权威手段）从此静默失效。
+	pipe := s.rdb.TxPipeline()
+	pipe.Expire(ctx, keySess(token), keySessTTL)
+	pipe.Expire(ctx, keySessAcct(id), keySessTTL)
+	_, _ = pipe.Exec(ctx)
 	return id, true, nil
 }
 
