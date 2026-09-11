@@ -200,7 +200,7 @@ func _process(delta: float) -> void:
 	# 这里等价地发零向量 —— 是「发零」，不是「不发」。
 	#
 	# 匹配成功**前**不发：那时 gate 还没把 gameServerId 绑定到会话（要等 match
-	# 配对完走 bindPlayer），每条 game.cmd 都会落进 gate 的「no game server bound
+	# 配对完走 bindGameOn），每条 game.cmd 都会落进 gate 的「no game server bound
 	# to session」分支、被 pitaya 打一条错误日志 —— 匹配最坏要等 10 s（单人兜底），
 	# 按每秒上百行算就是上千行噪音。待上报的跳跃/射击/重置状态照常消费清空，
 	# 只是不发出（否则重建连接后会把过期输入补发出去）。

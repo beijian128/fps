@@ -1,10 +1,12 @@
-// 游戏协议消息（wire 契约）。gate / match / game 三服务与 Godot 客户端都遵守：
-//   - 客户端 → gate → account：account.register / account.login / account.resume
-//     （Request/Response，不是 Notify/Push —— 见 docs/API.md）
-//   - 客户端 → gate → match：match.join（JoinMsg，Notify）
-//   - match → 客户端：onMatched（MatchResult，Push）
-//   - match → game（RPC）：game.create（CreateGameMsg）/ game.rejoin（RejoinMsg）
-//   - 客户端 → gate → game：game.cmd（CommandMsg）/ game.resync（空，Notify）
+// 游戏协议消息（wire 契约）。gate / match / game 三服务与 Godot 客户端都遵守。
+// 线上 route 一律是三段式 `server.service.method`（pitaya 的路由格式）：
+//   - 客户端 → gate → account：account.account.register / account.account.login /
+//     account.account.resume（Request/Response，不是 Notify/Push —— 见 docs/API.md）
+//   - 客户端 → gate → match：match.match.join（JoinMsg，Notify）
+//   - match → 客户端：onMatched（MatchResult，Push —— 推送用 route 名，不是三段式）
+//   - match → game（RPC）：game.game.create（CreateGameMsg）/ game.game.rejoin（RejoinMsg）
+//   - match → gate（RPC）：gate.gate.bindgame（BindGameMsg）
+//   - 客户端 → gate → game：game.game.cmd（CommandMsg）/ game.game.resync（空，Notify）
 //   - game → 客户端：onFrame（Frame，Push）
 //
 // 同步不走手写快照，走通用「实体-属性」增量：属性表（Schema）在 full 帧里下发一次，

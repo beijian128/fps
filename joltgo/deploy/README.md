@@ -53,7 +53,7 @@ if (Test-Path .\etcd-data) { Remove-Item -Recurse -Force .\etcd-data }   # 需�
   运行库**，缺一个就报「找不到 XXX.dll」而静默退不起来，所以一并放在这里：
   `msys-2.0.dll` / `msys-crypto-3.dll` / `msys-ssl-3.dll` / `msys-gcc_s-seh-1.dll` /
   `msys-stdc++-6.dll`。另外附带 `redis-cli.exe`，排查账号数据时用得上（例如
-  `.\redis-cli.exe keys 'account:*'`）。
+  `.\redis-cli.exe keys 'acct:*'`）。
 
 ## docker-compose（可选）
 
@@ -130,10 +130,6 @@ stdout**，所以这四个对应的是 `-RedirectStandardError`（stdout 另存�
 再跑 `start-infra.ps1`。
 
 ### 为什么每次启动都清空 etcd-data
-
-etcd 的租约倒计时**只在 etcd 进程运行期间走**：重启时它把租约按 checkpoint 恢复到后端里存的
-剩余 TTL，并从「恢复那一刻」重新倒计时，停机时间不计入。隔离实验（deploy 里的 etcd v3.5.14，
-独立端口 + 临时数据目录）实测：
 
 etcd 的租约倒计时**只在 etcd 进程运行期间走**：重启时它把租约按 checkpoint 恢复到后端里存的
 剩余 TTL，并从「恢复那一刻」重新倒计时，停机时间不计入。隔离实验（deploy 里的 etcd v3.5.14，

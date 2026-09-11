@@ -3,6 +3,23 @@
 > 状态：设计已确认，待实施
 > 日期：2026-09-11
 
+> ### ⚠️ 实施偏差记录（2026-09-11，实施后补记）
+>
+> 本文是**设计时**的记录，下面这条与最终落地的代码不一致。原文照留（它是当时的
+> 设计依据），偏差在此统一说明，正文相关处另有 `【偏差】` 指回本节。
+>
+> **限流键从 IP 改为用户名：`rl:ip:{ip}` → `rl:user:{规范化用户名}`。**
+> 原因是 account 服务**拿不到客户端 IP**：它是 backend 服务，会话上的 agent 是
+> pitaya 的 `Remote`，`RemoteAddr()` 直接返回 nil
+> （`third_party/pitaya/pkg/agent/agent_remote.go`），会话也没有暴露 frontend 地址
+> 或 frontendID 的 getter。原设计的「IP 取 `s.RemoteAddr()`」（§5）无法实现。
+> 改后粒度是「每账号每分钟 10 次」，对分布式暴力破解其实更强（换 IP 无效），代价是
+> 同一出口 IP 的不同账号互不影响。实现见 `joltgo/account/store.go` 的 `keyRate`。
+>
+> 附带一处：`Resume` 实际**没有**做限流检查（§5 的 Resume 步骤 1 未落地）——
+> resume 消息里只有 token、没有用户名，按用户名的限流键无从构造。token 本身是
+> 32 字节随机串，猜不出来，所以未补。
+
 ## 1. 背景与目标
 
 ### 现状
@@ -204,7 +221,7 @@ acct:seq                → INCR 计数器                # accountID 分配
 sess:{token}            → accountID, TTL 7d          # 会话缓存
 sess:acct:{accountID}   → 当前 token, TTL 7d         # 单会话强制（轮换）
 online:{accountID}      → gateServerID, TTL 24h      # 会话归属（定点踢 / 定点 bindgame）
-rl:ip:{ip}              → 计数器, TTL 60s            # 限流
+rl:ip:{ip}              → 计数器, TTL 60s            # 限流【偏差：实为 rl:user:{用户名}】
 
 -- match 域 --
 match:queue             → ZSET(member=uid, score=入队毫秒)
@@ -276,6 +293,9 @@ pitaya 绑定；`token.go` 是纯函数。`New(app, store)` 接受 `store` 接�
 ```
 
 ### 限流
+
+> 【偏差】本小节整节按 IP 的设计未落地：账号服务拿不到客户端 IP，实际按用户名限流，
+> 且 Resume 未做限流。见文首「实施偏差记录」。
 
 `rl:ip:{ip}` INCR + 首次 EXPIRE 60s，超过 10 次/分钟返回 `rate_limited`。
 IP 取 `s.RemoteAddr()`。
@@ -541,7 +561,7 @@ joltgo/
 | 层 | 文件 | 依赖 | 覆盖 |
 |---|---|---|---|
 | 存储 | `account/store_test.go` | miniredis | 占名冲突、ID 分配、密码校验、token 签发/轮换/续期/删除、key 空间与 TTL |
-| 组件 | `account/component_test.go` | fake Session + miniredis | 三个 handler 的成功/失败路径、限流、顶号决策（`old == me` 不踢）、`Bind` 失败时的错误返回 |
+| 组件 | `account/component_test.go` | fake Session + miniredis | 三个 handler 的成功/失败路径、限流（【偏差】按用户名而非 IP，见文首）、顶号决策（`old == me` 不踢）、`Bind` 失败时的错误返回 |
 | 队列 | `match/queue_test.go` | miniredis | 原子取双人、不足 2 人不弹、超时兜底、重连去重、幽灵玩家剔除、建局失败回滚 |
 | 客户端 | `godot_client/tests/login_reply_decode_test.gd` | 无 | Response 帧解码 + `errorMask` + `LoginReply` 各字段（**首次覆盖 Response 路径**） |
 | 冒烟 | `godot_client/tests/login_smoke.gd` | **活集群** | 注册 → 拿 token → 断线 → resume → 收到 `onMatched` |
