@@ -22,11 +22,13 @@ extends Node
 signal frame_received(frame: Dictionary)   # 服务端推送的同步帧（增量或全量）
 signal matched_received(result: Dictionary)
 signal connection_changed(connected: bool)
+signal login_result(result: Dictionary)   # LoginReply：{ok, token, username, account_id, reason}
 
 const WS_URL := "ws://localhost:8080/"
 const RETRY_SECS := 1.0
 const RECV_TIMEOUT := 2.5    # 秒：20 Hz 推送下正常间隔 ~50ms，远小于此阈值
 const HEARTBEAT_EVERY := 10.0 # 秒：服务端心跳超时 30s（2 倍才踢），10s 足够安全
+const LOGIN_TIMEOUT := 5.0   # 登录类请求的响应超时（秒）
 
 const TYPE_HANDSHAKE := 0x01
 const TYPE_HANDSHAKE_ACK := 0x02
@@ -53,6 +55,8 @@ var _handshaken := false # 是否已完成握手（连接后置 false，收到�
 var _matched := false    # 是否已匹配进入对局（匹配前无帧流，看门狗不生效）
 var connected := false
 var client_token := ""
+var _pending := {}    # mid -> {"route": String, "at": float}，用于响应关联与超时
+var _next_mid := 1
 
 func _ready() -> void:
 	client_token = _load_or_create_token()
@@ -450,6 +454,25 @@ func _send_notify(route: String, payload: PackedByteArray) -> void:
 	msg.append_array(payload)
 	_send_frame(TYPE_DATA, msg)
 
+## 发一条 Request 消息：flag=0x00(MSG_REQUEST<<1)，mid（LEB128 变长）
+## + route 长度 + route + protobuf payload。
+##
+## 与 Notify 的唯一区别是多了 mid：服务端按 mid 回 Response 帧。
+## 登录必须走 Request —— NATS 模式下会话未绑定时服务端 push 不了，
+## 「登录失败」这个结果没有别的路能回来。
+func _send_request(mid: int, route: String, payload: PackedByteArray) -> bool:
+	if not (connected and _handshaken):
+		return false
+	var msg := PackedByteArray()
+	msg.append(MSG_REQUEST << 1)
+	msg.append_array(_varint(mid))
+	var rb := route.to_utf8_buffer()
+	msg.append(rb.size())
+	msg.append_array(rb)
+	msg.append_array(payload)
+	_send_frame(TYPE_DATA, msg)
+	return true
+
 ## 处理一帧（每个 WebSocket message 恰好是一帧，无需缓冲拆包）。
 func _handle_frame(pkt: PackedByteArray) -> void:
 	if pkt.size() < 4:
@@ -482,14 +505,24 @@ func _on_handshake(data: PackedByteArray) -> void:
 	# 当会话 UID，重连时才能走 game.rejoin 找回原来的对局实例。
 	send_match_join()
 
-## 解析 Data 帧内的 message：flag 得类型，Push 读 route + protobuf payload。
+## 解析 Data 帧内的 message：flag 低 3 位得类型（Push / Response 两种），
+## 高位 0x20 是 pitaya 的错误标记。
 func _on_data(data: PackedByteArray) -> void:
 	if data.size() < 2:
 		return
 	var flag := data[0]
 	var mtype := (flag >> 1) & 0x07
-	if mtype != MSG_PUSH:
-		return  # 本客户端不期待 response，忽略其它
+	var is_err := (flag & 0x20) != 0
+	match mtype:
+		MSG_PUSH:
+			_on_push(data)
+		MSG_RESPONSE:
+			_on_response(data, is_err)
+		_:
+			pass  # 本客户端只发 Notify/Request，其它类型忽略
+
+## Push 帧：route 长度 + route + payload。
+func _on_push(data: PackedByteArray) -> void:
 	var rl := data[1]
 	if data.size() < 2 + rl:
 		return
@@ -501,3 +534,46 @@ func _on_data(data: PackedByteArray) -> void:
 			matched_received.emit(_decode_match_result(payload))
 		"onFrame":
 			frame_received.emit(_decode_frame(payload))
+
+## Response 帧：mid（LEB128 变长）+ payload —— **没有 route 字段**。
+## is_err 为真时 payload 是 pitaya 的错误字符串，不是 LoginReply。
+func _on_response(data: PackedByteArray, is_err: bool) -> void:
+	var r: Array = _read_varint(data, 1)
+	var mid: int = int(r[0])
+	var payload: PackedByteArray = data.slice(int(r[1]))
+	_pending.erase(mid)
+	if is_err:
+		printerr("登录请求失败（服务端错误）: " + payload.get_string_from_utf8())
+		login_result.emit({"ok": false, "reason": "internal"})
+		return
+	# 成功时由登录流程负责落盘凭证（见 Task 9 的 _save_token）。
+	login_result.emit(_decode_login_reply(payload))
+
+## LoginReply：ok=1(varint) token=2 username=3 account_id=4 reason=5（均为 string）。
+func _decode_login_reply(buf: PackedByteArray) -> Dictionary:
+	var d := {"ok": false, "token": "", "username": "", "account_id": "", "reason": ""}
+	var i := 0
+	while i < buf.size():
+		var tag: Array = _read_varint(buf, i)
+		i = int(tag[1])
+		var field: int = int(tag[0]) >> 3
+		var wire: int = int(tag[0]) & 0x07
+		if wire == WIRE_VARINT:
+			var r: Array = _read_varint(buf, i)
+			i = int(r[1])
+			if field == 1:
+				d["ok"] = int(r[0]) != 0
+		elif wire == WIRE_LEN:
+			var rl: Array = _read_varint(buf, i)
+			i = int(rl[1])
+			var n: int = int(rl[0])
+			var sub: PackedByteArray = buf.slice(i, i + n)
+			i += n
+			match field:
+				2: d["token"] = sub.get_string_from_utf8()
+				3: d["username"] = sub.get_string_from_utf8()
+				4: d["account_id"] = sub.get_string_from_utf8()
+				5: d["reason"] = sub.get_string_from_utf8()
+		else:
+			break
+	return d
