@@ -169,9 +169,13 @@ func _force_reconnect() -> void:
 # ---- 上行：业务接口（main.gd 调用） ----
 
 ## JoinMsg：token = 字段 1（string）。
+## send_match_join 进入匹配队列。
+##
+## JoinMsg 现在是**空消息**：身份来自会话绑定（account 服务在登录成功时做的），
+## 客户端不再往线上放任何凭证。以前这里会把 token 当字段 1 发出去 —— 服务端会
+## 忽略它（未知字段），但那是每次匹配都重发一次有效凭证，且与 proto 定义矛盾。
 func send_match_join() -> void:
-	var payload := _tag_len(1, client_token.to_utf8_buffer())
-	_send_notify("match.match.join", payload)
+	_send_notify("match.match.join", PackedByteArray())
 
 ## send_register 注册新账号；结果经 login_result 信号回来。
 func send_register(username: String, password: String) -> void:
