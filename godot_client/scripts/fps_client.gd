@@ -19,6 +19,8 @@ extends Node
 ## 活性保障：服务端每 tick（50 ms）都推送同步帧，因此用"N 秒收不到任何数据"作为
 ## 接收看门狗——半开连接（对端崩溃不发 FIN、路由丢包、休眠唤醒）不会让
 ## WebSocketPeer 进入 CLOSED，此时强制重建连接，避免画面永久冻结。
+## 匹配等待期没有帧流，接收看门狗不生效，另有一个「迟迟收不到 onMatched 就重发
+## match.join」的看门狗兜底（见 MATCH_RETRY_SECS）。
 
 signal frame_received(frame: Dictionary)   # 服务端推送的同步帧（增量或全量）
 signal matched_received(result: Dictionary)
@@ -30,6 +32,11 @@ const RETRY_SECS := 1.0
 const RECV_TIMEOUT := 2.5    # 秒：20 Hz 推送下正常间隔 ~50ms，远小于此阈值
 const HEARTBEAT_EVERY := 10.0 # 秒：服务端心跳超时 30s（2 倍才踢），10s 足够安全
 const LOGIN_TIMEOUT := 5.0   # 登录类请求的响应超时（秒）
+# 匹配等待期的重发间隔（秒）。**必须大于服务端的 10 s 单人兜底超时**（match/match.go
+# 的 `timeout`）：重发会刷新排队者在 ZSET 里的入队时间戳，间隔 ≤10 s 的话每次重发都把
+# 等待时钟归零，服务端的 PopStale 永远取不到「已等超过 10 s」的人，单人兜底就再也不会
+# 触发 —— 一个人玩时反而彻底卡死。别为了「快点重试」把它调小。
+const MATCH_RETRY_SECS := 15.0
 
 const TYPE_HANDSHAKE := 0x01
 const TYPE_HANDSHAKE_ACK := 0x02
@@ -55,6 +62,10 @@ var _last_recv := 0.0    # 最近一次收到数据的时间戳（秒）
 var _last_beat := 0.0    # 最近一次发心跳的时间戳（秒）
 var _handshaken := false # 是否已完成握手（连接后置 false，收到握手响应后置 true）
 var _matched := false    # 是否已匹配进入对局（匹配前无帧流，看门狗不生效）
+# 匹配等待看门狗的到期时刻（秒；0 = 未武装）。武装 = 已发出 match.join 但还没收到
+# onMatched。用一个标量而不是 Timer 节点：赋值天然幂等，反复武装也只有一份状态，
+# 不可能出现「两个计时器同时在跑」。
+var _match_retry_at := 0.0
 var connected := false
 var client_token := ""
 var last_username := ""
@@ -143,7 +154,22 @@ func _process(_delta: float) -> void:
 			# 2.5s 无数据是正常的（单人兜底要等 10s）。
 			if _matched and now - _last_recv > RECV_TIMEOUT:
 				_force_reconnect()
+			# 匹配等待看门狗：迟迟收不到 onMatched 就重发 match.join。
+			#
+			# 服务端有两条路径会把「已经出队」的玩家丢掉：入队本身失败、以及 pushMatched
+			# 失败（两处都只打日志，见 match/match.go）。Redis 抖一下或一次 NATS 推送丢
+			# 了，玩家就悬在一个自己看不见的对局里，游戏实例 60 s 后空闲回收 —— 而客户端
+			# 这边**什么都不会超时**（接收看门狗被 _matched 挡着），只能重启客户端。
+			#
+			# 重发是安全的：服务端的 tryRejoin 让 match.join 幂等（已在局中的人会被直接
+			# 送回原局），而重复 Enqueue 在 ZSET 上只是刷新等待时间。
+			if _match_retry_at > 0.0 and not _matched and now >= _match_retry_at:
+				send_match_join()   # 内部重新武装，不会叠加出第二个计时器
 		WebSocketPeer.STATE_CLOSED:
+			# 连接没了就撤掉匹配看门狗：重连后要等 resume/登录成功才重新发 join，
+			# 这里不撤的话旧计时器会在新连接上抢跑一条 match.join（那时会话还没绑定，
+			# 服务端只会忽略它），而真正的 join 反倒不再武装看门狗。
+			_match_retry_at = 0.0
 			if connected:
 				connected = false
 				connection_changed.emit(false)
@@ -163,6 +189,7 @@ func _force_reconnect() -> void:
 	_retry_at = 0.0
 	_handshaken = false
 	_matched = false
+	_match_retry_at = 0.0
 	_pending = {}
 	_ws.connect_to_url(WS_URL)
 
@@ -174,8 +201,12 @@ func _force_reconnect() -> void:
 ## JoinMsg 现在是**空消息**：身份来自会话绑定（account 服务在登录成功时做的），
 ## 客户端不再往线上放任何凭证。以前这里会把 token 当字段 1 发出去 —— 服务端会
 ## 忽略它（未知字段），但那是每次匹配都重发一次有效凭证，且与 proto 定义矛盾。
+##
+## 发送即武装匹配等待看门狗（见 _process 里的重发分支）。武装点收敛在这一个函数里，
+## 调用方（main.gd 的登录成功回调、看门狗自己的重发）都不需要各自记时间。
 func send_match_join() -> void:
 	_send_notify("match.match.join", PackedByteArray())
+	_match_retry_at = Time.get_ticks_msec() / 1000.0 + MATCH_RETRY_SECS
 
 ## send_register 注册新账号；结果经 login_result 信号回来。
 func send_register(username: String, password: String) -> void:
@@ -605,6 +636,7 @@ func _on_push(data: PackedByteArray) -> void:
 	match route:
 		"onMatched":
 			_matched = true
+			_match_retry_at = 0.0   # 匹配到了，撤掉等待看门狗
 			matched_received.emit(_decode_match_result(payload))
 		"onFrame":
 			frame_received.emit(_decode_frame(payload))
