@@ -4,6 +4,7 @@ go 1.26
 
 require (
 	github.com/alicebob/miniredis/v2 v2.39.0
+	github.com/golang/protobuf v1.5.4
 	github.com/nats-io/nuid v1.0.1
 	github.com/redis/go-redis/v9 v9.7.3
 	github.com/topfreegames/pitaya/v3 v3.0.0
@@ -28,7 +29,6 @@ require (
 	github.com/go-playground/universal-translator v0.18.1 // indirect
 	github.com/go-playground/validator/v10 v10.13.0 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
-	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/gomodule/redigo v1.9.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/websocket v1.5.1 // indirect
