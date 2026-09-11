@@ -822,15 +822,25 @@ func TestCreateRollsBackNameOnFailure(t *testing.T) {
 	s, mr := newTestStore(t)
 	createTestAccount(t, s, "alice", "hunter2")
 
-	// 占名成功后让 INCR 失败：模拟「占着名字却没建成账号」的中间态。
-	mr.SetError("MISCONF simulated failure")
+	// 制造「占名成功、分配 id 失败」这个中间态：把计数器设成非整数，
+	// INCR 会报 "ERR value is not an integer or out of range"。
+	//
+	// 不能用 mr.SetError()：那会让**所有**命令失败，包括最开始的 SETNX ——
+	// 名字压根没被占用，回滚分支根本走不到，测试就变成了假绿。
+	mr.Set("acct:seq", "notanumber")
+
 	hash, _ := HashPassword("hunter2")
 	if _, err := s.Create(context.Background(), "bob", hash); err == nil {
 		t.Fatal("INCR 失败时 Create 应报错")
 	}
-	mr.SetError("")
+	// 回滚必须发生，否则 bob 会变成「占着名字却没有任何账号」的僵尸名 ——
+	// 谁都注册不了它，也谁都登录不了它。
+	if mr.Exists("acct:name:bob") {
+		t.Fatal("失败后应回滚占名")
+	}
 
-	// 回滚必须发生：bob 这个名字应能重新占用。
+	// 计数器修好后应能重新占名。
+	mr.Set("acct:seq", "1")
 	if id, err := s.Create(context.Background(), "bob", hash); err != nil {
 		t.Fatalf("回滚后应能重新占名，得到 %v (id=%s)", err, id)
 	}
