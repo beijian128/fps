@@ -2,6 +2,7 @@ package match
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -147,28 +148,41 @@ func TestPopStale(t *testing.T) {
 }
 
 // 多个 match 节点并发抢同一个人时，只有一个能拿到（Lua 原子取）。
+//
+// 单轮 8 个 goroutine 太容易全错过竞态窗口 —— 评审实测：把 Lua 换成
+// 「ZRangeByScore 再 ZRem」的两趟实现，单轮版本 30 次里能过 28 次。
+// 所以这里循环多轮，每轮独立播种同一个人。
 func TestPopStaleIsAtomic(t *testing.T) {
 	q, _ := newTestQueue(t)
 	ctx := context.Background()
-	if err := q.rdb.ZAdd(ctx, queueKey, redis.Z{Score: 1000, Member: "stale"}).Err(); err != nil {
-		t.Fatalf("ZAdd 报错: %v", err)
-	}
 
-	const n = 8
-	results := make(chan string, n)
-	for i := 0; i < n; i++ {
-		go func() {
-			got, _ := q.PopStale(context.Background(), 10*time.Second)
-			results <- got
-		}()
-	}
-	hit := 0
-	for i := 0; i < n; i++ {
-		if <-results != "" {
-			hit++
+	const rounds = 60
+	const workers = 8
+	for round := 0; round < rounds; round++ {
+		if err := q.rdb.ZAdd(ctx, queueKey, redis.Z{Score: 1000, Member: "stale"}).Err(); err != nil {
+			t.Fatalf("ZAdd 报错: %v", err)
 		}
-	}
-	if hit != 1 {
-		t.Fatalf("并发抢同一个人应恰好一个成功，得到 %d", hit)
+		results := make(chan string, workers)
+		var wg sync.WaitGroup
+		for i := 0; i < workers; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				got, _ := q.PopStale(context.Background(), 10*time.Second)
+				results <- got
+			}()
+		}
+		wg.Wait()
+		close(results)
+
+		hit := 0
+		for got := range results {
+			if got != "" {
+				hit++
+			}
+		}
+		if hit != 1 {
+			t.Fatalf("第 %d 轮：并发抢同一个人应恰好一个成功，得到 %d", round, hit)
+		}
 	}
 }

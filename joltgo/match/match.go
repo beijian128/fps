@@ -15,7 +15,6 @@ import (
 	pitaya "github.com/topfreegames/pitaya/v3/pkg"
 	"github.com/topfreegames/pitaya/v3/pkg/cluster"
 	"github.com/topfreegames/pitaya/v3/pkg/component"
-	"github.com/topfreegames/pitaya/v3/pkg/session"
 	"joltgo/game/protos"
 	"joltgo/online"
 )
@@ -82,7 +81,7 @@ func (c *Component) Join(ctx context.Context, msg *protos.JoinMsg) {
 	}
 
 	// 回局优先：存量对局还在就直接回去，不入匹配队列。
-	if c.tryRejoin(ctx, s, uid) {
+	if c.tryRejoin(ctx, uid) {
 		return
 	}
 
@@ -96,8 +95,9 @@ func (c *Component) Join(ctx context.Context, msg *protos.JoinMsg) {
 // tryRejoin 询问所有 game 节点是否托管着该 uid 的存量实例。命中则走与首次匹配
 // 相同的收尾路径（写会话数据 + 推 onMatched），返回 true。
 //
-// 保留 session.Session 参数：它既要用 uid，也要在失败路径上不动会话。
-func (c *Component) tryRejoin(ctx context.Context, s session.Session, uid string) bool {
+// 只按 uid 定址：会话对象本身用不上 —— 会话数据由该 uid 所在的 gate 去写
+// （bindGameOn），不是在这里改。
+func (c *Component) tryRejoin(ctx context.Context, uid string) bool {
 	servers, err := c.app.GetServersByType(gameServerType)
 	if err != nil || len(servers) == 0 {
 		return false
@@ -222,7 +222,12 @@ func (c *Component) pushMatched(uid, matchID, gameServerID string, playerIdx int
 func (c *Component) startMatch(ctx context.Context, uids []string) {
 	servers, err := c.app.GetServersByType(gameServerType)
 	if err != nil || len(servers) == 0 {
-		log.Printf("match: no game server available: %v", err)
+		// 没有可用的 game 节点是集群侧的瞬时状况，跟这几个人在不在线无关：
+		// 他们已经被原子弹出队列，直接 return 就是静默丢人。放回去等下一轮。
+		log.Printf("match: no game server available, requeue %v: %v", uids, err)
+		for _, uid := range uids {
+			c.requeue(ctx, uid)
+		}
 		return
 	}
 	// 简单挑选：取第一个 game 节点（demo 规模足够；生产可做负载均衡）。
@@ -239,13 +244,28 @@ func (c *Component) startMatch(ctx context.Context, uids []string) {
 	gates := make([]string, 0, len(uids))
 	for _, uid := range uids {
 		gateID, err := c.online.Gate(ctx, uid)
-		if err != nil || gateID == "" {
-			log.Printf("match: dropping %s from match %s: no online gate (err=%v)", uid, matchID, err)
+		if err != nil {
+			// 瞬时故障（Redis 抖动等）：人还在线，不能就这么丢掉 —— 他已经被
+			// 原子弹出队列，不重新入队的话没人会再管他，而客户端只发一次
+			// match.join 然后一直等 onMatched，永远等不到。
+			log.Printf("match: requeue %s from match %s: online lookup failed: %v", uid, matchID, err)
+			c.requeue(ctx, uid)
+			continue
+		}
+		if gateID == "" {
+			// 确实不在了：登记里没有他。
+			log.Printf("match: dropping %s from match %s: offline", uid, matchID)
 			continue
 		}
 		slot := len(alive) // 槽位 = 在存活名单里的位置
 		if err := c.bindGameOn(ctx, gateID, uid, matchID, target.ID, slot); err != nil {
-			log.Printf("match: dropping %s from match %s: bind failed: %v", uid, matchID, err)
+			if errors.Is(err, errPlayerGone) {
+				// 那个 gate 上已经没有这个会话：人确实走了。
+				log.Printf("match: dropping %s from match %s: offline", uid, matchID)
+			} else {
+				log.Printf("match: requeue %s from match %s: bind failed: %v", uid, matchID, err)
+				c.requeue(ctx, uid)
+			}
 			continue
 		}
 		alive = append(alive, uid)
@@ -263,10 +283,21 @@ func (c *Component) startMatch(ctx context.Context, uids []string) {
 		Uids:    alive,
 	}); err != nil {
 		log.Printf("match: create game on %s failed: %v", target.ID, err)
+		// 这些人几秒前刚被探活过（bindGameOn 应答 found=true），建局失败是
+		// 集群侧的问题，不是他们的问题 —— 回滚会话数据后重新入队，否则他们
+		// 已经被原子弹出、又收不到 onMatched，就此静默消失。
 		for i, uid := range alive {
 			if err := c.bindGameOn(ctx, gates[i], uid, "", "", i); err != nil {
+				if errors.Is(err, errPlayerGone) {
+					// 回滚时人已经走了：会话本来就没了，无需回滚也无需重新入队。
+					log.Printf("match: rollback for %s skipped: already offline", uid)
+					continue
+				}
+				// 回滚没成功（RPC 不通）：会话里留着指向不存在对局的归属。
+				// 仍然重新入队 —— 下一次开局的 bindGameOn 会覆盖掉这份脏数据。
 				log.Printf("match: rollback bind for %s failed: %v", uid, err)
 			}
+			c.requeue(ctx, uid)
 		}
 		return
 	}
@@ -276,4 +307,17 @@ func (c *Component) startMatch(ctx context.Context, uids []string) {
 		c.pushMatched(uid, matchID, target.ID, slot)
 	}
 	log.Printf("match: started match %s on game %s with %d players", matchID, target.ID, len(alive))
+}
+
+// requeue 把因为瞬时故障没能进局的玩家放回队列。
+//
+// 他已经被原子弹出，不这么做就没人再管他了；客户端只发一次 match.join，
+// 之后一直等 onMatched —— 静默丢失比开局失败糟得多。ZSET 按 uid 去重，
+// 重复入队只会刷新他的等待时间，所以这里不需要判断是否已在队列里。
+//
+// 自己记日志、不返回错误：入队失败不该把正在组建的这一局也带下去。
+func (c *Component) requeue(ctx context.Context, uid string) {
+	if err := c.queue.Enqueue(ctx, uid); err != nil {
+		log.Printf("match: requeue %s failed: %v", uid, err)
+	}
 }

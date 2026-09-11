@@ -22,14 +22,15 @@ import (
 // queueKey 是配对队列的键。
 const queueKey = "match:queue"
 
-// enqueueScript 入队并返回入队时刻（毫秒，取自 Redis 服务端时钟）。
+// enqueueScript 入队，score 取 Redis 服务端时钟（毫秒）。
 // 同一个 uid 重复入队只更新 score，即**重新计时** —— 排队期间断线重连会被视为
 // 重新排队，这是有意的（他确实刚刚才回来）。
+//
+// 不返回入队时刻：调用方只关心成没成，多一个返回值就多一个没人读的约定。
 var enqueueScript = redis.NewScript(`
 local t = redis.call('TIME')
 local ms = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
 redis.call('ZADD', KEYS[1], ms, ARGV[1])
-return ms
 `)
 
 // pairScript 原子地取出最早的两个排队者。
@@ -66,7 +67,12 @@ func NewQueue(rdb *redis.Client) *Queue { return &Queue{rdb: rdb} }
 
 // Enqueue 入队（时间戳用 Redis 服务端时钟）。
 func (q *Queue) Enqueue(ctx context.Context, uid string) error {
-	return enqueueScript.Run(ctx, q.rdb, []string{queueKey}, uid).Err()
+	// 脚本不返回值，Redis 应答是 nil bulk，go-redis 会把它报成 redis.Nil。
+	// 那不是错误，是「没有返回值」。
+	if err := enqueueScript.Run(ctx, q.rdb, []string{queueKey}, uid).Err(); err != redis.Nil {
+		return err
+	}
+	return nil
 }
 
 // PopPair 原子取出最早的两个排队者。返回空切片表示当前不足 2 人。
