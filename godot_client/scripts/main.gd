@@ -149,10 +149,8 @@ func _on_connection(connected: bool) -> void:
 		conn_label.text = "正在连接服务器…"
 		conn_label.visible = true
 		_matched = false
-		_logic_busy = false
 		_logic_authenticated = false
-		if _logic_status != null:
-			_logic_status.text = ""
+		_clear_logic_state()
 		if _logic_panel != null:
 			_logic_panel.visible = false
 		# 断线后重置帧可能永远不会到达，闩锁留着会误静音重连后第一次真实销毁反馈。
@@ -164,6 +162,26 @@ func _on_connection(connected: bool) -> void:
 		for id in _entities:
 			_entities[id].queue_free()
 		_entities = {}
+
+## _clear_logic_state 清掉当前账号的商城/背包展示状态。断线、登录失败或本地无凭证时
+## 都必须调用，避免上一个账号的金币/商品继续留在面板上。这里不隐藏面板，只清内容：
+## 成功重连后应等新的 logic.state 到达再刷新，而不是把面板提前抹成空屏。
+func _clear_logic_state() -> void:
+	_logic_state = {
+		"ok": false,
+		"coins": 0,
+		"equipped_primary_weapon": "",
+		"items": [],
+	}
+	_logic_busy = false
+	if _logic_coins != null:
+		_logic_coins.text = ""
+	if _logic_status != null:
+		_logic_status.text = ""
+	if _logic_items_box != null:
+		for child in _logic_items_box.get_children():
+			_logic_items_box.remove_child(child)
+			child.queue_free()
 
 ## _reset_interp 清空插值状态。重连后第一帧没有「上一帧」，直接在当前位置落位。
 func _reset_interp() -> void:
@@ -1063,7 +1081,8 @@ func _show_login_panel(show_it: bool, err: String) -> void:
 	if show_it:
 		conn_label.visible = false
 		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
-		_login_user.grab_focus()
+		if _login_user != null and _login_user.is_inside_tree():
+			_login_user.grab_focus()
 
 func _submit_login() -> void:
 	_submit(false)
@@ -1110,6 +1129,7 @@ func _on_login_result(result: Dictionary) -> void:
 		fps_client.send_match_join()
 	else:
 		_logic_authenticated = false
+		_clear_logic_state()
 		var reason := String(result.get("reason", ""))
 		if reason == "no_token":
 			# 没登录过：安静地显示面板，不报错。

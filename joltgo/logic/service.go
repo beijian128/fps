@@ -143,7 +143,9 @@ func (s *Service) EnsureProfile(ctx context.Context, accountID string) error {
 			}
 			if err := s.store.SaveBag(ctx, id, persist.PlayerBag{}); err != nil {
 				if createdWallet {
-					if delErr := s.store.DeleteWallet(ctx, id); delErr != nil {
+					if lock.IsLost() {
+						log.Printf("logic: skip wallet compensation for account %d after lock loss", id)
+					} else if delErr := s.store.DeleteWallet(ctx, id); delErr != nil {
 						log.Printf("logic: compensate wallet for account %d: %v", id, delErr)
 					}
 				}

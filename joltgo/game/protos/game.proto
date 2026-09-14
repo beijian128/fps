@@ -1,7 +1,10 @@
-// 游戏协议消息（wire 契约）。gate / match / game 三服务与 Godot 客户端都遵守。
+// 游戏协议消息（wire 契约）。gate / account / logic / match / game 等服务与
+// Godot 客户端都遵守。
 // 线上 route 一律是三段式 `server.service.method`（pitaya 的路由格式）：
 //   - 客户端 → gate → account：account.account.register / account.account.login /
 //     account.account.resume（Request/Response，不是 Notify/Push —— 见 docs/API.md）
+//   - 客户端 → gate → logic：logic.logic.state / logic.logic.purchase /
+//     logic.logic.equip（Request/Response）
 //   - 客户端 → gate → match：match.match.join（JoinMsg，Notify）
 //   - match → 客户端：onMatched（MatchResult，Push —— 推送用 route 名，不是三段式）
 //   - match → game（RPC）：game.game.create（CreateGameMsg）/ game.game.rejoin（RejoinMsg）

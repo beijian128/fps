@@ -248,6 +248,9 @@ func _encode_equip(item_id: String) -> PackedByteArray:
 func _logic_failure(reason: String) -> Dictionary:
 	return {"ok": false, "reason": reason, "coins": 0, "items": [], "equipped_primary_weapon": ""}
 
+func _is_known_request_route(route: String) -> bool:
+	return route.begins_with("account.") or route.begins_with("logic.")
+
 func _emit_request_failure(route: String, reason: String) -> void:
 	if route.begins_with("logic."):
 		logic_state_received.emit(_logic_failure(reason))
@@ -704,6 +707,9 @@ func _on_response(data: PackedByteArray, is_err: bool) -> void:
 	var pending: Dictionary = _pending.get(mid, {})
 	_pending.erase(mid)
 	var route := String(pending.get("route", ""))
+	if route == "" or not _is_known_request_route(route):
+		printerr("忽略无匹配请求的响应: mid=%d route=%s" % [mid, route])
+		return
 	if is_err:
 		printerr("请求失败（服务端错误）: route=%s payload=%s" % [route, payload.get_string_from_utf8()])
 		_emit_request_failure(route, "internal")
@@ -715,12 +721,13 @@ func _on_response(data: PackedByteArray, is_err: bool) -> void:
 		else:
 			logic_state_received.emit(result)
 		return
-	var reply := _decode_login_reply(payload)
-	if bool(reply.get("ok", false)):
-		_save_token(String(reply.get("token", "")), String(reply.get("username", "")))
-	elif String(reply.get("reason", "")) == "token_invalid":
-		_clear_token()
-	login_result.emit(reply)
+	if route.begins_with("account."):
+		var reply := _decode_login_reply(payload)
+		if bool(reply.get("ok", false)):
+			_save_token(String(reply.get("token", "")), String(reply.get("username", "")))
+		elif String(reply.get("reason", "")) == "token_invalid":
+			_clear_token()
+		login_result.emit(reply)
 
 ## _fail_unreadable_response 处理「mid 读不出来」的畸形 Response：报一次失败。
 ##
@@ -728,16 +735,17 @@ func _on_response(data: PackedByteArray, is_err: bool) -> void:
 ## LOGIN_TIMEOUT 之后再 emit 一条 timeout —— 用户眼睁睁看着「服务暂时不可用」
 ## 5 秒后自己变成「服务器无响应，请重试」。整表清空的粒度正好：在途的登录类请求
 ## 最多只有一条（UI 有 _login_busy 单飞守卫，resume 每次握手只发一次）。
+## 清空后没有任何已知 pending route 时直接忽略 —— 不能凭空报一个 LoginReply 失败。
 func _fail_unreadable_response() -> void:
 	var routes := []
 	for mid in _pending:
 		routes.append(String(_pending[mid].get("route", "")))
 	_pending = {}
 	if routes.is_empty():
-		login_result.emit({"ok": false, "reason": "internal"})
 		return
 	for route in routes:
-		_emit_request_failure(route, "internal")
+		if _is_known_request_route(route):
+			_emit_request_failure(route, "internal")
 
 func _decode_logic_state(buf: PackedByteArray) -> Dictionary:
 	var d := {

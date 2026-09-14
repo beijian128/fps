@@ -29,6 +29,12 @@ func _init() -> void:
     main._build_logic_panel()
     main._login_panel = CanvasLayer.new()
     main.add_child(main._login_panel)
+    main._login_user = LineEdit.new()
+    main._login_user.text = "tester"
+    main.add_child(main._login_user)
+    main._login_pass = LineEdit.new()
+    main._login_pass.text = "secret"
+    main.add_child(main._login_pass)
     main._login_error = Label.new()
     main._login_panel.add_child(main._login_error)
     main._login_panel.visible = true
@@ -108,11 +114,37 @@ func _init() -> void:
     _check(main._logic_busy, "关闭面板不能清除在途请求")
     _check(main._logic_status.text == "加载中…", "关闭面板不能清除请求状态文本")
 
+    main._logic_state = {
+        "ok": true,
+        "coins": 777,
+        "equipped_primary_weapon": "shotgun",
+        "items": [
+            {"item_id": "shotgun", "display_name": "霰弹枪", "price": 450,
+             "equip_slot": "primary_weapon", "owned_quantity": 1},
+        ],
+    }
+    main._on_logic_state({
+        "ok": true,
+        "coins": 777,
+        "equipped_primary_weapon": "shotgun",
+        "items": [
+            {"item_id": "shotgun", "display_name": "霰弹枪", "price": 450,
+             "equip_slot": "primary_weapon", "owned_quantity": 1},
+        ],
+    })
+    _check(main._logic_coins.text.contains("777"), "准备用例时应显示旧账号金币")
     main._on_connection(false)
     _check(not main._logic_busy, "断线应清除在途商城请求")
     _check(main._logic_status.text == "", "断线应清除商城状态文本")
     _check(not main._logic_authenticated, "断线应撤销商城认证门")
     _check(not main._logic_panel.visible, "断线应隐藏商城面板")
+    _check(not bool(main._logic_state.get("ok", false)), "断线应清空商城状态")
+    _check(int(main._logic_state.get("coins", 0)) == 0, "断线应清空金币状态")
+    _check(String(main._logic_state.get("equipped_primary_weapon", "")) == "",
+            "断线应清空装备状态")
+    _check((main._logic_state.get("items", []) as Array).size() == 0,
+            "断线应清空商品列表")
+    _check(main._logic_coins.text == "", "断线应清空金币显示")
 
     main._logic_state = {
         "ok": true,
@@ -152,6 +184,27 @@ func _init() -> void:
             "失败响应不能污染商品状态")
     _check(main._logic_status.text == "金币不足", "失败响应应显示余额不足")
     _check(not main._logic_busy, "失败响应应清除请求中状态")
+
+    main._logic_state = {
+        "ok": true,
+        "coins": 888,
+        "equipped_primary_weapon": "rifle",
+        "items": [
+            {"item_id": "rifle", "display_name": "步枪", "price": 300,
+             "equip_slot": "primary_weapon", "owned_quantity": 1},
+        ],
+    }
+    main._logic_coins.text = "金币：888"
+    main._logic_busy = true
+    main._on_login_result({"ok": false, "reason": "bad_credentials"})
+    _check(not bool(main._logic_state.get("ok", false)), "登录失败应清空商城状态")
+    _check(int(main._logic_state.get("coins", 0)) == 0, "登录失败应清空金币状态")
+    _check(String(main._logic_state.get("equipped_primary_weapon", "")) == "",
+            "登录失败应清空装备状态")
+    _check((main._logic_state.get("items", []) as Array).size() == 0,
+            "登录失败应清空商品列表")
+    _check(main._logic_coins.text == "", "登录失败应清空金币显示")
+    _check(not main._logic_busy, "登录失败应清除请求中状态")
 
     main.queue_free()
     if _failures > 0:

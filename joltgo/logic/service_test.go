@@ -160,6 +160,46 @@ func TestEnsureProfileRepairsOnlyMissingParts(t *testing.T) {
 	}
 }
 
+func TestEnsureProfileCompensatesWalletWhenBagSaveFails(t *testing.T) {
+	env := newServiceTestEnv(t)
+	ctx := context.Background()
+	failing := &bagFailStore{Store: env.store, fail: true}
+	env.svc.store = failing
+
+	if err := env.svc.EnsureProfile(ctx, "7"); err == nil {
+		t.Fatal("EnsureProfile should fail when bag save fails")
+	}
+	if _, ok, _ := env.store.GetWallet(ctx, 7); ok {
+		t.Fatal("wallet should be deleted after bag save failure while lock is still held")
+	}
+	if _, ok, _ := env.store.GetBag(ctx, 7); ok {
+		t.Fatal("bag should not exist after failed save")
+	}
+}
+
+func TestEnsureProfileSkipsWalletCompensationWhenLockLost(t *testing.T) {
+	env := newServiceTestEnv(t)
+	ctx := context.Background()
+	failing := &bagFailStore{Store: env.store, fail: true}
+	env.svc.store = failing
+	lock := &scriptedLock{lost: []bool{false, false, false, true}}
+	env.svc.locks = &scriptedLockFactory{lock: lock}
+
+	if err := env.svc.EnsureProfile(ctx, "7"); err == nil {
+		t.Fatal("EnsureProfile should fail when bag save fails")
+	}
+	wallet, ok, _ := env.store.GetWallet(ctx, 7)
+	if !ok || wallet.Coins != 1000 {
+		t.Fatalf("wallet should be left for next repair after lock loss: %+v ok=%v", wallet, ok)
+	}
+	if _, ok, _ := env.store.GetBag(ctx, 7); ok {
+		t.Fatal("bag should not exist after failed save")
+	}
+	if lock.calls != 4 {
+		t.Fatalf("IsLost calls=%d want=4", lock.calls)
+	}
+}
+
 func TestEnsureProfileConcurrentInitializesOnce(t *testing.T) {
 	env, _ := newLockedServiceTestEnv(t)
 	const workers = 12

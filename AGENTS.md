@@ -20,7 +20,7 @@
 fps/
 ├── joltgo/                  # 服务端（Go，单二进制五角色）
 │   ├── main.go              # 入口：解析 -type(gate|account|logic|match|game) 与 -redis，按角色装配 pitaya app
-│   ├── gate/                # gate 服务：AddRoute 路由（account.*/logic.*/match.* 轮询 / game.* 按会话数据定点）
+│   ├── gate/                # gate 服务：AddRoute 路由（account.*/match.* 轮询 / logic.* 均匀随机 / game.* 按会话数据定点）
 │   │   └── session.go       # ★ 会话归属登记（online:{accountID} → 本 gate）+ 远端 remote gate.bindgame
 │   ├── account/             # account 服务：注册 / 登录 / 凭证恢复 + distlock 注册临界区（token.go / store.go / component.go）
 │   ├── logic/               # logic 服务：玩家档案 / 钱包 / 背包 / 商城 / 装备 + logic.online 远端
@@ -99,7 +99,7 @@ fps/
 
 ```
 客户端 ──WS(pomelo+protobuf)──▶ gate(frontend)
-   gate 按 route 路由：account.* / logic.* / match.* → 对应后端轮询；game.* → 定点 game 节点（读会话数据 gameServerId）
+   gate 按 route 路由：account.* / match.* → 对应后端轮询；logic.* → 均匀随机；game.* → 定点 game 节点（读会话数据 gameServerId）
    account 校验用户名/密码（bcrypt）→ distlock 串行同名注册 → 写账号 Hash + SETNX 名字映射 → RPC logic.logic.online（随机 logic）→ logic 确保钱包/背包 Hash → 签发 token 存 Redis → Bind(accountID) → 回 LoginReply
    gate → logic.logic.*（随机 logic 节点）→ logic 读写 Redis 钱包/背包 Hash
    gate 绑定成功后写 online:{accountID} → 本 gate（会话归属登记）

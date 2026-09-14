@@ -27,7 +27,8 @@ func _init() -> void:
 	_test_response_frame_layout()
 	_test_error_mask_flag()
 	_test_truncated_response_frame()
-	for name: String in ["reply_ok", "reply_fail", "reply_empty", "frame_layout", "error_mask", "truncated"]:
+	_test_late_logic_response_without_pending_mid()
+	for name: String in ["reply_ok", "reply_fail", "reply_empty", "frame_layout", "error_mask", "truncated", "late_logic"]:
 		if not _done.has(name):
 			_failures += 1
 			printerr("FAIL: 用例 %s 没跑完（中途抛错了？）" % name)
@@ -104,6 +105,7 @@ func _test_response_frame_layout() -> void:
 	frame.append(_c.MSG_RESPONSE << 1)
 	frame.append_array(_c._varint(300))     # 2 字节 LEB128 的 mid
 	frame.append_array(payload)
+	_c._pending[300] = {"route": "account.account.login", "at": 0.0}
 
 	_c._on_data(frame)
 
@@ -120,6 +122,7 @@ func _test_error_mask_flag() -> void:
 	frame.append((_c.MSG_RESPONSE << 1) | 0x20)
 	frame.append_array(_c._varint(7))
 	frame.append_array("boom".to_utf8_buffer())
+	_c._pending[7] = {"route": "account.account.login", "at": 0.0}
 
 	_c._on_data(frame)
 
@@ -128,7 +131,8 @@ func _test_error_mask_flag() -> void:
 	_check(got.get("reason", "") == "internal", "错误帧应回 internal，得到 %s" % str(got))
 	_done["error_mask"] = true
 
-## 畸形帧（mid 被截断）不能读越界，也不能让调用方一直等 —— 必须明确报失败。
+## 畸形帧（mid 被截断）不能读越界，也不能让调用方一直等；没有已知 pending route
+## 时也不能凭空报一个 LoginReply 失败。
 func _test_truncated_response_frame() -> void:
 	_last_login = {}
 	var frame := PackedByteArray()
@@ -138,5 +142,23 @@ func _test_truncated_response_frame() -> void:
 	_c._on_data(frame)
 
 	var got: Dictionary = _last_login
-	_check(got.get("ok", true) == false, "截断帧应明确报失败，得到 %s" % str(got))
+	_check(got.is_empty(), "无 pending route 的截断帧应被忽略，得到 %s" % str(got))
 	_done["truncated"] = true
+
+## 迟到的 Logic Response 没有 pending mid 可配对，必须被忽略：既不能当成
+## LoginReply 报登录成功/失败，也不能触发任何登录副作用。
+func _test_late_logic_response_without_pending_mid() -> void:
+	_last_login = {}
+	_c.client_token = "sentinel-token"
+	var payload := _f_varint(1, 1)          # LogicStateReply{ok:true}
+	payload.append_array(_f_varint(3, 500)) # coins
+	var frame := PackedByteArray()
+	frame.append(_c.MSG_RESPONSE << 1)
+	frame.append_array(_c._varint(99))
+	frame.append_array(payload)
+
+	_c._on_data(frame)
+
+	_check(_last_login.is_empty(), "无 pending mid 的 Logic 响应不得发出 login_result，得到 %s" % str(_last_login))
+	_check(_c.client_token == "sentinel-token", "无 pending mid 的 Logic 响应不得改动本地凭证")
+	_done["late_logic"] = true

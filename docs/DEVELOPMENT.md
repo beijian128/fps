@@ -9,7 +9,7 @@
 5. 改 ECS 核心：只动 `joltgo/ecs/`，注意它必须是零依赖、可单测的
 6. 改物理接口：动 `joltgo/wrapper/` 或 `joltgo/physics/`，必须重跑完整 `build.ps1`
 7. 加/改一个**同步属性**：只动 `joltgo/sim/replicate.go`（`declareAttributes` 加一行 + 变更点 `rep.Set`）+ `sim/replicate_test.go`，**不需要**改 proto、生成码或客户端解码（见下）
-8. 改**协议结构**（增删消息 / route、改 Frame/Schema 字段号）：动 `joltgo/game/protos/game.proto`（重跑 `protoc --go_out` 重新生成）+ `joltgo/game/` + `joltgo/match/` + `joltgo/account/` + 同步改 `godot_client/scripts/fps_client.gd`（protobuf 编解码）
+8. 改**协议结构**（增删消息 / route、改 Frame/Schema 字段号）：动 `joltgo/game/protos/game.proto`（重跑 `protoc --go_out` 重新生成）+ `joltgo/game/` + `joltgo/match/` + `joltgo/account/` + `joltgo/logic/` + 同步改 `godot_client/scripts/fps_client.gd`（protobuf 编解码）
 9. 改**账号/登录/凭证**：动 `joltgo/account/`（`token.go` 纯函数 / `store.go` Redis / `component.go` handler）+ `joltgo/persist/`（账号 Hash）+ 客户端 `fps_client.gd`（Request/Response）与 `main.gd`（登录面板），跑 `go test ./account ./persist`
 10. 改**持久化模型**：账号改 `joltgo/persist/protos/account.proto`，玩家钱包/背包改 `joltgo/persist/protos/player/player.proto`；再跑 `joltgo/gen-redis.ps1`，不要手改 `.redis.go`；生成码与 `persist/store.go` / `persist/player.go` 一起提交，跑 `go test ./persist ./account ./logic`
 11. 改**会话归属 / 多节点行为**：动 `joltgo/online/` + `joltgo/gate/session.go`，跑 `go test ./online ./gate ./account ./match`
@@ -58,8 +58,9 @@
    protoc --go_out=. --go_opt=paths=source_relative -I . game/protos/game.proto
    ```
    （需要 `protoc` 与 `protoc-gen-go`；见 [BUILD.md](BUILD.md)）
-3. 改 `joltgo/game/component.go`：handler 入参类型、`toFrame`（`replication.Frame` →
-   `protos.Frame` 的转换）
+3. 改服务端 handler：`joltgo/game/component.go` 的入参类型与 `toFrame`
+   （`replication.Frame` → `protos.Frame` 的转换）；涉及 Logic 消息时同步改
+   `joltgo/logic/component.go`
 4. 改 `godot_client/scripts/fps_client.gd`：`_encode_*` / `_decode_*` 手写 wire 编解码
 5. 跑 `go build ./...` + 无头测试验证；改同步链路再跑 `tests/rejoin_smoke.gd`（需集群）
 
@@ -250,5 +251,5 @@
 - 改局外业务规则、商品目录、购买、装备或补偿逻辑：修改 `joltgo/logic/`，并同步 `godot_client/scripts/fps_client.gd` / `main.gd` 的调用或面板；先跑 `go test -count=1 ./logic ./persist`，再跑 `logic_state_decode_test.gd`、`logic_panel_test.gd`。
 - 改玩家数据模型：先改 `joltgo/persist/protos/player/player.proto`，再运行 `joltgo/gen-redis.ps1`，提交生成的 `player.redis.go`，最后更新 `joltgo/persist/player.go` 与调用方。不要手改生成文件。
 - Logic 节点是无状态的，新增节点不应引入进程内玩家状态；跨请求状态必须进入 Redis，并继续遵守账号级锁、余额预检查、锁内复查与失败补偿边界。
-- 改协议结构（新增/删除 route 或修改 `game.proto` 字段号/类型）：重生成 `joltgo/game/protos/game.pb.go`，同步 `joltgo/game/`、`joltgo/match/`、`joltgo/account/` 与 `godot_client/scripts/fps_client.gd`，再跑协议回归测试。仅改同步属性不需要改 proto。
+- 改协议结构（新增/删除 route 或修改 `game.proto` 字段号/类型）：重生成 `joltgo/game/protos/game.pb.go`，同步 `joltgo/game/`、`joltgo/match/`、`joltgo/account/`、`joltgo/logic/` 与 `godot_client/scripts/fps_client.gd`，再跑协议回归测试。仅改同步属性不需要改 proto。
 - 改登录上线链路：同时检查 account 的 `logic.logic.online` RPC、logic 的 `EnsureProfile`、Redis player key 与 `login_smoke` / `logic_smoke`。
