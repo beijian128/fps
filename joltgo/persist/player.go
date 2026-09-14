@@ -32,6 +32,7 @@ type PlayerBag struct {
 type PlayerPersistence interface {
 	GetWallet(context.Context, uint64) (PlayerWallet, bool, error)
 	SaveWallet(context.Context, uint64, PlayerWallet) error
+	AddCoins(context.Context, uint64, int64) error
 	DeleteWallet(context.Context, uint64) error
 	GetBag(context.Context, uint64) (PlayerBag, bool, error)
 	SaveBag(context.Context, uint64, PlayerBag) error
@@ -67,6 +68,16 @@ func (s *PlayerStore) SaveWallet(ctx context.Context, id uint64, wallet PlayerWa
 		SchemaVersion: playerpb.DBSchemaVersion_DB_SCHEMA_VERSION_CURRENT,
 	}
 	return row.SetFields(conn, playerWalletNamespace, id, 0)
+}
+
+func (s *PlayerStore) AddCoins(ctx context.Context, id uint64, delta int64) error {
+	conn, err := s.pool.GetContext(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	_, err = conn.Do("HINCRBY", PlayerWalletKey(id), playerpb.FieldDBUserWallet_Coins, delta)
+	return err
 }
 
 func (s *PlayerStore) GetWallet(ctx context.Context, id uint64) (PlayerWallet, bool, error) {

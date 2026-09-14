@@ -2,6 +2,7 @@ package persist
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
 	"github.com/alicebob/miniredis/v2"
@@ -59,6 +60,18 @@ func TestPlayerStoreRoundTrip(t *testing.T) {
 	}
 	if gotBag.EquippedPrimaryWeapon != "rifle" || len(gotBag.Items) != 2 {
 		t.Fatalf("GetBag 不一致: %+v", gotBag)
+	}
+
+	if err := store.AddCoins(ctx, 42, 250); err != nil {
+		t.Fatalf("AddCoins: %v", err)
+	}
+	gotWallet, ok, err = store.GetWallet(ctx, 42)
+	if err != nil || !ok || gotWallet.Coins != 1250 {
+		t.Fatalf("AddCoins 后 GetWallet: got=%+v ok=%v err=%v", gotWallet, ok, err)
+	}
+	gotBagAfterCoins, ok, err := store.GetBag(ctx, 42)
+	if err != nil || !ok || !reflect.DeepEqual(gotBagAfterCoins, gotBag) {
+		t.Fatalf("AddCoins 不应修改背包: got=%+v want=%+v ok=%v err=%v", gotBagAfterCoins, gotBag, ok, err)
 	}
 
 	conn := store.pool.Get()

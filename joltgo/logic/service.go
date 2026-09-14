@@ -44,6 +44,7 @@ func ReasonOf(err error) string {
 type Store interface {
 	GetWallet(context.Context, uint64) (persist.PlayerWallet, bool, error)
 	SaveWallet(context.Context, uint64, persist.PlayerWallet) error
+	AddCoins(context.Context, uint64, int64) error
 	DeleteWallet(context.Context, uint64) error
 	GetBag(context.Context, uint64) (persist.PlayerBag, bool, error)
 	SaveBag(context.Context, uint64, persist.PlayerBag) error
@@ -179,10 +180,10 @@ func hasItem(bag persist.PlayerBag, itemID string) bool {
 	return false
 }
 
-func (s *Service) compensateWallet(ctx context.Context, accountID uint64, wallet persist.PlayerWallet) {
+func (s *Service) compensateWallet(ctx context.Context, accountID uint64, delta int64) {
 	compCtx, cancel := context.WithTimeout(context.Background(), compensateTimeout)
 	defer cancel()
-	if err := s.store.SaveWallet(compCtx, accountID, wallet); err != nil {
+	if err := s.store.AddCoins(compCtx, accountID, delta); err != nil {
 		log.Printf("logic: compensate wallet for account %d failed: %v", accountID, err)
 	}
 }
@@ -213,6 +214,7 @@ func (s *Service) Purchase(ctx context.Context, accountID, itemID string, quanti
 	}
 
 	var out State
+	committed := false
 	err = s.withAccountLock(ctx, id, func(lock Lock) error {
 		currentWallet, ok, err := s.store.GetWallet(ctx, id)
 		if err != nil {
@@ -242,20 +244,21 @@ func (s *Service) Purchase(ctx context.Context, accountID, itemID string, quanti
 
 		nextBag := addItem(bag, def.ID, int64(quantity), s.now().Unix())
 		if lock.IsLost() {
-			s.compensateWallet(ctx, id, currentWallet)
+			s.compensateWallet(ctx, id, total)
 			return errLockLost
 		}
 		if err := s.store.SaveBag(ctx, id, nextBag); err != nil {
-			s.compensateWallet(ctx, id, currentWallet)
+			s.compensateWallet(ctx, id, total)
 			return err
 		}
-		if lock.IsLost() {
-			return errLockLost
-		}
+		committed = true
 		out = s.stateFrom(nextWallet, nextBag)
 		return nil
 	})
 	if err != nil {
+		if committed && errors.Is(err, errLockLost) {
+			return out, nil
+		}
 		return State{}, err
 	}
 	return out, nil

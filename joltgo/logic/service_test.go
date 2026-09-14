@@ -74,6 +74,28 @@ type blockingLockFactory struct{}
 
 func (blockingLockFactory) New(uint64) Lock { return blockingLock{} }
 
+type scriptedLock struct {
+	lost  []bool
+	calls int
+}
+
+func (l *scriptedLock) Lock(context.Context) error   { return nil }
+func (l *scriptedLock) Unlock(context.Context) error { return nil }
+func (l *scriptedLock) IsLost() bool {
+	if l.calls >= len(l.lost) {
+		panic("scriptedLock: unexpected IsLost call")
+	}
+	lost := l.lost[l.calls]
+	l.calls++
+	return lost
+}
+
+type scriptedLockFactory struct {
+	lock *scriptedLock
+}
+
+func (f *scriptedLockFactory) New(uint64) Lock { return f.lock }
+
 func newLockedServiceTestEnv(t *testing.T) (*serviceTestEnv, *countingLockFactory) {
 	t.Helper()
 	mr := miniredis.RunT(t)
@@ -224,6 +246,23 @@ type bagFailStore struct {
 	fail bool
 }
 
+type interleavingStore struct {
+	Store
+	underlying *persist.PlayerStore
+	updated    bool
+}
+
+func (s *interleavingStore) SaveWallet(ctx context.Context, id uint64, wallet persist.PlayerWallet) error {
+	if err := s.Store.SaveWallet(ctx, id, wallet); err != nil {
+		return err
+	}
+	if s.updated {
+		return nil
+	}
+	s.updated = true
+	return s.underlying.AddCoins(ctx, id, -50)
+}
+
 func (s *bagFailStore) SaveBag(ctx context.Context, id uint64, bag persist.PlayerBag) error {
 	if s.fail {
 		return errors.New("boom: save bag")
@@ -291,6 +330,61 @@ func TestPurchaseRejectsWithoutWriting(t *testing.T) {
 	mustReason(t, err, ReasonBadQuantity)
 	_, err = env.svc.Purchase(ctx, "7", "rocket", 1)
 	mustReason(t, err, ReasonItemNotFound)
+}
+
+func TestPurchaseLockLossBeforeBagWriteRefundsWallet(t *testing.T) {
+	env := newServiceTestEnv(t)
+	ctx := context.Background()
+	if err := env.store.SaveWallet(ctx, 7, persist.PlayerWallet{Coins: 1000}); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.store.SaveBag(ctx, 7, persist.PlayerBag{}); err != nil {
+		t.Fatal(err)
+	}
+	interleaved := &interleavingStore{Store: env.store, underlying: env.store}
+	env.svc.store = interleaved
+	lock := &scriptedLock{lost: []bool{false, false, true}}
+	env.svc.locks = &scriptedLockFactory{lock: lock}
+
+	_, err := env.svc.Purchase(ctx, "7", "rifle", 1)
+	if !errors.Is(err, errLockLost) {
+		t.Fatalf("err=%v want errLockLost", err)
+	}
+	wallet, ok, err := env.store.GetWallet(ctx, 7)
+	if err != nil || !ok || wallet.Coins != 950 {
+		t.Fatalf("应保留并发购买扣款并相对退款: wallet=%+v ok=%v err=%v", wallet, ok, err)
+	}
+	bag, ok, err := env.store.GetBag(ctx, 7)
+	if err != nil || !ok || len(bag.Items) != 0 {
+		t.Fatalf("包装写入前锁丢失不应发货: bag=%+v ok=%v err=%v", bag, ok, err)
+	}
+	if lock.calls != 3 {
+		t.Fatalf("IsLost calls=%d want=3", lock.calls)
+	}
+}
+
+func TestPurchaseLockLossAfterBagWriteReturnsCommittedSuccess(t *testing.T) {
+	env := newServiceTestEnv(t)
+	ctx := context.Background()
+	if err := env.store.SaveWallet(ctx, 7, persist.PlayerWallet{Coins: 1000}); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.store.SaveBag(ctx, 7, persist.PlayerBag{}); err != nil {
+		t.Fatal(err)
+	}
+	lock := &scriptedLock{lost: []bool{false, false, false, true}}
+	env.svc.locks = &scriptedLockFactory{lock: lock}
+
+	state, err := env.svc.Purchase(ctx, "7", "rifle", 1)
+	if err != nil {
+		t.Fatalf("已提交购买必须成功: %v", err)
+	}
+	if state.Coins != 700 || state.Items[0].OwnedQuantity != 1 {
+		t.Fatalf("state=%+v", state)
+	}
+	if lock.calls != 4 {
+		t.Fatalf("IsLost calls=%d want=4", lock.calls)
+	}
 }
 
 func TestPurchaseCompensatesWalletWhenBagSaveFails(t *testing.T) {
