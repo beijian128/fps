@@ -153,6 +153,114 @@ func (s *Service) EnsureProfile(ctx context.Context, accountID string) error {
 	})
 }
 
+func addItem(bag persist.PlayerBag, itemID string, quantity, acquiredAt int64) persist.PlayerBag {
+	out := persist.PlayerBag{
+		Items:                 append([]persist.PlayerItem(nil), bag.Items...),
+		EquippedPrimaryWeapon: bag.EquippedPrimaryWeapon,
+	}
+	for i := range out.Items {
+		if out.Items[i].ItemID == itemID {
+			out.Items[i].Quantity += quantity
+			return out
+		}
+	}
+	out.Items = append(out.Items, persist.PlayerItem{
+		ItemID: itemID, Quantity: quantity, AcquiredAt: acquiredAt,
+	})
+	return out
+}
+
+func hasItem(bag persist.PlayerBag, itemID string) bool {
+	for _, item := range bag.Items {
+		if item.ItemID == itemID && item.Quantity > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Service) compensateWallet(ctx context.Context, accountID uint64, wallet persist.PlayerWallet) {
+	compCtx, cancel := context.WithTimeout(context.Background(), compensateTimeout)
+	defer cancel()
+	if err := s.store.SaveWallet(compCtx, accountID, wallet); err != nil {
+		log.Printf("logic: compensate wallet for account %d failed: %v", accountID, err)
+	}
+}
+
+func (s *Service) Purchase(ctx context.Context, accountID, itemID string, quantity int32) (State, error) {
+	id, err := parseAccountID(accountID)
+	if err != nil {
+		return State{}, err
+	}
+	if quantity < 1 || quantity > 99 {
+		return State{}, reason(ReasonBadQuantity)
+	}
+	def, ok := s.catalog.Lookup(itemID)
+	if !ok {
+		return State{}, reason(ReasonItemNotFound)
+	}
+
+	wallet, ok, err := s.store.GetWallet(ctx, id)
+	if err != nil {
+		return State{}, err
+	}
+	if !ok {
+		return State{}, reason(ReasonProfileMissing)
+	}
+	total := def.Price * int64(quantity)
+	if wallet.Coins < total {
+		return State{}, reason(ReasonInsufficientFund)
+	}
+
+	var out State
+	err = s.withAccountLock(ctx, id, func(lock Lock) error {
+		currentWallet, ok, err := s.store.GetWallet(ctx, id)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return reason(ReasonProfileMissing)
+		}
+		bag, ok, err := s.store.GetBag(ctx, id)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return reason(ReasonProfileMissing)
+		}
+		if currentWallet.Coins < total {
+			return reason(ReasonInsufficientFund)
+		}
+
+		nextWallet := persist.PlayerWallet{Coins: currentWallet.Coins - total}
+		if lock.IsLost() {
+			return errLockLost
+		}
+		if err := s.store.SaveWallet(ctx, id, nextWallet); err != nil {
+			return err
+		}
+
+		nextBag := addItem(bag, def.ID, int64(quantity), s.now().Unix())
+		if lock.IsLost() {
+			s.compensateWallet(ctx, id, currentWallet)
+			return errLockLost
+		}
+		if err := s.store.SaveBag(ctx, id, nextBag); err != nil {
+			s.compensateWallet(ctx, id, currentWallet)
+			return err
+		}
+		if lock.IsLost() {
+			return errLockLost
+		}
+		out = s.stateFrom(nextWallet, nextBag)
+		return nil
+	})
+	if err != nil {
+		return State{}, err
+	}
+	return out, nil
+}
+
 func (s *Service) State(ctx context.Context, accountID string) (State, error) {
 	id, err := parseAccountID(accountID)
 	if err != nil {
