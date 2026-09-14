@@ -233,6 +233,8 @@ func _process(delta: float) -> void:
 		fps_client.send_command(move, _yaw, jump, shoot, origin, dir, reset)
 
 func _input(event: InputEvent) -> void:
+	if _logic_panel != null and _logic_panel.visible:
+		return
 	if Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
 		return
 	if event is InputEventMouseMotion:
@@ -247,6 +249,8 @@ func _input(event: InputEvent) -> void:
 		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 
 func _unhandled_input(event: InputEvent) -> void:
+	if _login_panel != null and _login_panel.visible:
+		return  # 登录面板上的点击归面板，不该当成「进入游戏」
 	if event is InputEventKey and event.pressed and event.keycode == KEY_B:
 		_toggle_logic_panel()
 		return
@@ -254,8 +258,6 @@ func _unhandled_input(event: InputEvent) -> void:
 		return
 	if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 		return
-	if _login_panel != null and _login_panel.visible:
-		return  # 登录面板上的点击归面板，不该当成「进入游戏」
 	if event is InputEventMouseButton and event.pressed:
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
@@ -878,12 +880,10 @@ func _toggle_logic_panel() -> void:
 	_logic_panel.visible = not _logic_panel.visible
 	if _logic_panel.visible:
 		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
-		_logic_busy = true
-		_logic_status.text = "加载中…"
-		fps_client.send_logic_state()
-	else:
-		_logic_status.text = ""
-		_logic_busy = false
+		if not _logic_busy:
+			_logic_busy = true
+			_logic_status.text = "加载中…"
+			fps_client.send_logic_state()
 
 func _set_logic_items(items: Array) -> void:
 	for child in _logic_items_box.get_children():
@@ -1093,7 +1093,6 @@ func _reason_text(reason: String) -> String:
 func _on_login_result(result: Dictionary) -> void:
 	if bool(result.get("ok", false)):
 		_show_login_panel(false, "")
-		fps_client.send_logic_state()
 		conn_label.text = "正在匹配…"
 		conn_label.visible = true
 		fps_client.send_match_join()
