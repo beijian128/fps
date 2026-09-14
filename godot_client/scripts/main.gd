@@ -100,6 +100,17 @@ var _login_user: LineEdit
 var _login_pass: LineEdit
 var _login_error: Label
 var _login_busy := false
+var _logic_panel: CanvasLayer
+var _logic_coins: Label
+var _logic_status: Label
+var _logic_items_box: VBoxContainer
+var _logic_busy := false
+var _logic_state := {
+	"ok": false,
+	"coins": 0,
+	"equipped_primary_weapon": "",
+	"items": [],
+}
 # 自动化测试钩子：无头环境无法真正捕获鼠标，设置该环境变量后视作已捕获。
 var _capture_override := OS.get_environment("JOLT_FORCE_CAPTURE") != ""
 
@@ -113,6 +124,8 @@ func _ready() -> void:
 	fps_client.matched_received.connect(_on_matched)
 	fps_client.connection_changed.connect(_on_connection)
 	fps_client.login_result.connect(_on_login_result)
+	fps_client.logic_state_received.connect(_on_logic_state)
+	_build_logic_panel()
 	_build_login_panel()
 
 func _on_matched(result: Dictionary) -> void:
@@ -234,6 +247,11 @@ func _input(event: InputEvent) -> void:
 		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 
 func _unhandled_input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed and event.keycode == KEY_B:
+		_toggle_logic_panel()
+		return
+	if _logic_panel != null and _logic_panel.visible:
+		return
 	if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 		return
 	if _login_panel != null and _login_panel.visible:
@@ -795,6 +813,163 @@ func _build_viewmodel() -> void:
 	_muzzle_flash.visible = false
 	_viewmodel.add_child(_muzzle_flash)
 
+## _build_logic_panel 搭商城/背包面板。用 Control + 手动定位，不依赖外部场景资源。
+func _build_logic_panel() -> void:
+	if _logic_panel != null:
+		return
+	var layer := CanvasLayer.new()
+	layer.name = "Logic"
+	layer.visible = false
+	add_child(layer)
+
+	var dim := ColorRect.new()
+	dim.color = Color(0, 0, 0, 0.62)
+	dim.set_anchors_preset(Control.PRESET_FULL_RECT)
+	dim.mouse_filter = Control.MOUSE_FILTER_STOP
+	layer.add_child(dim)
+
+	var box := VBoxContainer.new()
+	box.set_anchors_preset(Control.PRESET_CENTER)
+	box.offset_left = -340.0
+	box.offset_top = -260.0
+	box.offset_right = 340.0
+	box.offset_bottom = 260.0
+	box.add_theme_constant_override("separation", 10)
+	layer.add_child(box)
+
+	var header := HBoxContainer.new()
+	header.add_theme_constant_override("separation", 10)
+	box.add_child(header)
+
+	var title := Label.new()
+	title.text = "商城与背包"
+	title.add_theme_font_size_override("font_size", 24)
+	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	header.add_child(title)
+
+	var close := Button.new()
+	close.text = "关闭"
+	close.pressed.connect(_toggle_logic_panel)
+	header.add_child(close)
+
+	_logic_coins = Label.new()
+	_logic_coins.add_theme_font_size_override("font_size", 18)
+	box.add_child(_logic_coins)
+
+	var scroll := ScrollContainer.new()
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	box.add_child(scroll)
+
+	_logic_items_box = VBoxContainer.new()
+	_logic_items_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_logic_items_box.add_theme_constant_override("separation", 8)
+	scroll.add_child(_logic_items_box)
+
+	_logic_status = Label.new()
+	_logic_status.add_theme_color_override("font_color", Color("e5484d"))
+	_logic_status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	box.add_child(_logic_status)
+
+	_logic_panel = layer
+
+func _toggle_logic_panel() -> void:
+	if _logic_panel == null:
+		return
+	_logic_panel.visible = not _logic_panel.visible
+	if _logic_panel.visible:
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+		_logic_busy = true
+		_logic_status.text = "加载中…"
+		fps_client.send_logic_state()
+	else:
+		_logic_status.text = ""
+		_logic_busy = false
+
+func _set_logic_items(items: Array) -> void:
+	for child in _logic_items_box.get_children():
+		child.queue_free()
+	for item in items:
+		var item_id := String(item.get("item_id", ""))
+		var row := HBoxContainer.new()
+		var label := Label.new()
+		label.text = "%s  %d 金币  持有 %d" % [
+			String(item.get("display_name", item_id)),
+			int(item.get("price", 0)),
+			int(item.get("owned_quantity", 0)),
+		]
+		label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		row.add_child(label)
+
+		var count := SpinBox.new()
+		count.min_value = 1
+		count.max_value = 99
+		count.value = 1
+		row.add_child(count)
+
+		var buy := Button.new()
+		buy.text = "购买"
+		buy.pressed.connect(func() -> void:
+			if _logic_busy:
+				return
+			_logic_busy = true
+			_logic_status.text = "购买中…"
+			fps_client.send_purchase(item_id, int(count.value))
+		)
+		row.add_child(buy)
+
+		var equip := Button.new()
+		var owned := int(item.get("owned_quantity", 0)) > 0
+		var equippable := String(item.get("equip_slot", "")) != ""
+		equip.disabled = not owned or not equippable
+		if equippable and String(_logic_state.get("equipped_primary_weapon", "")) == item_id:
+			equip.text = "卸下"
+			equip.disabled = false
+		else:
+			equip.text = "装备"
+		equip.pressed.connect(func() -> void:
+			if _logic_busy:
+				return
+			_logic_busy = true
+			_logic_status.text = "更新装备…"
+			if equip.text == "卸下":
+				fps_client.send_equip("")
+			else:
+				fps_client.send_equip(item_id)
+		)
+		row.add_child(equip)
+		_logic_items_box.add_child(row)
+
+func _refresh_logic_panel() -> void:
+	if _logic_panel == null:
+		_build_logic_panel()
+	if not bool(_logic_state.get("ok", false)):
+		return
+	_logic_coins.text = "金币：%d" % int(_logic_state.get("coins", 0))
+	_set_logic_items(_logic_state.get("items", []))
+	_logic_status.text = ""
+
+func _on_logic_state(result: Dictionary) -> void:
+	_logic_busy = false
+	if bool(result.get("ok", false)):
+		_logic_state = result
+		_refresh_logic_panel()
+		return
+	_logic_status.text = _logic_reason_text(String(result.get("reason", "")))
+
+func _logic_reason_text(reason: String) -> String:
+	match reason:
+		"bad_quantity": return "购买数量必须在 1-99"
+		"item_not_found": return "商品不存在"
+		"insufficient_funds": return "金币不足"
+		"not_owned": return "尚未拥有该物品"
+		"not_equippable": return "该物品不能装备"
+		"busy": return "操作过于频繁，请稍后重试"
+		"unauthenticated": return "请先登录"
+		"profile_missing": return "玩家档案缺失，请重新登录"
+		"timeout": return "服务器无响应，请重试"
+		"no_connection": return "未连接到服务器"
+		_: return "操作失败，请稍后重试"
+
 ## _build_login_panel 搭登录/注册面板。用 Control + 手动定位，与 _build_hud 一致
 ## （本项目不依赖任何外部场景资源）。
 func _build_login_panel() -> void:
@@ -918,6 +1093,7 @@ func _reason_text(reason: String) -> String:
 func _on_login_result(result: Dictionary) -> void:
 	if bool(result.get("ok", false)):
 		_show_login_panel(false, "")
+		fps_client.send_logic_state()
 		conn_label.text = "正在匹配…"
 		conn_label.visible = true
 		fps_client.send_match_join()
