@@ -1,18 +1,20 @@
 package main
 
-// 分布式服务端入口：单二进制按 -type 启动四种角色（gate / account / match / game），
+// 分布式服务端入口：单二进制按 -type 启动五种角色（gate / account / logic / match / game），
 // pitaya Cluster 模式（etcd 服务发现 + NATS RPC），共享状态放 Redis。
 //
 //   - gate（frontend）：与客户端直连（WS），把业务消息路由到后端，
 //     并登记「账号在哪个 gate 在线」（见 gate/session.go）
 //   - account（backend）：账号注册/登录/凭证恢复。唯一碰密码与 Redis 账号数据的角色
+//   - logic（backend）：玩家档案、钱包与库存，按会话账号提供商店与装备操作
 //   - match（backend）：对局匹配，队列在 Redis（多节点共享）
 //   - game（backend）：游戏逻辑，每个对局一个 goroutine 顺序执行、无锁
 //
-// 启动顺序：先起 etcd + nats-server + redis-server（见 deploy/），再起四个进程：
+// 启动顺序：先起 etcd + nats-server + redis-server（见 deploy/），再起五个进程：
 //
 //	joltgo.exe -type gate
 //	joltgo.exe -type account
+//	joltgo.exe -type logic
 //	joltgo.exe -type match
 //	joltgo.exe -type game
 //
@@ -37,13 +39,14 @@ import (
 	"joltgo/game"
 	"joltgo/gate"
 	"joltgo/kv"
+	"joltgo/logic"
 	"joltgo/match"
 	"joltgo/online"
 	"joltgo/persist"
 )
 
 func main() {
-	svType := flag.String("type", "gate", "server type: gate | account | match | game")
+	svType := flag.String("type", "gate", "server type: gate | account | logic | match | game")
 	redisAddr := flag.String("redis", kv.DefaultAddr, "redis address (host:port)")
 	flag.Parse()
 
@@ -78,10 +81,10 @@ func main() {
 // run 组装并启动指定角色的服务。抽成函数是为了让 flag 解析与 defer 清理分离 ——
 // main 里 log.Fatal 会跳过 defer，Redis 连接必须在这里关。
 func run(svType *string, builder *pitaya.Builder, redisAddr string) error {
-	// Redis 是 gate / account / match 三个角色的共享依赖（gate 写会话归属、
-	// account 存取账号与凭证、match 存排队队列）。game 不碰 Redis，就不给它开连接 ——
+	// Redis 是 gate / account / logic / match 四个角色的共享依赖（gate 写会话归属、
+	// account 存取账号与凭证、logic 存玩家档案、match 存排队队列）。game 不碰 Redis，就不给它开连接 ——
 	// 否则 Redis 一挂，连纯计算的 game 节点都起不来。
-	// 对需要它的三个角色统一「连不上就启动失败」——早失败比运行中途才暴露好排查
+	// 对需要它的四个角色统一「连不上就启动失败」——早失败比运行中途才暴露好排查
 	// （gate 的归属登记虽是 best-effort、运行期写失败只降级，但地址配错仍应在启动时炸）。
 	var rdb *redis.Client
 	if *svType != "game" {
@@ -126,6 +129,26 @@ func run(svType *string, builder *pitaya.Builder, redisAddr string) error {
 			component.WithNameFunc(strings.ToLower),
 		)
 
+	case "logic":
+		playerPool, err := kv.OpenRedigo(context.Background(), redisAddr)
+		if err != nil {
+			return err
+		}
+		defer playerPool.Close()
+		service := logic.NewService(
+			persist.NewPlayerStore(playerPool),
+			logic.MustDefaultCatalog(),
+			logic.NewRedisLockFactory(rdb),
+		)
+		app.Register(logic.NewComponent(app, service),
+			component.WithName("logic"),
+			component.WithNameFunc(strings.ToLower),
+		)
+		app.RegisterRemote(logic.NewRemote(service),
+			component.WithName("logic"),
+			component.WithNameFunc(strings.ToLower),
+		)
+
 	case "match":
 		// 队列在 Redis（多个 match 节点共享同一条队列），开局前用 online 登记
 		// 定位每个玩家所属的 gate 并请它写会话数据（顺带探活）。
@@ -149,7 +172,7 @@ func run(svType *string, builder *pitaya.Builder, redisAddr string) error {
 		)
 
 	default:
-		return fmt.Errorf("unknown server type %q (want gate|account|match|game)", *svType)
+		return fmt.Errorf("unknown server type %q (want gate|account|logic|match|game)", *svType)
 	}
 
 	app.Start()

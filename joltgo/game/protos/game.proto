@@ -64,6 +64,42 @@ message LoginReply {
   string reason = 5;     // ok=false 时的原因码
 }
 
+message LogicStateMsg {}
+
+message PurchaseMsg {
+  string item_id = 1;
+  int32 quantity = 2;
+}
+
+message EquipMsg {
+  string item_id = 1;
+}
+
+message UserOnlineMsg {
+  string account_id = 1;
+}
+
+message UserOnlineReply {
+  bool ok = 1;
+  string reason = 2;
+}
+
+message LogicShopItem {
+  string item_id = 1;
+  string display_name = 2;
+  int64 price = 3;
+  string equip_slot = 4;
+  int64 owned_quantity = 5;
+}
+
+message LogicStateReply {
+  bool ok = 1;
+  string reason = 2;
+  int64 coins = 3;
+  repeated LogicShopItem items = 4;
+  string equipped_primary_weapon = 5;
+}
+
 // BindGameMsg 是 match → gate 的 RPC 请求（route "gate.gate.bindgame"）：请玩家
 // 所属的 gate 把对局归属写进它自己的会话数据（gate 据 gameServerId 定点路由
 // game.*）。game_server_id 为空表示回滚（清掉归属）。
