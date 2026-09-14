@@ -530,13 +530,29 @@ func TestLoginOnAlreadyBoundSessionStillNotifiesLogic(t *testing.T) {
 	env := newTestComponent(t)
 	ctx := context.Background()
 	env.mustRegister(t, "alice", "hunter2")
+	if env.sess.uid != "1" {
+		t.Fatalf("前置条件失败: session uid=%q", env.sess.uid)
+	}
+	currentToken, err := env.store.CurrentToken(ctx, "1")
+	if err != nil || currentToken == "" {
+		t.Fatalf("CurrentToken: %q err=%v", currentToken, err)
+	}
 	before := len(env.notifier.calls)
+	if before == 0 {
+		t.Fatal("首次登录/注册应向 logic 发出 online 事件")
+	}
 
 	reply, err := env.comp.Login(ctx, &protos.LoginMsg{Username: "alice", Password: "hunter2"})
 	if err != nil || !reply.Ok {
 		t.Fatalf("reply=%+v err=%v", reply, err)
 	}
+	if reply.Token != currentToken {
+		t.Fatalf("重复登录不能轮换 token: got=%q want=%q", reply.Token, currentToken)
+	}
 	if len(env.notifier.calls) != before+1 || env.notifier.calls[len(env.notifier.calls)-1] != "1" {
 		t.Fatalf("calls=%v", env.notifier.calls)
+	}
+	if env.sess.uid != "1" {
+		t.Fatalf("重复登录后会话应仍绑定到 1，得到 %q", env.sess.uid)
 	}
 }

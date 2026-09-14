@@ -18,14 +18,16 @@ type notifierCall struct {
 
 type notifierApp struct {
 	pitaya.Pitaya
-	servers map[string]*cluster.Server
-	srvErr  error
-	rpcErr  error
-	calls   []notifierCall
-	ok      bool
+	servers       map[string]*cluster.Server
+	srvErr        error
+	rpcErr        error
+	calls         []notifierCall
+	ok            bool
+	requestedType string
 }
 
-func (a *notifierApp) GetServersByType(string) (map[string]*cluster.Server, error) {
+func (a *notifierApp) GetServersByType(serverType string) (map[string]*cluster.Server, error) {
+	a.requestedType = serverType
 	return a.servers, a.srvErr
 }
 
@@ -53,6 +55,9 @@ func TestLogicNotifierCallsRandomLogicNode(t *testing.T) {
 	}
 	if err := NewLogicNotifier(app).NotifyOnline(context.Background(), "7"); err != nil {
 		t.Fatalf("NotifyOnline: %v", err)
+	}
+	if app.requestedType != "logic" {
+		t.Fatalf("GetServersByType serverType=%q", app.requestedType)
 	}
 	if len(app.calls) != 1 || app.calls[0].serverID != "logic-a" || app.calls[0].route != "logic.logic.online" {
 		t.Fatalf("calls=%+v", app.calls)
