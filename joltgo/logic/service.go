@@ -3,6 +3,7 @@ package logic
 import (
 	"context"
 	"errors"
+	"log"
 	"strconv"
 	"time"
 
@@ -93,6 +94,63 @@ func parseAccountID(raw string) (uint64, error) {
 		return 0, reason(ReasonUnauthenticated)
 	}
 	return id, nil
+}
+
+func (s *Service) EnsureProfile(ctx context.Context, accountID string) error {
+	id, err := parseAccountID(accountID)
+	if err != nil {
+		return err
+	}
+	_, hasWallet, err := s.store.GetWallet(ctx, id)
+	if err != nil {
+		return err
+	}
+	_, hasBag, err := s.store.GetBag(ctx, id)
+	if err != nil {
+		return err
+	}
+	if hasWallet && hasBag {
+		return nil
+	}
+
+	return s.withAccountLock(ctx, id, func(lock Lock) error {
+		_, walletExists, err := s.store.GetWallet(ctx, id)
+		if err != nil {
+			return err
+		}
+		_, bagExists, err := s.store.GetBag(ctx, id)
+		if err != nil {
+			return err
+		}
+		if walletExists && bagExists {
+			return nil
+		}
+
+		createdWallet := false
+		if !walletExists {
+			if lock.IsLost() {
+				return errLockLost
+			}
+			if err := s.store.SaveWallet(ctx, id, persist.PlayerWallet{Coins: 1000}); err != nil {
+				return err
+			}
+			createdWallet = true
+		}
+		if !bagExists {
+			if lock.IsLost() {
+				return errLockLost
+			}
+			if err := s.store.SaveBag(ctx, id, persist.PlayerBag{}); err != nil {
+				if createdWallet {
+					if delErr := s.store.DeleteWallet(ctx, id); delErr != nil {
+						log.Printf("logic: compensate wallet for account %d: %v", id, delErr)
+					}
+				}
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func (s *Service) State(ctx context.Context, accountID string) (State, error) {
