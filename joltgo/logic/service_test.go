@@ -458,3 +458,54 @@ func TestPurchaseConcurrentSameAccount(t *testing.T) {
 		t.Fatalf("并发购买发生丢更新: %+v", state)
 	}
 }
+
+func TestEquipSwitchAndUnequip(t *testing.T) {
+	env, _ := newLockedServiceTestEnv(t)
+	ctx := context.Background()
+	if err := env.svc.EnsureProfile(ctx, "7"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.svc.Purchase(ctx, "7", "rifle", 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.svc.Purchase(ctx, "7", "pistol", 1); err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := env.svc.Equip(ctx, "7", "rifle")
+	if err != nil || state.EquippedPrimaryWeapon != "rifle" {
+		t.Fatalf("equip rifle: %+v err=%v", state, err)
+	}
+	state, err = env.svc.Equip(ctx, "7", "pistol")
+	if err != nil || state.EquippedPrimaryWeapon != "pistol" {
+		t.Fatalf("switch pistol: %+v err=%v", state, err)
+	}
+	state, err = env.svc.Equip(ctx, "7", "")
+	if err != nil || state.EquippedPrimaryWeapon != "" {
+		t.Fatalf("unequip: %+v err=%v", state, err)
+	}
+}
+
+func TestEquipRequiresOnlineProfile(t *testing.T) {
+	env, _ := newLockedServiceTestEnv(t)
+	_, err := env.svc.Equip(context.Background(), "7", "")
+	mustReason(t, err, ReasonProfileMissing)
+}
+
+func TestEquipRejectsInvalidWithoutWriting(t *testing.T) {
+	env, _ := newLockedServiceTestEnv(t)
+	ctx := context.Background()
+	if err := env.svc.EnsureProfile(ctx, "7"); err != nil {
+		t.Fatal(err)
+	}
+	_, err := env.svc.Equip(ctx, "7", "rifle")
+	mustReason(t, err, ReasonNotOwned)
+	_, err = env.svc.Equip(ctx, "7", "rocket")
+	mustReason(t, err, ReasonItemNotFound)
+
+	if _, err := env.svc.Purchase(ctx, "7", "medkit", 1); err != nil {
+		t.Fatal(err)
+	}
+	_, err = env.svc.Equip(ctx, "7", "medkit")
+	mustReason(t, err, ReasonNotEquippable)
+}

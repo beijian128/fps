@@ -310,3 +310,99 @@ func (s *Service) stateFrom(wallet persist.PlayerWallet, bag persist.PlayerBag) 
 		EquippedPrimaryWeapon: bag.EquippedPrimaryWeapon,
 	}
 }
+
+func (s *Service) Equip(ctx context.Context, accountID, itemID string) (State, error) {
+	id, err := parseAccountID(accountID)
+	if err != nil {
+		return State{}, err
+	}
+	wallet, ok, err := s.store.GetWallet(ctx, id)
+	if err != nil {
+		return State{}, err
+	}
+	if !ok {
+		return State{}, reason(ReasonProfileMissing)
+	}
+	bag, ok, err := s.store.GetBag(ctx, id)
+	if err != nil {
+		return State{}, err
+	}
+	if !ok {
+		return State{}, reason(ReasonProfileMissing)
+	}
+
+	if itemID == "" {
+		if bag.EquippedPrimaryWeapon == "" {
+			return s.stateFrom(wallet, bag), nil
+		}
+	} else {
+		def, found := s.catalog.Lookup(itemID)
+		if !found {
+			return State{}, reason(ReasonItemNotFound)
+		}
+		if def.EquipSlot == "" {
+			return State{}, reason(ReasonNotEquippable)
+		}
+		if !hasItem(bag, itemID) {
+			return State{}, reason(ReasonNotOwned)
+		}
+		if bag.EquippedPrimaryWeapon == itemID {
+			return s.stateFrom(wallet, bag), nil
+		}
+	}
+
+	var out State
+	err = s.withAccountLock(ctx, id, func(lock Lock) error {
+		currentWallet, ok, err := s.store.GetWallet(ctx, id)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return reason(ReasonProfileMissing)
+		}
+		currentBag, ok, err := s.store.GetBag(ctx, id)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return reason(ReasonProfileMissing)
+		}
+
+		if itemID == "" {
+			if currentBag.EquippedPrimaryWeapon == "" {
+				out = s.stateFrom(currentWallet, currentBag)
+				return nil
+			}
+			currentBag.EquippedPrimaryWeapon = ""
+		} else {
+			def, found := s.catalog.Lookup(itemID)
+			if !found {
+				return reason(ReasonItemNotFound)
+			}
+			if def.EquipSlot == "" {
+				return reason(ReasonNotEquippable)
+			}
+			if !hasItem(currentBag, itemID) {
+				return reason(ReasonNotOwned)
+			}
+			if currentBag.EquippedPrimaryWeapon == itemID {
+				out = s.stateFrom(currentWallet, currentBag)
+				return nil
+			}
+			currentBag.EquippedPrimaryWeapon = itemID
+		}
+
+		if lock.IsLost() {
+			return errLockLost
+		}
+		if err := s.store.SaveBag(ctx, id, currentBag); err != nil {
+			return err
+		}
+		out = s.stateFrom(currentWallet, currentBag)
+		return nil
+	})
+	if err != nil {
+		return State{}, err
+	}
+	return out, nil
+}
