@@ -195,12 +195,12 @@ Logic 单测和客户端验证：
 ```bash
 cd joltgo
 PATH="$PWD:$PATH" go test -count=1 ./logic ./persist
-Godot_v4.7.2-stable_win64_console.exe --headless --path godot_client --script res://tests/logic_state_decode_test.gd
-Godot_v4.7.2-stable_win64_console.exe --headless --path godot_client --script res://tests/logic_panel_test.gd
+Godot_v4.7.2-stable_win64_console.exe --headless --path ../godot_client --script res://tests/logic_state_decode_test.gd
+Godot_v4.7.2-stable_win64_console.exe --headless --path ../godot_client --script res://tests/logic_panel_test.gd
 ```
 
 集群启动后再运行 Logic 端到端冒烟：
 
 ```bash
-Godot_v4.7.2-stable_win64_console.exe --headless --path godot_client --script res://tests/logic_smoke.gd
+Godot_v4.7.2-stable_win64_console.exe --headless --path ../godot_client --script res://tests/logic_smoke.gd
 ```

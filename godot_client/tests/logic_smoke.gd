@@ -12,7 +12,7 @@ func _initialize() -> void:
     for p in ["user://auth_token.txt", "user://last_username.txt"]:
         if FileAccess.file_exists(p):
             DirAccess.remove_absolute(ProjectSettings.globalize_path(p))
-    _username = "logicsmoke_%d" % (Time.get_ticks_usec() % 100000000)
+    _username = "lsmoke_%d" % (Time.get_ticks_usec() % 1000000000)
     _client = load("res://scripts/fps_client.gd").new()
     _client.login_result.connect(_on_login)
     _client.logic_state_received.connect(_on_logic_state)
@@ -49,8 +49,13 @@ func _on_logic_state(result: Dictionary) -> void:
         _phase = 2
         _client.send_equip("rifle")
     elif _phase == 2:
-        _check(String(result.get("equipped_primary_weapon", "")) == "rifle", "步枪应已装备")
+        _check(String(result.get("equipped_primary_weapon", "")) == "rifle", "装备应答应显示步枪已装备")
         _phase = 3
+        _client.send_logic_state()
+    elif _phase == 3:
+        _check(String(result.get("equipped_primary_weapon", "")) == "rifle", "重新读取状态后步枪仍应已装备")
+        _check(_quantity(items, "rifle") == 1, "重新读取状态后步枪数量应为 1")
+        _phase = 4
 
 func _quantity(items: Array, item_id: String) -> int:
     for item in items:
@@ -60,9 +65,9 @@ func _quantity(items: Array, item_id: String) -> int:
 
 func _run() -> void:
     var deadline := Time.get_ticks_msec() + TIMEOUT_MS
-    while Time.get_ticks_msec() < deadline and _phase < 3:
+    while Time.get_ticks_msec() < deadline and _phase < 4:
         await process_frame
-    if _phase != 3:
+    if _phase != 4:
         _check(false, "smoke 未完成，phase=%d" % _phase)
     if _failures > 0:
         printerr("logic_smoke: %d 项失败" % _failures)

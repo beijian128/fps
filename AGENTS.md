@@ -52,9 +52,9 @@ fps/
 │   └── build.ps1            # 一键构建（UCRT64 + go build + 拷贝 DLL）
 ├── godot_client/            # 客户端（Godot 4）
 │   ├── scenes/main.tscn     # Main(Node3D) + FpsClient + Sfx
-│   ├── scripts/main.gd      # 输入/相机/双玩家渲染/登录面板/按属性名查询与插值/HUD/音效（核心）
+│   ├── scripts/main.gd      # 输入/相机/双玩家渲染/登录面板/商城背包面板/按属性名查询与插值/HUD/音效（核心）
 │   ├── scripts/world_store.gd # 本地世界状态：实体-属性增量累积成完整世界（按名字取值）
-│   ├── scripts/fps_client.gd  # 传输层（pomelo 握手/登录/匹配/心跳/Frame 编解码 + 重连/看门狗）
+│   ├── scripts/fps_client.gd  # 传输层（pomelo 握手/登录/匹配/心跳/Frame 编解码 + Logic Request/Response + 重连/看门狗）
 │   ├── scripts/body_entity.gd # 每个服务端刚体一个渲染节点（程序化模型）
 │   ├── scripts/sfx.gd       # 程序化合成 WAV
 │   └── tests/               # headless 回归/冒烟测试（.gd，见 §6）

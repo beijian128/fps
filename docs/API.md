@@ -6,7 +6,7 @@
 （schema 见 `joltgo/game/protos/game.proto`）。
 
 > 改动任何 route 或改 proto 的**字段定义**，必须同步改 `joltgo/game/protos/game.proto`、
-> `joltgo/game/`、`joltgo/match/`、`joltgo/account/` 与 `godot_client/scripts/fps_client.gd`
+> `joltgo/game/`、`joltgo/match/`、`joltgo/account/`、`joltgo/logic/` 与 `godot_client/scripts/fps_client.gd`
 > （protobuf 编解码）。
 > **但新增一个同步属性不走这条路**——属性是数据不是字段：加一行 `Declare` + 变更点
 > `rep.Set` + 客户端按名字取值即可（见下文「属性表」与 `AGENTS.md` §3）。
@@ -54,7 +54,7 @@ Response： flag (1B) ─ mid (LEB128 变长) ─ protobuf payload
 - **`flag & 0x20`（errorMask）置位时**，Response 的 payload **不是**业务消息，而是 pitaya
   的错误内容（客户端按字符串打印）。当作 `LoginReply` 解会得到垃圾字段，必须先判这一位
 - payload 是 protobuf wire 编码（proto3），非 JSON
-- 本项目里：帧同步与匹配结果走 Notify/Push（无 mid），`account.*` 三条路走 Request/Response
+- 本项目里：帧同步与匹配结果走 Notify/Push（无 mid），`account.*` 三条与 `logic.*` 三条客户端请求 route 走 Request/Response
 
 ## 路由一览
 
