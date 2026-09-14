@@ -3,6 +3,7 @@
 //
 //   - account.* → 轮询任一 account 节点（服务无状态，状态在 Redis）
 //   - match.*   → 轮询任一 match 节点（同上）
+//   - logic.*   → 从所有 logic 节点中均匀随机选择一个（服务无状态）
 //   - game.*    → 读会话数据里的 gameServerId，定点路由到托管该对局的 game 节点
 //
 // gameServerId 由匹配方（match）经定点 RPC 请本 gate 写入（见 session.go 的
@@ -12,6 +13,7 @@ package gate
 import (
 	"context"
 	"errors"
+	"math/rand/v2"
 
 	pitaya "github.com/topfreegames/pitaya/v3/pkg"
 	"github.com/topfreegames/pitaya/v3/pkg/cluster"
@@ -19,12 +21,15 @@ import (
 	"github.com/topfreegames/pitaya/v3/pkg/router"
 )
 
-// Configure 在 gate 前端注册 account/match/game 三个路由函数。
+// Configure 在 gate 前端注册 account/match/logic/game 四个路由函数。
 func Configure(app pitaya.Pitaya) error {
 	if err := app.AddRoute("account", routeAny); err != nil {
 		return err
 	}
 	if err := app.AddRoute("match", routeAny); err != nil {
+		return err
+	}
+	if err := app.AddRoute("logic", routeRandom); err != nil {
 		return err
 	}
 	return app.AddRoute("game", routeGame(app))
@@ -42,6 +47,24 @@ func routeAny(
 		return srv, nil
 	}
 	return nil, errors.New("no server available")
+}
+
+// routeRandom 从所有 logic 节点中均匀随机选择一个。logic 服务无状态，
+// 不需要一致性哈希，也不绑定会话。
+func routeRandom(
+	_ context.Context,
+	_ *route.Route,
+	_ []byte,
+	servers map[string]*cluster.Server,
+) (*cluster.Server, error) {
+	if len(servers) == 0 {
+		return nil, errors.New("no server available")
+	}
+	ids := make([]string, 0, len(servers))
+	for id := range servers {
+		ids = append(ids, id)
+	}
+	return servers[ids[rand.IntN(len(ids))]], nil
 }
 
 // routeGame 读会话数据里的 gameServerId，定点路由到对应 game 节点。
