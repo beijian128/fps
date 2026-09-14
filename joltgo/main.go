@@ -124,10 +124,11 @@ func run(svType *string, builder *pitaya.Builder, redisAddr string) error {
 			return err
 		}
 		defer accountPool.Close()
-		app.Register(account.New(app, account.NewStore(rdb, persist.NewAccountStore(accountPool)), online.NewStore(rdb)),
-			component.WithName("account"),
-			component.WithNameFunc(strings.ToLower),
-		)
+		app.Register(account.New(app,
+			account.NewStore(rdb, persist.NewAccountStore(accountPool)),
+			online.NewStore(rdb),
+			account.NewLogicNotifier(app),
+		), component.WithName("account"), component.WithNameFunc(strings.ToLower))
 
 	case "logic":
 		playerPool, err := kv.OpenRedigo(context.Background(), redisAddr)

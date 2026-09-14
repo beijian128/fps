@@ -64,14 +64,25 @@ func (a *fakeApp) RPCTo(_ context.Context, serverID, routeStr string, _ proto.Me
 	return nil
 }
 
+type fakeNotifier struct {
+	calls []string
+	err   error
+}
+
+func (n *fakeNotifier) NotifyOnline(_ context.Context, accountID string) error {
+	n.calls = append(n.calls, accountID)
+	return n.err
+}
+
 // testEnv 把一次测试要碰的东西打包，避免每个用例拖一长串返回值。
 type testEnv struct {
-	comp   *Component
-	store  *Store
-	online *online.Store
-	app    *fakeApp
-	sess   *fakeSession
-	mr     *miniredis.Miniredis
+	comp     *Component
+	store    *Store
+	online   *online.Store
+	app      *fakeApp
+	sess     *fakeSession
+	mr       *miniredis.Miniredis
+	notifier *fakeNotifier
 }
 
 func newTestComponent(t *testing.T) *testEnv {
@@ -84,13 +95,15 @@ func newTestComponent(t *testing.T) *testEnv {
 	app := &fakeApp{sess: sess}
 	store := NewStore(rdb, newTestPersistence(t, mr))
 	onl := online.NewStore(rdb)
+	notifier := &fakeNotifier{}
 	return &testEnv{
-		comp:   New(app, store, onl),
-		store:  store,
-		online: onl,
-		app:    app,
-		sess:   sess,
-		mr:     mr,
+		comp:     New(app, store, onl, notifier),
+		store:    store,
+		online:   onl,
+		app:      app,
+		sess:     sess,
+		mr:       mr,
+		notifier: notifier,
 	}
 }
 
@@ -482,5 +495,48 @@ func TestLoginDoesNotKickWhenSecondOnlineReadFails(t *testing.T) {
 	}
 	if len(env.app.calls) != 0 {
 		t.Fatalf("读不到当前归属时宁可漏踢也不能误踢，得到 %+v", env.app.calls)
+	}
+}
+
+func TestLogicOnlineFailureDoesNotRotateToken(t *testing.T) {
+	env := newTestComponent(t)
+	ctx := context.Background()
+	env.mustRegister(t, "alice", "hunter2")
+	oldToken, err := env.store.CurrentToken(ctx, "1")
+	if err != nil || oldToken == "" {
+		t.Fatalf("CurrentToken: %q err=%v", oldToken, err)
+	}
+
+	env.sess = &fakeSession{}
+	env.app.sess = env.sess
+	env.notifier.err = errors.New("logic down")
+	reply, err := env.comp.Login(ctx, &protos.LoginMsg{Username: "alice", Password: "hunter2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply.Ok || reply.Reason != ReasonInternal {
+		t.Fatalf("reply=%+v", reply)
+	}
+	current, err := env.store.CurrentToken(ctx, "1")
+	if err != nil || current != oldToken {
+		t.Fatalf("logic 失败不能轮换 token: old=%q current=%q err=%v", oldToken, current, err)
+	}
+	if env.sess.uid != "" {
+		t.Fatal("logic 失败不能绑定会话")
+	}
+}
+
+func TestLoginOnAlreadyBoundSessionStillNotifiesLogic(t *testing.T) {
+	env := newTestComponent(t)
+	ctx := context.Background()
+	env.mustRegister(t, "alice", "hunter2")
+	before := len(env.notifier.calls)
+
+	reply, err := env.comp.Login(ctx, &protos.LoginMsg{Username: "alice", Password: "hunter2"})
+	if err != nil || !reply.Ok {
+		t.Fatalf("reply=%+v err=%v", reply, err)
+	}
+	if len(env.notifier.calls) != before+1 || env.notifier.calls[len(env.notifier.calls)-1] != "1" {
+		t.Fatalf("calls=%v", env.notifier.calls)
 	}
 }

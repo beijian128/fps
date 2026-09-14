@@ -35,14 +35,15 @@ const kickRoute = "gate.sys.kick"
 // Component 是 account 服务的 pitaya 组件。
 type Component struct {
 	component.Base
-	app    pitaya.Pitaya
-	store  *Store
-	online *online.Store
+	app      pitaya.Pitaya
+	store    *Store
+	online   *online.Store
+	notifier LogicNotifier
 }
 
 // New 构造 account 组件（在 main.go 里 Register 到 app）。
-func New(app pitaya.Pitaya, store *Store, onl *online.Store) *Component {
-	return &Component{app: app, store: store, online: onl}
+func New(app pitaya.Pitaya, store *Store, onl *online.Store, notifier LogicNotifier) *Component {
+	return &Component{app: app, store: store, online: onl, notifier: notifier}
 }
 
 // boundAccount 返回当前会话已绑定的账号 ID；未绑定（或拿不到会话）返回空串。
@@ -179,6 +180,14 @@ func (c *Component) finishLogin(ctx context.Context, accountID, username string)
 			log.Printf("account: session already bound to %q, refusing to bind %q", cur, accountID)
 			return fail(ReasonInternal), nil
 		}
+		if c.notifier == nil {
+			log.Printf("account: logic notifier is nil")
+			return fail(ReasonInternal), nil
+		}
+		if err := c.notifier.NotifyOnline(ctx, accountID); err != nil {
+			log.Printf("account: logic online event for %s failed: %v", accountID, err)
+			return fail(ReasonInternal), nil
+		}
 		token, err := c.store.CurrentToken(ctx, accountID)
 		if err != nil || token == "" {
 			log.Printf("account: current token for %s unavailable: %v", accountID, err)
@@ -198,6 +207,15 @@ func (c *Component) finishLogin(ctx context.Context, accountID, username string)
 		log.Printf("account: online lookup for %s failed: %v", accountID, err)
 		// 读不到只影响「能不能踢掉旧连接」，不影响登录本身，继续。
 		oldGate = ""
+	}
+
+	if c.notifier == nil {
+		log.Printf("account: logic notifier is nil")
+		return fail(ReasonInternal), nil
+	}
+	if err := c.notifier.NotifyOnline(ctx, accountID); err != nil {
+		log.Printf("account: logic online event for %s failed: %v", accountID, err)
+		return fail(ReasonInternal), nil
 	}
 
 	// 2) 轮换凭证。这一步是顶号的权威手段：旧客户端的 token 立即作废。
