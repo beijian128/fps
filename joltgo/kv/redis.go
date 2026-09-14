@@ -5,7 +5,9 @@ package kv
 import (
 	"context"
 	"fmt"
+	"time"
 
+	redigo "github.com/gomodule/redigo/redis"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -32,4 +34,43 @@ func Open(ctx context.Context, addr string) (*redis.Client, error) {
 		return nil, fmt.Errorf("kv: ping %s: %w", addr, err)
 	}
 	return c, nil
+}
+
+// OpenRedigo 建一个 redigo 连接池。protoc-gen-redis 生成的代码以 redigo.Conn
+// 为接口，因此持久化仓储复用该池；普通业务仍使用上面的 go-redis 客户端。
+func OpenRedigo(ctx context.Context, addr string) (*redigo.Pool, error) {
+	if addr == "" {
+		addr = DefaultAddr
+	}
+	pool := &redigo.Pool{
+		MaxIdle:   4,
+		MaxActive: 16,
+		Wait:      true,
+		Dial: func() (redigo.Conn, error) {
+			return redigo.Dial("tcp", addr,
+				redigo.DialConnectTimeout(3*time.Second),
+				redigo.DialReadTimeout(3*time.Second),
+				redigo.DialWriteTimeout(3*time.Second),
+			)
+		},
+		TestOnBorrow: func(c redigo.Conn, lastUsed time.Time) error {
+			if time.Since(lastUsed) < time.Minute {
+				return nil
+			}
+			_, err := c.Do("PING")
+			return err
+		},
+	}
+	conn, err := pool.GetContext(ctx)
+	if err != nil {
+		_ = pool.Close()
+		return nil, fmt.Errorf("kv: redigo ping get %s: %w", addr, err)
+	}
+	_, pingErr := conn.Do("PING")
+	_ = conn.Close()
+	if pingErr != nil {
+		_ = pool.Close()
+		return nil, fmt.Errorf("kv: redigo ping %s: %w", addr, pingErr)
+	}
+	return pool, nil
 }

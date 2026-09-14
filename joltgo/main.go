@@ -39,6 +39,7 @@ import (
 	"joltgo/kv"
 	"joltgo/match"
 	"joltgo/online"
+	"joltgo/persist"
 )
 
 func main() {
@@ -113,7 +114,14 @@ func run(svType *string, builder *pitaya.Builder, redisAddr string) error {
 		)
 
 	case "account":
-		app.Register(account.New(app, account.NewStore(rdb), online.NewStore(rdb)),
+		// protoc-gen-redis 生成代码以 redigo.Conn 为接口；账号本体写 Hash，
+		// 凭证仍由上面 rdb 上的 Lua 原子轮换管理。连接池与进程同生命周期。
+		accountPool, err := kv.OpenRedigo(context.Background(), redisAddr)
+		if err != nil {
+			return err
+		}
+		defer accountPool.Close()
+		app.Register(account.New(app, account.NewStore(rdb, persist.NewAccountStore(accountPool)), online.NewStore(rdb)),
 			component.WithName("account"),
 			component.WithNameFunc(strings.ToLower),
 		)

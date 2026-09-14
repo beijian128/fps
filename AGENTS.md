@@ -22,9 +22,13 @@ fps/
 │   ├── main.go              # 入口：解析 -type(gate|account|match|game) 与 -redis，按角色装配 pitaya app
 │   ├── gate/                # gate 服务：AddRoute 路由（account.*/match.* 轮询 / game.* 按会话数据定点）
 │   │   └── session.go       # ★ 会话归属登记（online:{accountID} → 本 gate）+ 远端 remote gate.bindgame
-│   ├── account/             # account 服务：注册 / 登录 / 凭证恢复（token.go 纯函数、store.go Redis、component.go handler）
-│   ├── kv/                  # Redis 连接（Open + 启动时 Ping）
+│   ├── account/             # account 服务：注册 / 登录 / 凭证恢复 + distlock 注册临界区（token.go / store.go / component.go）
+│   ├── kv/                  # Redis 连接（go-redis Open + redigo 持久化池 + 启动时 Ping）
 │   ├── online/              # 会话归属读写（账号当前在线于哪个 gate）
+│   ├── persist/             # ★ protoc-gen-redis 数据模型 + Hash 仓储（账号本体持久化）
+│   │   ├── protos/           # account.proto + 生成的 account.redis.go（独立 Go 包）
+│   │   └── store.go          # redigo 池适配、存在性判断、领域记录转换
+│   ├── third_party/distlock/ # 固定提交内置的 Redis 分布式锁（MIT）
 │   ├── match/               # match 服务：配对队列（queue.go，队列在 Redis）+ 分配 game 节点（RPC game.create）
 │   ├── game/                # game 服务：对局实例生命周期 + 远端 handler
 │   │   ├── instance.go      # ★ 每个对局一条 goroutine，顺序执行、无锁；每 tick 按槽位下发增量/全量帧
@@ -58,6 +62,7 @@ fps/
 
 **先读顺序**：本文件 → `docs/ARCHITECTURE.md`（分层与数据流）→ `joltgo/main.go` →
 `joltgo/account/component.go` + `joltgo/gate/gate.go` + `joltgo/gate/session.go` +
+`joltgo/account/store.go` + `joltgo/persist/store.go` + `joltgo/persist/protos/account.proto` +
 `joltgo/match/match.go` + `joltgo/game/instance.go` + `joltgo/game/component.go` →
 `joltgo/replication/`（`store.go` 终值表/脏集 + `frame.go` 帧结构）→ `joltgo/sim/replicate.go`
 （ECS↔属性映射）→ `joltgo/sim/simulation.go`（tick 顺序 + Physics 接口）→
@@ -86,6 +91,7 @@ fps/
    - **死亡复活时命中盒要一起搬回出生点**（`respawn`）：它要到下一 tick 的 `hitboxFollowSystem` 才跟随角色，留在旧位置会让之后飞来的弹丸打中一个「已经复活在别处的人」。
    - **枪口不能落在自己的命中盒里**：命中盒是实体刚体、会挡住弹丸，而第三人称的枪口正好在角色中轴上。`shoot` 会把出生点沿射向推到盒外（`pushOutsideOwnHitbox`），并且「弹丸 vs 自己的命中盒」的接触被忽略（不扣血、也不吃掉弹丸）。
    - **每个对局各建一份**：命中盒在 `init()` 里随场景创建（**排在场景几何之后**，让场景刚体 id 仍从 1 开始），`reset()` 走 `physics.Destroy()` + 重建，`CharacterIgnoreBody` 的忽略表也随之重建。
+10. **持久化与分布式锁边界**：`persist/` 是结构化持久化层，模型由固定版本 `protoc-gen-redis` 生成（`account.proto` → `account.redis.go`），同一账号 Hash key 为 `acct:1:<accountID>:0`。`distlock` 只包住「占名 → 分配 ID → 写 Hash → 落名字映射」这类多命令业务临界区；凭证轮换、匹配队列已经由 Redis Lua 原子脚本保证，**不要**再用锁替换那些更强的原子操作。
 
 ## 4. 数据流（分布式链路）
 
@@ -93,7 +99,7 @@ fps/
 客户端 ──WS(pomelo+protobuf)──▶ gate(frontend)
    gate 按 route 路由：account.account.* → account 服务（Request/Response）；
                        match.match.join → match 服务；game.game.* → 定点 game 节点（读会话数据 gameServerId）
-   account 校验用户名/密码（bcrypt）→ 签发 token 存 Redis → Bind(accountID) → 回 LoginReply
+   account 校验用户名/密码（bcrypt）→ distlock 串行同名注册 → 写账号 Hash + SETNX 名字映射 → 签发 token 存 Redis → Bind(accountID) → 回 LoginReply
    gate 绑定成功后写 online:{accountID} → 本 gate（会话归属登记）
    match 从 Redis 队列（match:queue，ZSET）配对 2 人（或 10s 兜底单人）→ GetServersByType("game") 挑节点 → RPCTo "game.game.create"
    game 节点创建 Instance（每条 goroutine）→ 每 tick SendPushToUsers("onFrame", …, uids, "gate")
@@ -136,6 +142,8 @@ fps/
   **会话 UID = accountID**，所以 `game.rejoin` / 实例注册表 / 推送目标这些按 uid 索引的地方一行没改。
   限流是**按用户名**（`rl:user:{name}`，1 分钟 10 次）而不是按 IP —— account 是 backend，pitaya 的 `Remote` agent 的
   `RemoteAddr()` 返回 nil，它看不见客户端 IP。
+- **持久化模型（`persist/protos/`）**：账号 Hash 由 `protoc-gen-redis` 从 `DBAccount` 生成，key 固定为 `acct:1:<accountID>:0`；生成物必须提交。改字段后跑 `joltgo/gen-redis.ps1`，不要手改 `.redis.go`。生成包与 `game/protos` 分开，避免枚举/消息类型重复声明。
+- **分布式锁（`distlock`）**：源码按固定 commit 内置在 `third_party/distlock/`；唯一本地补丁是把其 `go.mod` 的短 module path `distlock` 改成 `github.com/beijian128/distlock`，根模块再用本地 `replace` 引入（离线可构建且 `go mod verify` 通过）。锁只用于多命令业务提交；单条脚本能原子完成的事继续走 Lua，避免把强原子性降级成锁。
 - **Redis 数据目录不清空**：`deploy/start-infra.ps1` 每次都清 `etcd-data`（见下条），但 `redis-data` **永不清空** ——
   里面是账号、密码哈希、凭证；清掉就是把所有玩家账号删光。两者对待方式相反，别把 etcd 的习惯套过去。
 - **route 三段式**：`server.service.method`（如 `account.account.login`、`match.match.join`、`game.game.create`）。RPC 调用（`RPCTo`）也必须是三段式，否则报 `no server type chosen for sending RPC`。
@@ -161,6 +169,8 @@ fps/
 
 ```powershell
 # 服务端构建（MSYS2 UCRT64 + Go 1.26+）
+# 仅改了 persist/protos/*.proto 时重建生成的 Redis 代码
+cd joltgo; .\gen-redis.ps1
 cd joltgo; .\build.ps1
 
 # 本地起分布式服务端（etcd + nats + redis + gate/account/match/game 四进程）
@@ -177,12 +187,12 @@ Godot_v4.7.2-stable_win64.exe --path godot_client        # F5 运行
 # gofmt / vet（纯 Go 包，无 cgo，最快）
 # 注：存量文件是 CRLF，gofmt -l 会把它们整文件标记出来——不是格式错误，忽略即可
 cd joltgo
-gofmt -l gate account kv online match game physics sim replication ecs
-go vet ./gate ./account ./kv ./online ./match ./game ./physics ./sim ./replication ./ecs
+gofmt -l gate account kv online match game physics sim replication ecs persist
+go vet ./gate ./account ./kv ./online ./match ./game ./physics ./sim ./replication ./ecs ./persist
 
-# 单元测试（账号/凭证、会话归属、匹配队列、ecs 存储语义 / sim 系统+oracle / replication 存储与帧）
-# 注：./account ./online ./match ./gate ./kv 里的 Redis 用例走 miniredis，不需要真 Redis
-PATH="$PWD:$PATH" go test -count=1 ./account ./online ./match ./gate ./kv ./ecs ./sim ./replication
+# 单元测试（账号/凭证、持久化、会话归属、匹配队列、ecs 存储语义 / sim 系统+oracle / replication 存储与帧）
+# 注：./account ./persist ./online ./match ./gate ./kv 里的 Redis 用例走 miniredis，不需要真 Redis
+PATH="$PWD:$PATH" go test -count=1 ./account ./persist ./online ./match ./gate ./kv ./ecs ./sim ./replication
 
 # 全部包（含 cgo 编译检查与 ./game，需已构建出 libjolt_c.dll）
 PATH="$PWD:$PATH" go test -count=1 ./...
@@ -220,6 +230,7 @@ Godot_..._console.exe --headless --path godot_client --script res://tests/rejoin
   每个变更点 `rep.Set`，再在 `sim/replicate_test.go` 的 `expectedAttrs` 里补一条断言，
   跑 `go test ./sim ./replication`。客户端按属性名读，取新值只需一句
   `_store.attr(id, "名字")` —— **不需要**改 proto、生成码或客户端解码器（§3 第 5 条）。
+- **加/改持久化字段** → 改 `joltgo/persist/protos/*.proto`，跑 `joltgo/gen-redis.ps1`，再改 `persist/store.go` 与调用方；生成文件必须一起提交，跑 `go test ./persist ./account`。
 - 改地图/场景 → 只动 `joltgo/sim/map.go`（部件表 + 材质号），跑 `go test ./sim`；
   涉及"走不走得上去"这类几何手感，再跑 `go test -tags joltdll ./physics`。
   新增材质号同时改 `godot_client/scripts/body_entity.gd` 的 `MATS` 表（只能追加编号）。
@@ -230,7 +241,7 @@ Godot_..._console.exe --headless --path godot_client --script res://tests/rejoin
 - 改**账号/登录/凭证** → 动 `joltgo/account/`（`token.go` 纯函数、`store.go` Redis、`component.go` handler）
   + `joltgo/game/protos/game.proto`（`RegisterMsg`/`LoginMsg`/`ResumeMsg`/`LoginReply`）
   + `godot_client/scripts/fps_client.gd`（Request/Response 编解码）+ `godot_client/scripts/main.gd`（登录面板），
-  跑 `go test ./account`，再跑 `login_reply_decode_test.gd` 与（有集群时）`login_smoke.gd`。
+  账号本体字段改动还要跑 `go test ./persist ./account` 与 `.\gen-redis.ps1`；再跑 `login_reply_decode_test.gd` 与（有集群时）`login_smoke.gd`。
 - 改**会话归属 / 多节点行为** → 动 `joltgo/online/` + `joltgo/gate/session.go`（+ 调用方 `account/` `match/`），
   跑 `go test ./online ./gate ./account ./match`。
 - 改客户端渲染/输入 → 只动 `godot_client/`，Godot 直接 F5。

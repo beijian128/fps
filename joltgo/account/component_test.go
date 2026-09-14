@@ -15,6 +15,7 @@ import (
 	"github.com/topfreegames/pitaya/v3/pkg/session"
 	"joltgo/game/protos"
 	"joltgo/online"
+	"joltgo/persist"
 )
 
 // fakeSession 嵌入 session.Session 接口：只覆盖组件用到的几个方法，
@@ -81,7 +82,7 @@ func newTestComponent(t *testing.T) *testEnv {
 
 	sess := &fakeSession{}
 	app := &fakeApp{sess: sess}
-	store := NewStore(rdb)
+	store := NewStore(rdb, newTestPersistence(t, mr))
 	onl := online.NewStore(rdb)
 	return &testEnv{
 		comp:   New(app, store, onl),
@@ -336,7 +337,9 @@ func TestResumeWithMissingAccountIsTokenInvalid(t *testing.T) {
 		t.Fatalf("准备 token 失败: %q err=%v", tok, err)
 	}
 	// 只把账号哈希删掉：凭证与指针都还在。
-	env.mr.Del("acct:1")
+	if err := env.store.accounts.Delete(ctx, 1); err != nil {
+		t.Fatalf("删除账号 Hash 失败: %v", err)
+	}
 
 	r, err := env.comp.Resume(ctx, &protos.ResumeMsg{Token: tok})
 	if err != nil {
@@ -347,24 +350,18 @@ func TestResumeWithMissingAccountIsTokenInvalid(t *testing.T) {
 	}
 }
 
-// failCmdHook 让指定命令在发往 Redis 之前就失败，用来精确构造「只有这一条命令
-// 瞬时失败」的场景。
-type failCmdHook struct{ name string }
+// failingAccountPersistence 精确模拟「凭证能读、账号数据读失败」。
+type failingAccountPersistence struct{ err error }
 
-func (h failCmdHook) DialHook(next redis.DialHook) redis.DialHook { return next }
-
-func (h failCmdHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
-	return func(ctx context.Context, cmd redis.Cmder) error {
-		if cmd.Name() == h.name {
-			return errors.New("boom: 模拟瞬时失败")
-		}
-		return next(ctx, cmd)
-	}
+func (f failingAccountPersistence) Save(context.Context, uint64, string, string, int64) error {
+	return f.err
 }
 
-func (h failCmdHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
-	return next
+func (f failingAccountPersistence) Get(context.Context, uint64) (persist.AccountRecord, bool, error) {
+	return persist.AccountRecord{}, false, f.err
 }
+
+func (f failingAccountPersistence) Delete(context.Context, uint64) error { return f.err }
 
 // 读账号数据时遇到瞬时故障必须回 internal，**不能**回 token_invalid。
 //
@@ -380,10 +377,10 @@ func TestResumeMapsTransientStoreErrorToInternal(t *testing.T) {
 		t.Fatalf("准备 token 失败: %q err=%v", tok, err)
 	}
 
-	// 只让 HGETALL 失败。**不能**用 mr.SetError()：那会让所有命令都失败，
+	// 只让账号持久化读失败。**不能**用 mr.SetError()：那会让所有命令都失败，
 	// ResolveToken 的 GET 也失败，于是测试走的是上面「resolve token failed」那条
 	// 分支，GetAccount 的错误映射根本没被走到 —— 假绿。
-	env.store.rdb.AddHook(failCmdHook{name: "hgetall"})
+	env.store.accounts = failingAccountPersistence{err: errors.New("boom: 模拟瞬时失败")}
 
 	r, err := env.comp.Resume(ctx, &protos.ResumeMsg{Token: tok})
 	if err != nil {

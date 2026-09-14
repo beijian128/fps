@@ -10,8 +10,9 @@
 6. 改物理接口：动 `joltgo/wrapper/` 或 `joltgo/physics/`，必须重跑完整 `build.ps1`
 7. 加/改一个**同步属性**：只动 `joltgo/sim/replicate.go`（`declareAttributes` 加一行 + 变更点 `rep.Set`）+ `sim/replicate_test.go`，**不需要**改 proto、生成码或客户端解码（见下）
 8. 改**协议结构**（增删消息 / route、改 Frame/Schema 字段号）：动 `joltgo/game/protos/game.proto`（重跑 `protoc --go_out` 重新生成）+ `joltgo/game/` + `joltgo/match/` + `joltgo/account/` + 同步改 `godot_client/scripts/fps_client.gd`（protobuf 编解码）
-9. 改**账号/登录/凭证**：动 `joltgo/account/`（`token.go` 纯函数 / `store.go` Redis / `component.go` handler）+ 客户端 `fps_client.gd`（Request/Response）与 `main.gd`（登录面板），跑 `go test ./account`
-10. 改**会话归属 / 多节点行为**：动 `joltgo/online/` + `joltgo/gate/session.go`，跑 `go test ./online ./gate ./account ./match`
+9. 改**账号/登录/凭证**：动 `joltgo/account/`（`token.go` 纯函数 / `store.go` Redis / `component.go` handler）+ `joltgo/persist/`（账号 Hash）+ 客户端 `fps_client.gd`（Request/Response）与 `main.gd`（登录面板），跑 `go test ./account ./persist`
+10. 改**持久化模型**：改 `joltgo/persist/protos/*.proto`，跑 `joltgo/gen-redis.ps1`，不要手改 `.redis.go`；生成码与 `persist/store.go` 一起提交，跑 `go test ./persist ./account`
+11. 改**会话归属 / 多节点行为**：动 `joltgo/online/` + `joltgo/gate/session.go`，跑 `go test ./online ./gate ./account ./match`
 
 ## 如何扩展一个功能
 
@@ -78,8 +79,9 @@
   的 handler 方法对应 route（三段式），只做协议 ↔ sim 翻译，不写玩法逻辑
 - `joltgo/gate/` / `joltgo/match/` / `joltgo/account/` 是分布式接入、匹配与账号层：
   gate 只 AddRoute + 在会话绑定/断开时登记会话归属（`session.go`），match 从 Redis 队列
-  配对后 RPC game.create，account 管注册/登录/凭证轮换。共享状态一律走 Redis
-  （`joltgo/kv/` 连接、`joltgo/online/` 会话归属、`match/queue.go` 队列）
+  配对后 RPC game.create，account 管注册/登录/凭证轮换。账号 Hash 的生成模型与仓储在
+  `joltgo/persist/`；跨节点多命令临界区用 `distlock`，凭证/队列继续用 Redis 原子脚本。共享状态一律走 Redis
+  （`joltgo/kv/` 连接、`joltgo/online/` 会话归属、`match/queue.go` 队列、`persist/` 账号 Hash）
 - **会话 UID = accountID**：身份由 account 服务签发，客户端不再自报。任何按 uid 索引的
   地方（game 实例注册表、push 目标、回局 fan-out）语义不变，只是那个字符串换了来源
 - `joltgo/third_party/pitaya/` 是内置第三方源码，不要在其上改业务代码；
@@ -102,6 +104,8 @@
   时同步改 `godot_client/scripts/body_entity.gd` 的 `MATS` 表（编号只能追加）
 - 客户端 GDScript：避免从 Variant 推断类型（默认告警会被当错误处理）；
   节点实例化用 `preload` 而非 `class_name`（纯命令行运行不依赖编辑器导入的全局类缓存）
+- **持久化 schema 与客户端 wire schema 分开**：`persist/protos/*.proto` 只给 protoc-gen-redis 用；生成码必须输出到独立 Go 包，不能与 `game.pb.go` 同包（枚举/message 会重名）。
+- **锁边界**：只有跨多个 Redis 命令、且语义上需要互斥的业务提交才加 `distlock`；SETNX/Lua/ZSET 单命令已原子时不要套锁。
 - 新增 gitignored 的产物时，同步更新根目录 `.gitignore`
 
 ## 测试
@@ -109,10 +113,10 @@
 - 服务端单元测试（不依赖 cgo / Jolt DLL，直接跑；Redis 用例走 miniredis，不需要真 Redis）：
 
   ```bash
-  cd joltgo && go test ./account ./online ./kv ./gate ./match ./ecs ./sim ./replication
+  cd joltgo && go test ./account ./persist ./online ./kv ./gate ./match ./ecs ./sim ./replication
   ```
 
-  `account` 覆盖凭证生成/校验、bcrypt、Redis 存储与轮换、三个 handler 的分支；
+  `account` 覆盖凭证生成/校验、bcrypt、Redis 存储与轮换、三个 handler 的分支；`persist` 覆盖生成 Hash 往返、schema 版本与账号仓储；
   `online` / `kv` 覆盖会话归属读写与连接；`gate` 覆盖会话钩子与 bindgame remote；
   `match` 覆盖 Redis 队列（配对原子性、超时兜底）与开局链路；
   `ecs` 覆盖组件存储语义；`replication` 覆盖同步层（终值表 / 脏集去重 / full 帧不推进
@@ -127,7 +131,7 @@
   `joltgo/` 下已构建）：
 
   ```bash
-  cd joltgo && PATH="$PWD:$PATH" go vet ./gate ./account ./kv ./online ./match ./game ./physics ./sim ./replication ./ecs
+  cd joltgo && PATH="$PWD:$PATH" go vet ./gate ./account ./persist ./kv ./online ./match ./game ./physics ./sim ./replication ./ecs
   PATH="$PWD:$PATH" go test ./...
   ```
 
@@ -152,7 +156,7 @@
 
 - 看服务日志：gate/account/match/game 四进程各自有日志（`deploy/start-all.ps1` 写 `deploy/*.log`），
   pitaya 默认 logrus 会打印 handler 注册、服务发现、RPC 等日志
-- 看 Redis 数据：`deploy/redis-cli.exe` —— 账号 `acct:*`、凭证 `sess:*`、
+- 看 Redis 数据：`deploy/redis-cli.exe` —— 账号 Hash `acct:1:<id>:0`、凭证 `sess:*`、
   会话归属 `online:*`、匹配队列 `match:queue`（ZSET）
 - Jolt 的断言/日志默认关闭；如需排查物理问题，可在 CMake 里开 `USE_ASSERTS=ON`（Debug）重编
 - 抓包：用带 WebSocket 支持的工具连 `ws://localhost:8080/`（gate）观察 pomelo 二进制帧；

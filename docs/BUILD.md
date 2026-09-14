@@ -13,9 +13,10 @@
 | Go | 1.26+ | cgo 需要 GCC |
 | protoc | 3.5+ | 仅在改动 `.proto` 后重新生成 Go 码时需要 |
 | protoc-gen-go | 与 `google.golang.org/protobuf` 匹配 | `go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.34.2` |
+| protoc-gen-redis | 固定提交（脚本内置） | 仅在重建 `persist/protos/*.redis.go` 时需要；`gen-redis.ps1` 会安装并把二进制放进 `build/` |
 | etcd | 3.5.x | 服务发现；本机二进制由 `joltgo/deploy/` 提供 |
 | nats-server | 2.x | 服务间 RPC 总线；本机二进制由 `joltgo/deploy/` 提供 |
-| Redis | 8.x | 共享状态（账号/凭证/会话归属/匹配队列）；本机二进制由 `joltgo/deploy/` 提供 |
+| Redis | 8.x | 共享状态（账号 Hash/凭证/会话归属/匹配队列）；本机二进制由 `joltgo/deploy/` 提供 |
 
 > 后三项只在**运行**时需要，构建不依赖它们。三个二进制（以及 Redis 的 msys2 运行库
 > DLL）都已放在 `joltgo/deploy/`，`start-infra.ps1` 一把起齐，详见
@@ -74,6 +75,22 @@ protoc --go_out=. --go_opt=paths=source_relative -I . game/protos/game.proto
 
 需要 `protoc` 与 `protoc-gen-go`（见上方环境要求表）。生成后客户端
 `godot_client/scripts/fps_client.gd` 里的手写 wire 编解码也要同步改。
+
+## Redis 持久化模型（persist/protos/）
+
+服务端的结构化持久化数据用 [protoc-gen-redis](https://github.com/beijian128/protoc-gen-redis)
+从 `joltgo/persist/protos/*.proto` 生成 Redis Hash 存取代码。生成器版本固定在
+`joltgo/gen-redis.ps1`，不要手改 `.redis.go`：
+
+```powershell
+cd joltgo
+.\gen-redis.ps1
+```
+
+生成物必须提交。持久化 proto 与 `game/protos/game.proto` 分开，生成码也放在独立 Go
+包，避免消息/枚举与 wire 契约重复声明。账号 Hash 当前 key 为 `acct:1:<accountID>:0`；
+`distlock` 同样按固定 commit 内置在
+`third_party/distlock/`，只修正其 module path，根模块通过本地 `replace` 使用，构建不依赖 GitHub 可达。
 
 ## 一键构建
 

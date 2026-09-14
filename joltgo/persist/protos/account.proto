@@ -1,0 +1,34 @@
+// 持久化数据模型（不是客户端 wire 契约）。
+//
+// protoc-gen-redis 约定：
+//   - 顶层 message 必须以 DB 前缀命名，一个 message 对应一个 Redis Hash；
+//   - 顶层字段不能直接是 repeated/map，集合字段必须用嵌套 message 包一层。
+//
+// 生成命令见 joltgo/gen-redis.ps1。不要手改生成的 .redis.go。
+syntax = "proto3";
+
+package persist;
+
+option go_package = "joltgo/persist/protos;persistpb";
+
+// DBSchemaVersion 用于持久化模型演进。即使当前无需迁移，也始终写入版本号，
+// 避免将来只能靠字段是否存在猜数据年代。
+enum DBSchemaVersion {
+  DB_SCHEMA_VERSION_UNSPECIFIED = 0;
+  DB_SCHEMA_VERSION_CURRENT = 1;
+}
+
+// DBMetadata 是账号的非登录必需数据；先留出扩展位，登录路径不需要读取它。
+message DBMetadata {
+  int64 last_login_at = 1; // Unix 秒；当前版本还没写，保留给后续活跃度统计
+}
+
+// DBAccount 是一个账号的持久数据。凭证（token）仍在 go-redis 管理的
+// sess:* 键中，不进入本 Hash；这里只保存账号本体。
+message DBAccount {
+  string username = 1;   // 保留注册时原始大小写，供 UI 显示
+  string pass_hash = 2;  // bcrypt 哈希，绝不存明文
+  int64 created_at = 3;  // Unix 秒
+  DBSchemaVersion schema_version = 4;
+  DBMetadata metadata = 5;
+}

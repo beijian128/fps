@@ -11,15 +11,29 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	redigo "github.com/gomodule/redigo/redis"
 	"github.com/redis/go-redis/v9"
+	"joltgo/persist"
 )
+
+func newTestPersistence(t *testing.T, mr *miniredis.Miniredis) *persist.AccountStore {
+	t.Helper()
+	pool := &redigo.Pool{
+		MaxIdle: 2,
+		Dial: func() (redigo.Conn, error) {
+			return redigo.Dial("tcp", mr.Addr())
+		},
+	}
+	t.Cleanup(func() { _ = pool.Close() })
+	return persist.NewAccountStore(pool)
+}
 
 func newTestStore(t *testing.T) (*Store, *miniredis.Miniredis) {
 	t.Helper()
 	mr := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { _ = rdb.Close() })
-	return NewStore(rdb), mr
+	return NewStore(rdb, newTestPersistence(t, mr)), mr
 }
 
 // createTestAccount 建一个测试账号，返回 accountID。
@@ -81,6 +95,9 @@ func TestCreateRollsBackNameOnFailure(t *testing.T) {
 	// 谁都注册不了它，也谁都登录不了它。
 	if mr.Exists("acct:name:bob") {
 		t.Fatal("失败后应回滚占名")
+	}
+	if mr.Exists("acct:lock:create:bob") {
+		t.Fatal("失败后应释放注册锁")
 	}
 
 	// 计数器修好后应能重新占名。
@@ -523,5 +540,49 @@ func TestCurrentToken(t *testing.T) {
 	}
 	if tok, _ := s.CurrentToken(ctx, id); tok != issued {
 		t.Fatalf("应返回当前凭证 %q，得到 %q", issued, tok)
+	}
+}
+
+// 多节点同时注册同名账号时只能有一个赢家；锁必须在所有返回路径释放。
+func TestCreateSameNameConcurrent(t *testing.T) {
+	s, mr := newTestStore(t)
+	hash, _ := HashPassword("hunter2")
+
+	const workers = 8
+	start := make(chan struct{})
+	errs := make(chan error, workers)
+	ids := make(chan string, workers)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			id, err := s.Create(context.Background(), "alice", hash)
+			if err != nil {
+				errs <- err
+				return
+			}
+			ids <- id
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	close(ids)
+
+	if len(ids) != 1 {
+		t.Fatalf("并发注册应只有一个成功，实际 %d", len(ids))
+	}
+	if id := <-ids; id != "1" {
+		t.Fatalf("第一个账号 id 应为 1，得到 %q", id)
+	}
+	for err := range errs {
+		if !errors.Is(err, ErrNameTaken) {
+			t.Fatalf("除赢家外都应返回 ErrNameTaken，得到 %v", err)
+		}
+	}
+	if mr.Exists("acct:lock:create:alice") {
+		t.Fatal("所有 Create 返回后注册锁都应已释放")
 	}
 }

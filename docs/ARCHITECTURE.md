@@ -37,7 +37,7 @@
       │        │            └──────────┬───────────────┘
 ┌─────▼────────▼─────┐                 │ C++ API
 │  Redis（共享状态）  │      ┌──────────▼───────────────┐
-│  账号 / 凭证        │      │  Jolt Physics（libjolt_c.dll）│
+│  账号 Hash / 凭证   │      │  Jolt Physics（libjolt_c.dll）│
 │  会话归属 / 匹配队列│      └──────────────────────────┘
 └────────────────────┘
 ```
@@ -45,6 +45,22 @@
 四个服务由**单二进制** `joltgo.exe` 用 `-type gate|account|match|game` 区分角色，经
 **etcd**（服务发现）+ **NATS**（RPC）互相通信，共享状态放 **Redis**（`-redis`，默认
 `localhost:6379`），见 `joltgo/deploy/`。`game` 是纯计算节点，不连 Redis。
+
+## 持久化与分布式锁
+
+服务端有两条 Redis 使用路径，职责不重叠：
+
+- **go-redis**（`kv.Open`）：凭证轮换、会话归属、匹配队列。这些状态由 Lua/SETNX/ZSET
+  单命令原子语义直接管理。
+- **redigo 池 + protoc-gen-redis**（`kv.OpenRedigo` / `persist/`）：结构化账号 Hash。模型定义在
+  `persist/protos/account.proto`，生成文件 `account.redis.go` 由固定版本的
+  [protoc-gen-redis](https://github.com/beijian128/protoc-gen-redis) 产出；key 固定为
+  `acct:1:<accountID>:0`，字段号来自 proto tag，并带 `schema_version`。
+- **distlock**（源码固定提交内置在 `third_party/distlock/`）：账号注册的「占名 → 分配 ID → 写 Hash → 落名字映射」是多命令业务提交，
+  多个 account 节点同时处理同名请求时用 [distlock](https://github.com/beijian128/distlock)
+  串行化，锁有 TTL + watchdog，进程崩溃会按 TTL 自动释放。
+- **不要锁替原子脚本**：凭证轮换与匹配队列的原子性来自 Redis 端脚本；用客户端锁包起来只会
+  增加依赖和失败面，不会比服务端原子执行更强。锁只用于无法用单个脚本/命令表达的业务提交。
 
 ## 对局实例模型（★ 无锁核心）
 
@@ -218,7 +234,7 @@ Go 侧（sim）；包装层内部只保留两个物理层自身的状态：刚�
 现在身份由 `account` 服务签发，三条路都以同一个 `LoginReply` 收尾：
 
 ```text
-register(username, password) ─▶ 校验格式 → 限流 → bcrypt 哈希 → 占名 → 建账号 ─┐
+register(username, password) ─▶ 校验格式 → 限流 → bcrypt 哈希 → distlock → 占名 + 写 Hash ─┐
 login(username, password)    ─▶ 限流 → 查名 → bcrypt 校验 ────────────────────┤
 resume(token)                ─▶ 解析 token（Redis sess:{token}）─────────────┤
                                                                              ▼

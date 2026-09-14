@@ -3,11 +3,14 @@ package account
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"strconv"
 	"time"
 
+	"github.com/beijian128/distlock"
 	"github.com/redis/go-redis/v9"
+	"joltgo/persist"
 )
 
 // 键空间与参数。集中在这里，避免键名散落在各处拼字符串。
@@ -32,13 +35,23 @@ const (
 	// 代价是攻击者可以持续刷某个用户名、把他挡在门外（比「账号锁定」轻得多：
 	// 只有一分钟窗口，且不影响已登录的会话）。
 	RateLimit = 10
+
+	// 一次注册提交（占名、分配 ID、写账号 Hash、落名字映射）是一个多命令
+	// 业务事务。单机 Redis 不会穿插执行，但多个 account 节点会并发；用分布式
+	// 锁把同名注册串行化。TTL 只覆盖进程崩溃后的自动恢复窗口，看门狗会续期。
+	createLockTTL      = 10 * time.Second
+	createLockRetry    = 10 * time.Millisecond
+	createUnlockBudget = time.Second
 )
 
 func keyName(username string) string { return "acct:name:" + NormalizeUsername(username) }
-func keyAcct(id string) string       { return "acct:" + id }
 func keySess(token string) string    { return keySessPrefix + token }
 func keySessAcct(id string) string   { return "sess:acct:" + id }
 func keyRate(username string) string { return "rl:user:" + NormalizeUsername(username) }
+
+func keyCreateLock(username string) string {
+	return "acct:lock:create:" + NormalizeUsername(username)
+}
 
 // issueTokenScript 原子地完成一次凭证轮换：读旧指针 → 写新凭证 → 换指针 → 删旧凭证。
 //
@@ -79,20 +92,41 @@ type Account struct {
 // Store 是账号数据的 Redis 读写层：只做键的存取，不做规则判断
 // （格式校验、错误码映射、顶号决策都在 component.go）。
 type Store struct {
-	rdb *redis.Client
+	rdb      *redis.Client
+	accounts persist.AccountPersistence
 }
 
-// NewStore 构造 Store。
-func NewStore(rdb *redis.Client) *Store { return &Store{rdb: rdb} }
+// NewStore 构造 Store。accounts 是 protoc-gen-redis 生成的账号 Hash 仓储；
+// 凭证仍由 rdb 上的 sess:* 原子脚本管理。
+func NewStore(rdb *redis.Client, accounts persist.AccountPersistence) *Store {
+	return &Store{rdb: rdb, accounts: accounts}
+}
 
 // Create 占名并创建账号，返回分配到的 accountID（十进制字符串）。
 //
-// 用 SETNX 占名而不是「先 GET 再 SET」：多节点/多请求并发下只有 SETNX 能保证
-// 只有一个成功。占名键先写空串、拿到 id 后再回填 —— 中间态的空值在
-// LookupByName 里被当作「不存在」，不会被误当成有效账号。
-//
-// 任一步失败都回滚占名，否则会留下「名字被占了、却没有任何账号」的僵尸名。
+// 分布式锁把同名注册串行化；SETNX 仍保留为最终的占名权威，锁只是为了把
+// 「占名 → 分配 ID → 写 Hash → 落名字映射」这组多命令提交保护成一个临界区。
+// 如果进程在临界区崩溃，锁的 TTL/看门狗会释放锁，占名键也带 TTL 自愈。
 func (s *Store) Create(ctx context.Context, username, passHash string) (string, error) {
+	lockKey := keyCreateLock(username)
+	lock := distlock.New(s.rdb, lockKey,
+		distlock.WithTTL(createLockTTL),
+		distlock.WithRetryInterval(createLockRetry),
+		distlock.WithOnLost(func() {
+			log.Printf("account: create lock %s lost", lockKey)
+		}),
+	)
+	if err := lock.Lock(ctx); err != nil {
+		return "", fmt.Errorf("account: acquire create lock: %w", err)
+	}
+	defer func() {
+		unlockCtx, cancel := context.WithTimeout(context.Background(), createUnlockBudget)
+		defer cancel()
+		if err := lock.Unlock(unlockCtx); err != nil && !errors.Is(err, distlock.ErrNotOwned) {
+			log.Printf("account: release create lock %s: %v", lockKey, err)
+		}
+	}()
+
 	nameKey := keyName(username)
 	ok, err := s.rdb.SetNX(ctx, nameKey, "", placeholderTTL).Result()
 	if err != nil {
@@ -109,18 +143,15 @@ func (s *Store) Create(ctx context.Context, username, passHash string) (string, 
 	}
 	id := strconv.FormatInt(n, 10)
 
-	if err := s.rdb.HSet(ctx, keyAcct(id), map[string]any{
-		"username":   username,
-		"pass_hash":  passHash,
-		"created_at": time.Now().Unix(),
-	}).Err(); err != nil {
+	if err := s.accounts.Save(ctx, uint64(n), username, passHash, time.Now().Unix()); err != nil {
 		_ = s.rdb.Del(ctx, nameKey).Err()
+		_ = s.accounts.Delete(ctx, uint64(n))
 		return "", err
 	}
 
 	if err := s.rdb.Set(ctx, nameKey, id, 0).Err(); err != nil {
 		_ = s.rdb.Del(ctx, nameKey).Err()
-		_ = s.rdb.Del(ctx, keyAcct(id)).Err()
+		_ = s.accounts.Delete(ctx, uint64(n))
 		return "", err
 	}
 	return id, nil
@@ -141,21 +172,26 @@ func (s *Store) LookupByName(ctx context.Context, username string) (string, bool
 	return id, true, nil
 }
 
-// GetAccount 读账号数据。第二个返回值表示是否存在。
+// GetAccount 从 protoc-gen-redis 生成的账号 Hash 读取数据。第二个返回值
+// 表示账号是否存在。
 func (s *Store) GetAccount(ctx context.Context, id string) (Account, bool, error) {
-	m, err := s.rdb.HGetAll(ctx, keyAcct(id)).Result()
+	idNum, err := strconv.ParseUint(id, 10, 64)
+	if err != nil {
+		return Account{}, false, nil
+	}
+
+	row, ok, err := s.accounts.Get(ctx, idNum)
 	if err != nil {
 		return Account{}, false, err
 	}
-	if len(m) == 0 {
+	if !ok {
 		return Account{}, false, nil
 	}
-	created, _ := strconv.ParseInt(m["created_at"], 10, 64)
 	return Account{
 		ID:        id,
-		Username:  m["username"],
-		PassHash:  m["pass_hash"],
-		CreatedAt: created,
+		Username:  row.Username,
+		PassHash:  row.PassHash,
+		CreatedAt: row.CreatedAt,
 	}, true, nil
 }
 

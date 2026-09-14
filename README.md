@@ -22,6 +22,8 @@
   **实体-属性增量帧**（只发本帧变化的 `(实体, 属性, 终值)`；值没变不发、同帧只留终值）
 - **账号体系**：用户名 + 密码注册/登录（bcrypt 存哈希），服务端签发 token 凭证
   （7 天有效、每次恢复续期）；一个账号同时只有一个活会话，异地登录顶掉旧连接
+  账号本体用 [protoc-gen-redis](https://github.com/beijian128/protoc-gen-redis) 生成的 Redis Hash 持久化，
+  跨 account 节点的同名注册临界区用 [distlock](https://github.com/beijian128/distlock) 串行化
 - **断线重连回到同一对局**：客户端持久化服务端签发的 token，重连后自动登回同一账号、
   找回原实例与原槽位，服务端单独下发一份全量帧把本地世界整体重建
 - 服务端采用 **pitaya 分布式游戏服务端框架**（内置源码，**Cluster 模式**）拆成四个微服务：
@@ -133,12 +135,15 @@ gate 监听 `ws://localhost:8080/`；基础设施见 `joltgo/deploy/README.md`�
 fps/
 ├── joltgo/                  # Go 服务端（单二进制四角色）
 │   ├── third_party/pitaya/  # 内置 pitaya 框架源码（pkg/ + go.mod + go.sum）
+│   ├── third_party/distlock/ # 固定提交内置的 Redis 分布式锁（MIT）
 │   ├── wrapper/
 │   │   ├── jolt_c.h         # C ABI 声明（extern "C"，纯物理桥、无业务）
 │   │   └── jolt_c.cpp       # Jolt C++ 原生 API → C ABI 实现
 │   ├── main.go              # 入口：解析 -type(gate|account|match|game) 与 -redis，按角色装配
 │   ├── gate/                # gate 服务：AddRoute 路由（account.* / match.* / game.*）+ 会话归属登记
 │   ├── account/             # account 服务：注册/登录/resume，bcrypt + token 轮换
+│   ├── persist/             # protoc-gen-redis 持久化模型 + 账号 Hash 仓储
+│   │   └── protos/          # account.proto / 生成的 account.redis.go
 │   ├── match/               # match 服务：Redis 配对队列 + 分配 game 节点
 │   ├── game/                # game 服务：对局实例（instance.go 每局一 goroutine 无锁）
 │   │   └── protos/          # protobuf 消息定义 + 生成码（wire 契约；新增同步属性无需改此文件）
@@ -150,6 +155,7 @@ fps/
 │   ├── ecs/                 # ECS 核心：实体 + archetype 存储/查询 + Bundle（零依赖、可单测）
 │   ├── deploy/              # 本地集群基础设施：etcd/nats/redis 二进制 + 启动脚本
 │   ├── CMakeLists.txt       # 将 Jolt 作为子项目，编译 libjolt_c.dll
+│   ├── gen-redis.ps1        # 固定版本重建 persist/protos/*.redis.go
 │   └── build.ps1            # 一键构建脚本
 ├── godot_client/            # Godot 4 客户端
 │   ├── scenes/main.tscn     # 主场景（Main + FpsClient + Sfx 子节点）

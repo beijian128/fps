@@ -34,3 +34,28 @@ func TestOpenFailsFastOnBadAddr(t *testing.T) {
 		t.Fatal("连不上时 Open 应返回错误")
 	}
 }
+
+func TestOpenRedigoPings(t *testing.T) {
+	mr := miniredis.RunT(t)
+	pool, err := OpenRedigo(context.Background(), mr.Addr())
+	if err != nil {
+		t.Fatalf("OpenRedigo: %v", err)
+	}
+	t.Cleanup(func() { _ = pool.Close() })
+
+	conn := pool.Get()
+	defer conn.Close()
+	if _, err := conn.Do("PING"); err != nil {
+		t.Fatalf("redigo PING: %v", err)
+	}
+}
+
+func TestOpenRedigoFailsFastOnBadAddr(t *testing.T) {
+	mr := miniredis.RunT(t)
+	addr := mr.Addr()
+	mr.Close()
+
+	if _, err := OpenRedigo(context.Background(), addr); err == nil {
+		t.Fatal("连不上时 OpenRedigo 应返回错误")
+	}
+}
