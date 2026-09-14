@@ -21,10 +21,21 @@ go install $pluginVersion
     "--redis_out=$protoDir" `
     '--redis_opt=paths=source_relative,key_format=acct:%d:%d:%d' `
     'account.proto'
-if ($LASTEXITCODE -ne 0) { throw 'protoc-gen-redis failed' }
+if ($LASTEXITCODE -ne 0) { throw 'protoc-gen-redis account failed' }
 
-$generated = Join-Path $protoDir 'account.redis.go'
+& protoc `
+    -I $protoDir `
+    "--plugin=protoc-gen-redis=$plugin" `
+    "--redis_out=$protoDir" `
+    '--redis_opt=paths=source_relative,key_format=REDB#%d:%d:%d' `
+    'player/player.proto'
+if ($LASTEXITCODE -ne 0) { throw 'protoc-gen-redis player failed' }
+
+$generated = @(
+    (Join-Path $protoDir 'account.redis.go'),
+    (Join-Path $protoDir 'player\player.redis.go')
+)
 gofmt -w $generated
 if ($LASTEXITCODE -ne 0) { throw 'gofmt failed' }
 
-Write-Host "Generated $generated"
+Write-Host "Generated $($generated -join ', ')"
