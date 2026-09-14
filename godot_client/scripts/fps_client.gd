@@ -26,6 +26,7 @@ signal frame_received(frame: Dictionary)   # 服务端推送的同步帧（增�
 signal matched_received(result: Dictionary)
 signal connection_changed(connected: bool)
 signal login_result(result: Dictionary)   # LoginReply：{ok, token, username, account_id, reason}
+signal logic_state_received(result: Dictionary)
 
 const WS_URL := "ws://localhost:8080/"
 const RETRY_SECS := 1.0
@@ -148,8 +149,9 @@ func _process(_delta: float) -> void:
 			# 登录类请求超时：响应丢了不能一直转圈，退回登录面板。
 			for mid in _pending.keys():
 				if now - float(_pending[mid]["at"]) > LOGIN_TIMEOUT:
+					var route := String(_pending[mid]["route"])
 					_pending.erase(mid)
-					login_result.emit({"ok": false, "reason": "timeout"})
+					_emit_request_failure(route, "timeout")
 			# 接收看门狗只在匹配后（有 20Hz 帧流）生效：匹配等待期间没有帧，
 			# 2.5s 无数据是正常的（单人兜底要等 10s）。
 			if _matched and now - _last_recv > RECV_TIMEOUT:
@@ -226,6 +228,32 @@ func _send_login_request(route: String, username: String, password: String) -> v
 func send_resume() -> void:
 	_send_tracked("account.account.resume", _tag_len(1, client_token.to_utf8_buffer()))
 
+func send_logic_state() -> void:
+	_send_tracked("logic.logic.state", PackedByteArray())
+
+func send_purchase(item_id: String, quantity: int) -> void:
+	_send_tracked("logic.logic.purchase", _encode_purchase(item_id, quantity))
+
+func send_equip(item_id: String) -> void:
+	_send_tracked("logic.logic.equip", _encode_equip(item_id))
+
+func _encode_purchase(item_id: String, quantity: int) -> PackedByteArray:
+	var out := _tag_len(1, item_id.to_utf8_buffer())
+	out.append_array(_field_varint(2, quantity))
+	return out
+
+func _encode_equip(item_id: String) -> PackedByteArray:
+	return _tag_len(1, item_id.to_utf8_buffer())
+
+func _logic_failure(reason: String) -> Dictionary:
+	return {"ok": false, "reason": reason, "coins": 0, "items": [], "equipped_primary_weapon": ""}
+
+func _emit_request_failure(route: String, reason: String) -> void:
+	if route.begins_with("logic."):
+		logic_state_received.emit(_logic_failure(reason))
+	else:
+		login_result.emit({"ok": false, "reason": reason})
+
 ## _send_tracked 发一条需要关联响应的请求（登记 mid 以便超时与配对）。
 func _send_tracked(route: String, payload: PackedByteArray) -> void:
 	var mid := _next_mid
@@ -235,8 +263,7 @@ func _send_tracked(route: String, payload: PackedByteArray) -> void:
 	if _send_request(mid, route, payload):
 		_pending[mid] = {"route": route, "at": Time.get_ticks_msec() / 1000.0}
 	else:
-		# 连接还没就绪：立刻当作失败，让 UI 退回登录面板而不是干等超时。
-		login_result.emit({"ok": false, "reason": "no_connection"})
+		_emit_request_failure(route, "no_connection")
 
 ## CommandMsg：把一帧的上行命令合并成一条消息发送（帧是最小发送单位）。
 ## 编码拆成 _encode_command 是为了能脱离 WebSocket 单测字段号 —— `reset` 在服务端
@@ -645,33 +672,29 @@ func _on_push(data: PackedByteArray) -> void:
 ## is_err 为真时 payload 是 pitaya 的错误字符串，不是 LoginReply。
 func _on_response(data: PackedByteArray, is_err: bool) -> void:
 	if data.size() < 2:
-		# 连 mid 的第一个字节都没有：不能读 data[1]。与 _on_push 的
-		# `data.size() < 2 + rl` 守卫对称 —— 畸形帧宁可明确失败，也不能让
-		# 上层一直等一个永远不来的响应。
 		_fail_unreadable_response()
 		return
 	var r: Array = _read_varint(data, 1)
 	var next: int = int(r[1])
-	# _read_varint 到缓冲末尾就停。末字节仍带续位 0x80 说明 mid 的 LEB128 没读完，
-	# 帧是截断的：mid 不可信、payload 也不完整，同样明确报失败而不是静默丢弃。
 	if (data[next - 1] & 0x80) != 0:
-		printerr("Response 帧被截断（mid 的 LEB128 不完整）")
 		_fail_unreadable_response()
 		return
 	var mid: int = int(r[0])
 	var payload: PackedByteArray = data.slice(next)
+	var pending: Dictionary = _pending.get(mid, {})
 	_pending.erase(mid)
+	var route := String(pending.get("route", ""))
 	if is_err:
-		printerr("登录请求失败（服务端错误）: " + payload.get_string_from_utf8())
-		login_result.emit({"ok": false, "reason": "internal"})
+		printerr("请求失败（服务端错误）: route=%s payload=%s" % [route, payload.get_string_from_utf8()])
+		_emit_request_failure(route, "internal")
+		return
+	if route.begins_with("logic."):
+		logic_state_received.emit(_decode_logic_state(payload))
 		return
 	var reply := _decode_login_reply(payload)
 	if bool(reply.get("ok", false)):
-		# 登录/注册/resume 成功才落盘凭证：失败时服务端不发 token，
-		# 写空串会把上一次的有效凭证也抹掉。
 		_save_token(String(reply.get("token", "")), String(reply.get("username", "")))
 	elif String(reply.get("reason", "")) == "token_invalid":
-		# 服务端明确否掉了这个凭证：丢掉，别再拿它反复试（见 _clear_token）。
 		_clear_token()
 	login_result.emit(reply)
 
@@ -682,8 +705,83 @@ func _on_response(data: PackedByteArray, is_err: bool) -> void:
 ## 5 秒后自己变成「服务器无响应，请重试」。整表清空的粒度正好：在途的登录类请求
 ## 最多只有一条（UI 有 _login_busy 单飞守卫，resume 每次握手只发一次）。
 func _fail_unreadable_response() -> void:
+	var routes := []
+	for mid in _pending:
+		routes.append(String(_pending[mid].get("route", "")))
 	_pending = {}
-	login_result.emit({"ok": false, "reason": "internal"})
+	if routes.is_empty():
+		login_result.emit({"ok": false, "reason": "internal"})
+		return
+	for route in routes:
+		_emit_request_failure(route, "internal")
+
+func _decode_logic_state(buf: PackedByteArray) -> Dictionary:
+	var d := {
+		"ok": false,
+		"reason": "",
+		"coins": 0,
+		"items": [],
+		"equipped_primary_weapon": "",
+	}
+	var i := 0
+	while i < buf.size():
+		var tag: Array = _read_varint(buf, i)
+		i = int(tag[1])
+		var field := int(tag[0]) >> 3
+		var wire := int(tag[0]) & 7
+		if wire == WIRE_VARINT:
+			var r: Array = _read_varint(buf, i)
+			i = int(r[1])
+			match field:
+				1: d["ok"] = int(r[0]) != 0
+				3: d["coins"] = int(r[0])
+		elif wire == WIRE_LEN:
+			var rl: Array = _read_varint(buf, i)
+			i = int(rl[1])
+			var size := int(rl[0])
+			var sub: PackedByteArray = buf.slice(i, i + size)
+			i += size
+			match field:
+				2: d["reason"] = sub.get_string_from_utf8()
+				4: d["items"].append(_decode_logic_shop_item(sub))
+				5: d["equipped_primary_weapon"] = sub.get_string_from_utf8()
+		else:
+			break
+	return d
+
+func _decode_logic_shop_item(buf: PackedByteArray) -> Dictionary:
+	var d := {
+		"item_id": "",
+		"display_name": "",
+		"price": 0,
+		"equip_slot": "",
+		"owned_quantity": 0,
+	}
+	var i := 0
+	while i < buf.size():
+		var tag: Array = _read_varint(buf, i)
+		i = int(tag[1])
+		var field := int(tag[0]) >> 3
+		var wire := int(tag[0]) & 7
+		if wire == WIRE_VARINT:
+			var r: Array = _read_varint(buf, i)
+			i = int(r[1])
+			match field:
+				3: d["price"] = int(r[0])
+				5: d["owned_quantity"] = int(r[0])
+		elif wire == WIRE_LEN:
+			var rl: Array = _read_varint(buf, i)
+			i = int(rl[1])
+			var size := int(rl[0])
+			var sub: PackedByteArray = buf.slice(i, i + size)
+			i += size
+			match field:
+				1: d["item_id"] = sub.get_string_from_utf8()
+				2: d["display_name"] = sub.get_string_from_utf8()
+				4: d["equip_slot"] = sub.get_string_from_utf8()
+		else:
+			break
+	return d
 
 ## LoginReply：ok=1(varint) token=2 username=3 account_id=4 reason=5（均为 string）。
 func _decode_login_reply(buf: PackedByteArray) -> Dictionary:
