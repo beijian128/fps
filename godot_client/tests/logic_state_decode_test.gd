@@ -14,10 +14,12 @@ func _init() -> void:
     _c = FpsClient.new()
     _c.logic_state_received.connect(_on_logic)
     _test_state_response()
+    _test_top_level_truncated()
+    _test_nested_truncated()
     _test_logic_error_mask()
     _test_purchase_encoding()
     _test_equip_encoding()
-    for name: String in ["state", "error", "purchase", "equip"]:
+    for name: String in ["state", "top_truncated", "nested_truncated", "error", "purchase", "equip"]:
         if not _done.has(name):
             _failures += 1
             printerr("FAIL: 用例 %s 没跑完" % name)
@@ -82,6 +84,36 @@ func _test_state_response() -> void:
     _check((_last_logic.get("items", []) as Array).size() == 2, "应有 2 个商品项")
     _check(int(_last_logic["items"][0]["owned_quantity"]) == 2, "rifle 数量应为 2")
     _done["state"] = true
+
+func _send_logic_payload(mid: int, route: String, payload: PackedByteArray) -> void:
+    _last_logic = {}
+    _c._pending[mid] = {"route": route, "at": 0.0}
+    var frame := PackedByteArray()
+    frame.append(_c.MSG_RESPONSE << 1)
+    frame.append_array(_c._varint(mid))
+    frame.append_array(payload)
+    _c._on_data(frame)
+
+func _test_top_level_truncated() -> void:
+    var payload := _f_varint(1, 1)
+    payload.append_array(_tag(2, _c.WIRE_LEN))
+    payload.append_array(_c._varint(5))
+    payload.append_array("ab".to_utf8_buffer())
+    _send_logic_payload(79, "logic.logic.state", payload)
+    _check(not bool(_last_logic.get("ok", true)), "截断顶层字段应回 ok=false")
+    _check(String(_last_logic.get("reason", "")) == "internal", "截断顶层字段应回 internal")
+    _done["top_truncated"] = true
+
+func _test_nested_truncated() -> void:
+    var item := _tag(1, _c.WIRE_LEN)
+    item.append_array(_c._varint(5))
+    item.append_array("ru".to_utf8_buffer())
+    var payload := _f_varint(1, 1)
+    payload.append_array(_f_bytes(4, item))
+    _send_logic_payload(80, "logic.logic.state", payload)
+    _check(not bool(_last_logic.get("ok", true)), "截断嵌套商品项应回 ok=false")
+    _check(String(_last_logic.get("reason", "")) == "internal", "截断嵌套商品项应回 internal")
+    _done["nested_truncated"] = true
 
 func _test_logic_error_mask() -> void:
     _last_logic = {}

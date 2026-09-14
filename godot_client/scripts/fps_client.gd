@@ -501,6 +501,26 @@ func _read_varint(buf: PackedByteArray, start: int) -> Array:
 		shift += 7
 	return [result, i]
 
+## 严格 varint 解码，返回 [值, 下一个字节下标, 是否合法]。
+## 与 _read_varint 分开是为了不改变已有解码器的容错行为；Logic decoder 要求
+## 截断的 varint 明确失败。
+func _read_varint_checked(buf: PackedByteArray, start: int) -> Array:
+	if start < 0 or start >= buf.size():
+		return [0, start, false]
+	var result := 0
+	var shift := 0
+	var i := start
+	while i < buf.size():
+		var b := buf[i]
+		i += 1
+		result |= (b & 0x7F) << shift
+		if (b & 0x80) == 0:
+			return [result, i, true]
+		shift += 7
+		if shift >= 64:
+			return [0, i, false]
+	return [0, i, false]
+
 ## 无符号 varint 编码（值均为非负：字段号、长度、id、bool）。
 func _varint(v: int) -> PackedByteArray:
 	var out := PackedByteArray()
@@ -689,7 +709,11 @@ func _on_response(data: PackedByteArray, is_err: bool) -> void:
 		_emit_request_failure(route, "internal")
 		return
 	if route.begins_with("logic."):
-		logic_state_received.emit(_decode_logic_state(payload))
+		var result := _decode_logic_state(payload)
+		if bool(result.get("_malformed", false)):
+			_emit_request_failure(route, "internal")
+		else:
+			logic_state_received.emit(result)
 		return
 	var reply := _decode_login_reply(payload)
 	if bool(reply.get("ok", false)):
@@ -725,25 +749,37 @@ func _decode_logic_state(buf: PackedByteArray) -> Dictionary:
 	}
 	var i := 0
 	while i < buf.size():
-		var tag: Array = _read_varint(buf, i)
+		var tag: Array = _read_varint_checked(buf, i)
+		if not bool(tag[2]):
+			return {"_malformed": true}
 		i = int(tag[1])
 		var field := int(tag[0]) >> 3
 		var wire := int(tag[0]) & 7
 		if wire == WIRE_VARINT:
-			var r: Array = _read_varint(buf, i)
+			var r: Array = _read_varint_checked(buf, i)
+			if not bool(r[2]):
+				return {"_malformed": true}
 			i = int(r[1])
 			match field:
 				1: d["ok"] = int(r[0]) != 0
 				3: d["coins"] = int(r[0])
 		elif wire == WIRE_LEN:
-			var rl: Array = _read_varint(buf, i)
+			var rl: Array = _read_varint_checked(buf, i)
+			if not bool(rl[2]):
+				return {"_malformed": true}
 			i = int(rl[1])
 			var size := int(rl[0])
+			if size < 0 or i + size > buf.size():
+				return {"_malformed": true}
 			var sub: PackedByteArray = buf.slice(i, i + size)
 			i += size
 			match field:
 				2: d["reason"] = sub.get_string_from_utf8()
-				4: d["items"].append(_decode_logic_shop_item(sub))
+				4:
+					var item: Dictionary = _decode_logic_shop_item(sub)
+					if bool(item.get("_malformed", false)):
+						return {"_malformed": true}
+					d["items"].append(item)
 				5: d["equipped_primary_weapon"] = sub.get_string_from_utf8()
 		else:
 			break
@@ -759,20 +795,28 @@ func _decode_logic_shop_item(buf: PackedByteArray) -> Dictionary:
 	}
 	var i := 0
 	while i < buf.size():
-		var tag: Array = _read_varint(buf, i)
+		var tag: Array = _read_varint_checked(buf, i)
+		if not bool(tag[2]):
+			return {"_malformed": true}
 		i = int(tag[1])
 		var field := int(tag[0]) >> 3
 		var wire := int(tag[0]) & 7
 		if wire == WIRE_VARINT:
-			var r: Array = _read_varint(buf, i)
+			var r: Array = _read_varint_checked(buf, i)
+			if not bool(r[2]):
+				return {"_malformed": true}
 			i = int(r[1])
 			match field:
 				3: d["price"] = int(r[0])
 				5: d["owned_quantity"] = int(r[0])
 		elif wire == WIRE_LEN:
-			var rl: Array = _read_varint(buf, i)
+			var rl: Array = _read_varint_checked(buf, i)
+			if not bool(rl[2]):
+				return {"_malformed": true}
 			i = int(rl[1])
 			var size := int(rl[0])
+			if size < 0 or i + size > buf.size():
+				return {"_malformed": true}
 			var sub: PackedByteArray = buf.slice(i, i + size)
 			i += size
 			match field:
