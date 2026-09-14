@@ -3,6 +3,7 @@ package logic
 import (
 	"context"
 	"errors"
+	"reflect"
 	"sync"
 	"testing"
 
@@ -460,7 +461,7 @@ func TestPurchaseConcurrentSameAccount(t *testing.T) {
 }
 
 func TestEquipSwitchAndUnequip(t *testing.T) {
-	env, _ := newLockedServiceTestEnv(t)
+	env, locks := newLockedServiceTestEnv(t)
 	ctx := context.Background()
 	if err := env.svc.EnsureProfile(ctx, "7"); err != nil {
 		t.Fatal(err)
@@ -472,18 +473,86 @@ func TestEquipSwitchAndUnequip(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	initialBag, ok, err := env.store.GetBag(ctx, 7)
+	if err != nil || !ok {
+		t.Fatalf("load initial bag: bag=%+v ok=%v err=%v", initialBag, ok, err)
+	}
+	initialQuantities := make(map[string]int64, len(initialBag.Items))
+	for _, item := range initialBag.Items {
+		initialQuantities[item.ItemID] = item.Quantity
+	}
+	if len(initialQuantities) != 2 || initialQuantities["rifle"] != 1 || initialQuantities["pistol"] != 1 {
+		t.Fatalf("unexpected initial quantities: %+v", initialQuantities)
+	}
+	assertPersistedBag := func(wantWeapon string) {
+		t.Helper()
+		bag, ok, err := env.store.GetBag(ctx, 7)
+		if err != nil || !ok {
+			t.Fatalf("load persisted bag: bag=%+v ok=%v err=%v", bag, ok, err)
+		}
+		if bag.EquippedPrimaryWeapon != wantWeapon {
+			t.Fatalf("persisted equipped weapon=%q want=%q", bag.EquippedPrimaryWeapon, wantWeapon)
+		}
+		if len(bag.Items) != len(initialQuantities) {
+			t.Fatalf("persisted item count=%d want=%d", len(bag.Items), len(initialQuantities))
+		}
+		for _, item := range bag.Items {
+			want, found := initialQuantities[item.ItemID]
+			if !found || item.Quantity != want {
+				t.Fatalf("persisted item %q quantity=%d want=%d", item.ItemID, item.Quantity, want)
+			}
+		}
+	}
+
+	beforeEquip := locks.Count()
 	state, err := env.svc.Equip(ctx, "7", "rifle")
 	if err != nil || state.EquippedPrimaryWeapon != "rifle" {
 		t.Fatalf("equip rifle: %+v err=%v", state, err)
 	}
+	if got := locks.Count(); got != beforeEquip+1 {
+		t.Fatalf("equip rifle lock count=%d want=%d", got, beforeEquip+1)
+	}
+	assertPersistedBag("rifle")
+
+	afterEquip := locks.Count()
+	state, err = env.svc.Equip(ctx, "7", "rifle")
+	if err != nil || state.EquippedPrimaryWeapon != "rifle" {
+		t.Fatalf("repeat equip rifle: %+v err=%v", state, err)
+	}
+	if got := locks.Count(); got != afterEquip {
+		t.Fatalf("repeat equip rifle acquired lock: count=%d want=%d", got, afterEquip)
+	}
+	assertPersistedBag("rifle")
+
+	beforeSwitch := locks.Count()
 	state, err = env.svc.Equip(ctx, "7", "pistol")
 	if err != nil || state.EquippedPrimaryWeapon != "pistol" {
 		t.Fatalf("switch pistol: %+v err=%v", state, err)
 	}
+	if got := locks.Count(); got != beforeSwitch+1 {
+		t.Fatalf("switch pistol lock count=%d want=%d", got, beforeSwitch+1)
+	}
+	assertPersistedBag("pistol")
+
+	beforeUnequip := locks.Count()
 	state, err = env.svc.Equip(ctx, "7", "")
 	if err != nil || state.EquippedPrimaryWeapon != "" {
 		t.Fatalf("unequip: %+v err=%v", state, err)
 	}
+	if got := locks.Count(); got != beforeUnequip+1 {
+		t.Fatalf("unequip lock count=%d want=%d", got, beforeUnequip+1)
+	}
+	assertPersistedBag("")
+
+	afterUnequip := locks.Count()
+	state, err = env.svc.Equip(ctx, "7", "")
+	if err != nil || state.EquippedPrimaryWeapon != "" {
+		t.Fatalf("repeat unequip: %+v err=%v", state, err)
+	}
+	if got := locks.Count(); got != afterUnequip {
+		t.Fatalf("repeat unequip acquired lock: count=%d want=%d", got, afterUnequip)
+	}
+	assertPersistedBag("")
 }
 
 func TestEquipRequiresOnlineProfile(t *testing.T) {
@@ -493,19 +562,36 @@ func TestEquipRequiresOnlineProfile(t *testing.T) {
 }
 
 func TestEquipRejectsInvalidWithoutWriting(t *testing.T) {
-	env, _ := newLockedServiceTestEnv(t)
+	env, locks := newLockedServiceTestEnv(t)
 	ctx := context.Background()
 	if err := env.svc.EnsureProfile(ctx, "7"); err != nil {
 		t.Fatal(err)
 	}
-	_, err := env.svc.Equip(ctx, "7", "rifle")
-	mustReason(t, err, ReasonNotOwned)
-	_, err = env.svc.Equip(ctx, "7", "rocket")
-	mustReason(t, err, ReasonItemNotFound)
-
 	if _, err := env.svc.Purchase(ctx, "7", "medkit", 1); err != nil {
 		t.Fatal(err)
 	}
+
+	beforeBag, ok, err := env.store.GetBag(ctx, 7)
+	if err != nil || !ok {
+		t.Fatalf("load bag before invalid equip calls: bag=%+v ok=%v err=%v", beforeBag, ok, err)
+	}
+	beforeLocks := locks.Count()
+
+	_, err = env.svc.Equip(ctx, "7", "rifle")
+	mustReason(t, err, ReasonNotOwned)
+	_, err = env.svc.Equip(ctx, "7", "rocket")
+	mustReason(t, err, ReasonItemNotFound)
 	_, err = env.svc.Equip(ctx, "7", "medkit")
 	mustReason(t, err, ReasonNotEquippable)
+
+	afterBag, ok, err := env.store.GetBag(ctx, 7)
+	if err != nil || !ok {
+		t.Fatalf("load bag after invalid equip calls: bag=%+v ok=%v err=%v", afterBag, ok, err)
+	}
+	if !reflect.DeepEqual(afterBag, beforeBag) {
+		t.Fatalf("invalid equip calls changed bag: before=%+v after=%+v", beforeBag, afterBag)
+	}
+	if got := locks.Count(); got != beforeLocks {
+		t.Fatalf("invalid equip calls acquired lock: count=%d want=%d", got, beforeLocks)
+	}
 }
