@@ -11,7 +11,7 @@
 7. 加/改一个**同步属性**：只动 `joltgo/sim/replicate.go`（`declareAttributes` 加一行 + 变更点 `rep.Set`）+ `sim/replicate_test.go`，**不需要**改 proto、生成码或客户端解码（见下）
 8. 改**协议结构**（增删消息 / route、改 Frame/Schema 字段号）：动 `joltgo/game/protos/game.proto`（重跑 `protoc --go_out` 重新生成）+ `joltgo/game/` + `joltgo/match/` + `joltgo/account/` + 同步改 `godot_client/scripts/fps_client.gd`（protobuf 编解码）
 9. 改**账号/登录/凭证**：动 `joltgo/account/`（`token.go` 纯函数 / `store.go` Redis / `component.go` handler）+ `joltgo/persist/`（账号 Hash）+ 客户端 `fps_client.gd`（Request/Response）与 `main.gd`（登录面板），跑 `go test ./account ./persist`
-10. 改**持久化模型**：改 `joltgo/persist/protos/*.proto`，跑 `joltgo/gen-redis.ps1`，不要手改 `.redis.go`；生成码与 `persist/store.go` 一起提交，跑 `go test ./persist ./account`
+10. 改**持久化模型**：账号改 `joltgo/persist/protos/account.proto`，玩家钱包/背包改 `joltgo/persist/protos/player/player.proto`；再跑 `joltgo/gen-redis.ps1`，不要手改 `.redis.go`；生成码与 `persist/store.go` / `persist/player.go` 一起提交，跑 `go test ./persist ./account ./logic`
 11. 改**会话归属 / 多节点行为**：动 `joltgo/online/` + `joltgo/gate/session.go`，跑 `go test ./online ./gate ./account ./match`
 
 ## 如何扩展一个功能
@@ -39,8 +39,8 @@
      从 ECS 世界独立推期望值，与 store 全量逐项比对）。所以**先补 `rep.Set`、再补断言**
 3. **客户端** `godot_client/scripts/`
    - 传输层：`fps_client.gd`（上行有 Notify 三条：`match.join`（空消息）/ `game.cmd`
-     （输入+射击+重置合并成一条）/ `game.resync`，以及 Request 三条：`account.register` /
-     `account.login` / `account.resume`；需要新消息时加一个 `send_xxx` 方法，注意 route
+     （输入+射击+重置合并成一条）/ `game.resync`，以及 Request 六条：`account.register` /
+     `account.login` / `account.resume` 与 `logic.state` / `logic.purchase` / `logic.equip`；需要新消息时加一个 `send_xxx` 方法，注意 route
      三段式 `server.service.method` 与服务端 handler 方法名小写对应；新消息要在 protobuf
      编解码函数里读写。**Request 要自己记 mid**，Response 帧里没有 route）
    - 世界状态：`world_store.gd` 按**属性名**累积；渲染层 `main.gd` / `body_entity.gd`
@@ -77,11 +77,12 @@
   实体 id 由物理桥发放并维护与 Jolt BodyID 的映射；每个对局实例各建一个 Jolt 世界
 - `joltgo/game/` 是对局实例层：`instance.go` 每局一个 goroutine 顺序执行；`component.go`
   的 handler 方法对应 route（三段式），只做协议 ↔ sim 翻译，不写玩法逻辑
-- `joltgo/gate/` / `joltgo/match/` / `joltgo/account/` 是分布式接入、匹配与账号层：
+- `joltgo/gate/` / `joltgo/match/` / `joltgo/account/` / `joltgo/logic/` 是分布式接入、匹配、账号与局外数据层：
   gate 只 AddRoute + 在会话绑定/断开时登记会话归属（`session.go`），match 从 Redis 队列
-  配对后 RPC game.create，account 管注册/登录/凭证轮换。账号 Hash 的生成模型与仓储在
-  `joltgo/persist/`；跨节点多命令临界区用 `distlock`，凭证/队列继续用 Redis 原子脚本。共享状态一律走 Redis
-  （`joltgo/kv/` 连接、`joltgo/online/` 会话归属、`match/queue.go` 队列、`persist/` 账号 Hash）
+  配对后 RPC game.create，account 管注册/登录/凭证轮换并触发 `logic.logic.online`，logic
+  管钱包、背包、商城与装备。账号和玩家 Hash 的生成模型与仓储在 `joltgo/persist/`；
+  跨节点多命令临界区用 `distlock`，凭证/队列继续用 Redis 原子脚本。共享状态一律走 Redis
+  （`joltgo/kv/` 连接、`joltgo/online/` 会话归属、`match/queue.go` 队列、`persist/` Hash）
 - **会话 UID = accountID**：身份由 account 服务签发，客户端不再自报。任何按 uid 索引的
   地方（game 实例注册表、push 目标、回局 fan-out）语义不变，只是那个字符串换了来源
 - `joltgo/third_party/pitaya/` 是内置第三方源码，不要在其上改业务代码；
@@ -94,8 +95,7 @@
   脏集，不 import `ecs`），`sim/replicate.go` 是唯一知道「ECS 组件 ↔ 属性名」映射的地方。
   属性名是扁平字符串（约定 `组件.字段`），加同步字段只动这一个文件；**漏写 `rep.Set`
   是静默失败**，由 `sim/replicate_test.go` 的 oracle 测试兜底
-- 帧的 wire 契约在 `game/protos/game.proto`（protobuf）；改 proto **字段定义**需重新生成
-  Go 码并同步改 Godot 客户端，但**新增同步属性不需要**。上行 route/字段契约见
+- 帧的 wire 契约在 `game/protos/game.proto`（protobuf）；改 proto **字段定义**需重新生成 `game.pb.go` 并同步改 `godot_client/scripts/fps_client.gd`；持久化 proto 则重新生成对应 Redis 包，但**新增同步属性不需要**。上行 route/字段契约见
   [API.md](API.md)（改动 `joltgo/game/`、`joltgo/match/` 时同步更新）
 - 场景地图只写 `sim/map.go` 的部件表：**只写半边**（带 `mirror: true` 的部件会自动
   补上绕 Y 轴旋转 180° 的孪生体），对称性由 `sim/map_test.go` 验证。舷梯参数
@@ -104,7 +104,7 @@
   时同步改 `godot_client/scripts/body_entity.gd` 的 `MATS` 表（编号只能追加）
 - 客户端 GDScript：避免从 Variant 推断类型（默认告警会被当错误处理）；
   节点实例化用 `preload` 而非 `class_name`（纯命令行运行不依赖编辑器导入的全局类缓存）
-- **持久化 schema 与客户端 wire schema 分开**：`persist/protos/*.proto` 只给 protoc-gen-redis 用；生成码必须输出到独立 Go 包，不能与 `game.pb.go` 同包（枚举/message 会重名）。
+- **持久化 schema 与客户端 wire schema 分开**：`persist/protos/account.proto` 与 `persist/protos/player/player.proto` 只给 protoc-gen-redis 用；生成码必须输出到独立 Go 包，不能与 `game.pb.go` 同包（枚举/message 会重名）。
 - **锁边界**：只有跨多个 Redis 命令、且语义上需要互斥的业务提交才加 `distlock`；SETNX/Lua/ZSET 单命令已原子时不要套锁。
 - 新增 gitignored 的产物时，同步更新根目录 `.gitignore`
 
@@ -113,12 +113,12 @@
 - 服务端单元测试（不依赖 cgo / Jolt DLL，直接跑；Redis 用例走 miniredis，不需要真 Redis）：
 
   ```bash
-  cd joltgo && go test ./account ./persist ./online ./kv ./gate ./match ./ecs ./sim ./replication
+  cd joltgo && go test ./account ./persist ./logic ./online ./kv ./gate ./match ./ecs ./sim ./replication
   ```
 
-  `account` 覆盖凭证生成/校验、bcrypt、Redis 存储与轮换、三个 handler 的分支；`persist` 覆盖生成 Hash 往返、schema 版本与账号仓储；
-  `online` / `kv` 覆盖会话归属读写与连接；`gate` 覆盖会话钩子与 bindgame remote；
-  `match` 覆盖 Redis 队列（配对原子性、超时兜底）与开局链路；
+  `account` 覆盖凭证生成/校验、bcrypt、Redis 存储与轮换、三个 handler 的分支；`persist` 覆盖账号与玩家 Hash 往返、schema 版本；
+  `logic` 覆盖档案初始化、购买 / 装备与锁内补偿；`online` / `kv` 覆盖会话归属读写与连接；
+  `gate` 覆盖会话钩子与 bindgame remote；`match` 覆盖 Redis 队列（配对原子性、超时兜底）与开局链路；
   `ecs` 覆盖组件存储语义；`replication` 覆盖同步层（终值表 / 脏集去重 / full 帧不推进
   增量基线 / destroy 清基线 / 帧编码）；`sim` 用 fake 物理（只做运动学积分 + 地板钳制）
   覆盖各系统行为：初始同步属性与角色/重力配置、射击校验（归一化 + LinearCast/摩擦配置）、
@@ -131,7 +131,7 @@
   `joltgo/` 下已构建）：
 
   ```bash
-  cd joltgo && PATH="$PWD:$PATH" go vet ./gate ./account ./persist ./kv ./online ./match ./game ./physics ./sim ./replication ./ecs
+  cd joltgo && PATH="$PWD:$PATH" go vet ./gate ./account ./logic ./persist ./kv ./online ./match ./game ./physics ./sim ./replication ./ecs
   PATH="$PWD:$PATH" go test ./...
   ```
 
@@ -154,7 +154,7 @@
 
 ### 服务端
 
-- 看服务日志：gate/account/match/game 四进程各自有日志（`deploy/start-all.ps1` 写 `deploy/*.log`），
+- 看服务日志：gate/account/logic/match/game 五进程各自有日志（`deploy/start-all.ps1` 写 `deploy/*.log`），
   pitaya 默认 logrus 会打印 handler 注册、服务发现、RPC 等日志
 - 看 Redis 数据：`deploy/redis-cli.exe` —— 账号 Hash `acct:1:<id>:0`、凭证 `sess:*`、
   会话归属 `online:*`、匹配队列 `match:queue`（ZSET）
@@ -172,12 +172,15 @@
   Godot_v4.7.2-stable_win64_console.exe --headless --path godot_client --script res://tests/login_reply_decode_test.gd
   Godot_v4.7.2-stable_win64_console.exe --headless --path godot_client --script res://tests/game_frame_test.gd
   Godot_v4.7.2-stable_win64_console.exe --headless --path godot_client --script res://tests/reconnect_cleanup_test.gd
+  Godot_v4.7.2-stable_win64_console.exe --headless --path godot_client --script res://tests/logic_state_decode_test.gd
+  Godot_v4.7.2-stable_win64_console.exe --headless --path godot_client --script res://tests/logic_panel_test.gd
   ```
 
   分别覆盖：世界存储语义（full / removed / destroy / 未知属性）、`Frame`/`Schema` 解码、
   Response 帧（LEB128 mid、无 route、errorMask）与 `LoginReply` 解码、
-  渲染路径（喂合成帧，不碰 WebSocket）、断线清理本地世界与插值状态。
-- 冒烟测试（需要分布式服务端已启动：etcd + NATS + redis + gate/account/match/game 四进程）：
+  渲染路径（喂合成帧，不碰 WebSocket）、断线清理本地世界与插值状态、
+  `LogicStateReply` 解码与商城/背包面板。
+- 冒烟测试（需要分布式服务端已启动：etcd + NATS + redis + gate/account/logic/match/game 五进程）：
 
   ```bash
   Godot_v4.7.2-stable_win64_console.exe --headless \
@@ -186,9 +189,12 @@
     --path godot_client --script res://tests/ws_smoke.gd
   Godot_v4.7.2-stable_win64_console.exe --headless \
     --path godot_client --script res://tests/rejoin_smoke.gd
+  Godot_v4.7.2-stable_win64_console.exe --headless \
+    --path godot_client --script res://tests/logic_smoke.gd
   ```
 
   `login_smoke` 验证「注册 → LoginReply(token) → 断线 → resume → onMatched」整条链路。
+  `logic_smoke` 验证注册后初始 1000 金币、购买 rifle 与装备成功。
   `ws_smoke` 验证登录后匹配 + 20 Hz 增量帧推送，预期输出 `SMOKE matched` +
   `SMOKE unique_steps=80 span=79 elapsed_ms=4000` 左右。`rejoin_smoke` 验证断线重连回到
   **同一 match_id + 同一 player_idx** 并收到 full 帧——它是新协议下唯一端到端验证
@@ -238,3 +244,11 @@
 - `JoltPhysics/` 是 gitignored 的第三方依赖，升级它只需在对应目录 `git pull`
 - 提交前运行一遍 `build.ps1` 确认能编译通过；二进制产物不应提交（已 gitignore）
 - 许可证目前未指定，如需开源请补 `LICENSE` 文件
+
+## Logic / 钱包 / 背包 / 商城改动 runbook
+
+- 改局外业务规则、商品目录、购买、装备或补偿逻辑：修改 `joltgo/logic/`，并同步 `godot_client/scripts/fps_client.gd` / `main.gd` 的调用或面板；先跑 `go test -count=1 ./logic ./persist`，再跑 `logic_state_decode_test.gd`、`logic_panel_test.gd`。
+- 改玩家数据模型：先改 `joltgo/persist/protos/player/player.proto`，再运行 `joltgo/gen-redis.ps1`，提交生成的 `player.redis.go`，最后更新 `joltgo/persist/player.go` 与调用方。不要手改生成文件。
+- Logic 节点是无状态的，新增节点不应引入进程内玩家状态；跨请求状态必须进入 Redis，并继续遵守账号级锁、余额预检查、锁内复查与失败补偿边界。
+- 改协议结构（新增/删除 route 或修改 `game.proto` 字段号/类型）：重生成 `joltgo/game/protos/game.pb.go`，同步 `joltgo/game/`、`joltgo/match/`、`joltgo/account/` 与 `godot_client/scripts/fps_client.gd`，再跑协议回归测试。仅改同步属性不需要改 proto。
+- 改登录上线链路：同时检查 account 的 `logic.logic.online` RPC、logic 的 `EnsureProfile`、Redis player key 与 `login_smoke` / `logic_smoke`。

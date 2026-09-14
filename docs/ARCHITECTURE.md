@@ -16,7 +16,8 @@
 │    gate.go：AddRoute 路由                     │
 │      account.account.* → account 节点（轮询） │
 │      match.match.join → match 节点（轮询）    │
-│      game.game.* → 定点 game 节点（会话数据） │
+│      game.game.* → 定点 game 节点（会话数据）
+│      logic.logic.* → 随机 logic 节点（共享 Redis） │
 │    session.go：会话绑定/断开 → 写/清在线登记  │
 │      + remote gate.gate.bindgame（供 match 调）│
 └───┬──────────┬──────────────────┬────────────┘
@@ -39,12 +40,16 @@
 │  Redis（共享状态）  │      ┌──────────▼───────────────┐
 │  账号 Hash / 凭证   │      │  Jolt Physics（libjolt_c.dll）│
 │  会话归属 / 匹配队列│      └──────────────────────────┘
+│  钱包 / 背包 Hash   │
 └────────────────────┘
+
+gate ── logic.logic.*（随机） ──▶ logic ──钱包/背包 Hash──▶ Redis
+account ── logic.logic.online（随机） ──▶ logic ──EnsureProfile──▶ Redis
 ```
 
-四个服务由**单二进制** `joltgo.exe` 用 `-type gate|account|match|game` 区分角色，经
+五个服务由**单二进制** `joltgo.exe` 用 `-type gate|account|logic|match|game` 区分角色，经
 **etcd**（服务发现）+ **NATS**（RPC）互相通信，共享状态放 **Redis**（`-redis`，默认
-`localhost:6379`），见 `joltgo/deploy/`。`game` 是纯计算节点，不连 Redis。
+`localhost:6379`），见 `joltgo/deploy/`。`logic` 读写钱包/背包，`game` 是纯计算节点，不连 Redis。
 
 ## 持久化与分布式锁
 
@@ -52,8 +57,7 @@
 
 - **go-redis**（`kv.Open`）：凭证轮换、会话归属、匹配队列。这些状态由 Lua/SETNX/ZSET
   单命令原子语义直接管理。
-- **redigo 池 + protoc-gen-redis**（`kv.OpenRedigo` / `persist/`）：结构化账号 Hash。模型定义在
-  `persist/protos/account.proto`，生成文件 `account.redis.go` 由固定版本的
+- **redigo 池 + protoc-gen-redis**（`kv.OpenRedigo` / `persist/`）：结构化账号与玩家 Hash。账号模型定义在 `persist/protos/account.proto`，玩家模型定义在 `persist/protos/player/player.proto`；两套生成包相互独立。账号生成文件 `account.redis.go` 由固定版本的
   [protoc-gen-redis](https://github.com/beijian128/protoc-gen-redis) 产出；key 固定为
   `acct:1:<accountID>:0`，字段号来自 proto tag，并带 `schema_version`。
 - **distlock**（源码固定提交内置在 `third_party/distlock/`）：账号注册的「占名 → 分配 ID → 写 Hash → 落名字映射」是多命令业务提交，
@@ -485,3 +489,13 @@ Jolt 的 Release 构建定义 `NDEBUG`、`JPH_DEBUG_RENDERER`、`JPH_PROFILE_ENA
   远端玩家渲染 avatar。
 - `FpsClient`（传输层）与渲染层通过信号解耦（`frame_received` / `matched_received` /
   `connection_changed`）。
+
+## 局外数据与 logic
+
+`logic` 是无状态 backend。gate 对 `logic.logic.state`、`logic.logic.purchase` 与 `logic.logic.equip` 做随机节点路由，因此任意 logic 节点都可以处理同一账号；真实状态只在 Redis。账号登录/注册/resume 进入成功路径时，account 先通过 `logic.logic.online` 向随机 logic 节点发送上线事件，logic 确保钱包和背包档案存在；该 RPC 失败会中止登录并返回 `internal`，此后才轮换 token、绑定会话，所以旧 token 和已有会话不会被破坏。
+
+钱包和背包分别由 `persist/protos/player/player.proto` 生成的独立包持久化为 `REDB#2:<accountID>:0` 与 `REDB#1:<accountID>:0`。新账号档案的初始钱包为 1000 金币，商城目录由 logic 内置，当前包含 rifle、pistol、shotgun 与 medkit。
+
+购买流程先做余额与商品的快速检查，再在账号级 Redis 分布式锁（`user:lock:<accountID>`）内重新读取钱包和背包并提交；余额不足在锁外返回，不获取账号写锁。钱包扣款成功而背包写入失败时，logic 使用补偿写回钱包；锁丢失也走补偿路径。购买接口没有请求幂等键，客户端不得自动重试，否则可能重复购买。装备/卸下只允许已拥有且可装备的物品；medkit 只能购买和叠加，不能装备。
+
+`game` 不读取背包与装备，也不把局外物品注入对局同步帧；对局继续只依赖会话身份、输入和服务端物理模拟。

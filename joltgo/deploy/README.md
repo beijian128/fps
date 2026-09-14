@@ -1,23 +1,23 @@
 # deploy —— 本地集群基础设施
 
-分布式服务端（gate / account / match / game）需要三个外部中间件：
+分布式服务端（gate / account / logic / match / game）需要三个外部中间件：
 
 - **etcd**：服务发现（各服务注册自己，互相发现）—— 监听 `localhost:2379`
 - **NATS**：服务间 RPC 总线 —— 监听 `localhost:4222`
-- **Redis**：共享状态（账号与凭证、会话归属、匹配队列）—— 监听 `localhost:6379`
+- **Redis**：共享状态（账号与凭证、会话归属、匹配队列、钱包与背包）—— 监听 `localhost:6379`
 
 前两个是 pitaya Cluster 模式的硬依赖（etcd 做服务发现，NATS 做 RPC），Redis 是本项目自己的
 共享存储。生产环境用容器/K8s 部署；本地调试可直接用本目录下编译好的 `etcd.exe` /
 `nats-server.exe` / `redis-server.exe`。
 
 > ⚠️ **etcd-data 每次清空，redis-data 永不清空。** 两者的对待方式**相反**，把 etcd 的习惯
-> 套到 Redis 上会把所有玩家账号删光。理由见下方「etcd-data 清、redis-data 不清」。
+> 套到 Redis 上会把所有账号与局外进度删光。理由见下方「etcd-data 清、redis-data 不清」。
 
 ## 一键启动（PowerShell）
 
 ```powershell
 .\start-infra.ps1          # 起 etcd + nats + redis（先停旧 etcd 并清空 etcd-data；nats/redis 已在跑则沿用）
-.\start-all.ps1            # start-infra + gate / account / match / game 四进程
+.\start-all.ps1            # start-infra + gate / account / logic / match / game 五进程
 .\stop-infra.ps1           # 全部停掉（等到端口真正释放再返回；不删任何数据目录）
 ```
 
@@ -78,26 +78,27 @@ volumes:
   redis-data:
 ```
 
-## 启动服务端（四个进程）
+## 启动服务端（五个进程）
 
-先起基础设施，再起四个服务（单二进制按 `-type` 区分角色）：
+先起基础设施，再起五个服务（单二进制按 `-type` 区分角色）：
 
 ```powershell
 cd joltgo
 .\joltgo.exe -type gate      # frontend，监听 ws://localhost:8080
 .\joltgo.exe -type account   # 账号注册/登录/凭证恢复
+.\joltgo.exe -type logic     # 玩家档案 / 钱包 / 背包 / 商城 / 装备
 .\joltgo.exe -type match     # 匹配服务
 .\joltgo.exe -type game      # 游戏逻辑（对局实例）
 ```
 
-Redis 地址由 `-redis`（默认 `localhost:6379`）指定。`gate` / `account` / `match` 启动时会
+Redis 地址由 `-redis`（默认 `localhost:6379`）指定。`gate` / `account` / `logic` / `match` 启动时会
 Ping 一次 Redis，**连不上就直接退出**（早失败比运行中途才暴露好排查）；`game` 是纯计算节点，
 不碰 Redis，也就不会被 Redis 故障拖着起不来。因此 `start-infra.ps1` 起完 redis 会等端口真的
-在监听再返回 —— 不等的话后面三个进程会稳定地「起来一下就没了」。
+在监听再返回 —— 不等的话后面四个进程会稳定地「起来一下就没了」。
 
-每个进程各自注册到 etcd，通过 NATS 互相 RPC。`start-all.ps1` 把四个角色的日志分别写到
-`gate.log` / `account.log` / `match.log` / `game.log` —— **pitaya 的日志走 stderr 而不是
-stdout**，所以这四个对应的是 `-RedirectStandardError`（stdout 另存为同名的 `*.out.log`，基本
+每个进程各自注册到 etcd，通过 NATS 互相 RPC。`start-all.ps1` 把五个角色的日志分别写到
+`gate.log` / `account.log` / `logic.log` / `match.log` / `game.log` —— **pitaya 的日志走 stderr 而不是
+stdout**，所以这五个对应的是 `-RedirectStandardError`（stdout 另存为同名的 `*.out.log`，基本
 为空；两个流不能指向同一个文件，各自从头写会互相覆盖）。排查问题时 `tail -f deploy/game.log`
 即可；日志是 debug 级别、涨得很快（几分钟就 ~10 MB）且不轮转，长时间跑记得清一下。
 
@@ -108,7 +109,7 @@ stdout**，所以这四个对应的是 `-RedirectStandardError`（stdout 另存�
 | 目录 | 内容 | 启动时 | 清掉的后果 |
 | --- | --- | --- | --- |
 | `etcd-data` | 服务注册（瞬时状态） | **每次清空** | 无害，各进程会重新注册 |
-| `redis-data` | 账号、密码哈希、凭证、会话归属 | **永不清空** | 所有玩家账号消失，谁都登不进来 |
+| `redis-data` | 账号、密码哈希、凭证、会话归属、玩家钱包与背包 | **永不清空** | 所有账号与局外进度消失，谁都登不进来 |
 
 `redis-server` 用 `--appendonly yes` 启动（AOF）。不开的话默认只有 RDB 定时快照，
 `stop-infra.ps1` 那种强杀会丢掉最近几分钟的注册 —— 表现为「刚注册的账号重启后登不上，
@@ -152,3 +153,9 @@ etcd 的租约倒计时**只在 etcd 进程运行期间走**：重启时它把�
 etcd 里只有服务注册这类临时数据，所以本地每次启动直接推倒重来，`start-infra.ps1` 会先停掉
 旧 etcd（不停掉的话新 etcd 会因端口被占而静默退出，清空就白做了）再清目录。生产环境请改用
 另外两条：把心跳 TTL 从默认 60s 调小，并给选节点逻辑加重试与回退（见 `match/match.go`）。
+
+## Redis 中的玩家局外数据
+
+除账号与会话数据外，logic 使用 `persist/protos/player/` 生成的独立 Redis Hash：`REDB#1:<accountID>:0` 保存背包与装备，`REDB#2:<accountID>:0` 保存钱包金币。`redis-data` **不要清空**；删除它不仅会删除账号，也会删除玩家的金币、物品与装备进度。
+
+`logic` 是无状态节点。客户端经 gate 随机访问 logic；account 在登录/注册/resume 的成功路径中先通过 `logic.logic.online` 确保新账号拥有初始 1000 金币的钱包和空背包，RPC 失败则中止登录且不轮换 token、不绑定会话。购买不是请求幂等操作，客户端不得自动重试；具体错误码和并发/补偿边界见 `../../docs/API.md` 与 `../../docs/ARCHITECTURE.md`。

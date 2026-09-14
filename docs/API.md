@@ -1,7 +1,7 @@
 # 网络协议
 
 客户端只连一个 WebSocket 端点：`ws://localhost:8080/`（gate 服务）。服务端是
-**分布式四服务**（gate / account / match / game），客户端只感知 route，不感知后端节点分布。
+**分布式五服务**（gate / account / logic / match / game），客户端只感知 route，不感知后端节点分布。
 传输走 **pitaya 的 pomelo 帧格式**（二进制），payload 用 **protobuf** 序列化
 （schema 见 `joltgo/game/protos/game.proto`）。
 
@@ -63,6 +63,9 @@ Response： flag (1B) ─ mid (LEB128 变长) ─ protobuf payload
 | `account.account.register` | Request | 客户端 → account | `RegisterMsg` → `LoginReply` |
 | `account.account.login` | Request | 客户端 → account | `LoginMsg` → `LoginReply` |
 | `account.account.resume` | Request | 客户端 → account | `ResumeMsg` → `LoginReply` |
+| `logic.logic.state` | Request | 客户端 → logic（随机） | `LogicStateMsg` → `LogicStateReply` |
+| `logic.logic.purchase` | Request | 客户端 → logic（随机） | `PurchaseMsg` → `LogicStateReply` |
+| `logic.logic.equip` | Request | 客户端 → logic（随机） | `EquipMsg` → `LogicStateReply` |
 | `match.match.join` | Notify | 客户端 → match | `JoinMsg`（空） |
 | `game.game.cmd` | Notify | 客户端 → game | `CommandMsg` |
 | `game.game.resync` | Notify | 客户端 → game | 空 |
@@ -71,6 +74,7 @@ Response： flag (1B) ─ mid (LEB128 变长) ─ protobuf payload
 | `game.game.create` | RPC | match → game | `CreateGameMsg` → `CreateGameReply` |
 | `game.game.rejoin` | RPC | match → game | `RejoinMsg` → `RejoinReply` |
 | `gate.gate.bindgame` | RPC | match → gate | `BindGameMsg` → `BindGameReply` |
+| `logic.logic.online` | RPC | account → logic（随机） | `UserOnlineMsg` → `UserOnlineReply` |
 | `gate.sys.kick` | RPC | account → gate | pitaya 内置 `KickMsg` → `KickAnswer` |
 
 `gate.gate.bindgame` 注册用的是 `RegisterRemote` 而不是 `Register`，所以它只在 remote 表里、
@@ -88,8 +92,9 @@ Response： flag (1B) ─ mid (LEB128 变长) ─ protobuf payload
    ```
 3. 客户端发 `HandshakeAck`（data `{"sys":{},"user":{}}`），会话进入 Working 状态
 4. **登录**（Request/Response）：本地有凭证就发 `account.account.resume`，否则等玩家在登录面板上
-   选择 `account.account.register` 或 `.login`。服务端回 `LoginReply`；`ok=true` 时会话已被
-   `Bind` 到账号 ID，客户端保存 `token` 备下次免登录
+   选择 `account.account.register` 或 `.login`。成功路径由 account 先 RPC `logic.logic.online`
+   创建/确认玩家档案，再轮换 token 并 `Bind` 会话，最后回 `LoginReply.ok=true`；客户端保存 token
+   备下次免登录。这个 RPC 失败会返回 `reason=internal`，不会轮换 token 或绑定会话
 5. 拿到 `LoginReply.ok=true` **之后**才发 `match.match.join` 进入匹配队列。
    **未登录不得发 join** —— 会话没有 uid，`match.join` 会被服务端直接忽略（没有任何应答），
    玩家会永远卡在「正在匹配…」
@@ -334,3 +339,41 @@ account → gate 的踢人用的是 pitaya 内置的 `gate.sys.kick`（`KickMsg`
   两人的出生点是地图两端（绕 Y 轴 180° 对称，完全等价）
 - 玩家不可被动态刚体推动（不可被挤开；服务端游戏规则：sim 通过
   `SetCharacterDynamicPush(false)` 配置，包装层只暴露物理开关）
+
+## Logic 局外协议
+
+```proto
+message LogicStateMsg {}
+
+message PurchaseMsg {
+  string item_id = 1;
+  int32 quantity = 2;
+}
+
+message EquipMsg {
+  string item_id = 1; // 空字符串表示卸下当前主武器
+}
+
+message UserOnlineMsg { string account_id = 1; }
+message UserOnlineReply { bool ok = 1; string reason = 2; }
+
+message LogicShopItem {
+  string item_id = 1;
+  string display_name = 2;
+  int64 price = 3;
+  string equip_slot = 4;
+  int64 owned_quantity = 5;
+}
+
+message LogicStateReply {
+  bool ok = 1;
+  string reason = 2;
+  int64 coins = 3;
+  repeated LogicShopItem items = 4;
+  string equipped_primary_weapon = 5;
+}
+```
+
+Logic 错误码为：`bad_quantity`（数量不在 1–99）、`item_not_found`、`insufficient_funds`、`not_owned`、`not_equippable`、`busy`、`unauthenticated`、`profile_missing`、`internal`。登录/注册/resume 的成功顺序是：account 验证身份或创建账号 → RPC `logic.logic.online` → logic 确保 `REDB#1` 背包与 `REDB#2` 钱包存在 → account 轮换 token → 绑定会话 → 返回 `LoginReply.ok=true`。上线 RPC 失败时 account 返回 `reason=internal`，不轮换 token、不绑定会话；已有会话和旧 token 保持不变。
+
+`logic.logic.purchase` 没有请求幂等键。客户端**不得自动重试购买请求**；网络超时不能区分“未执行”和“已提交”，应由用户显式决定是否再次购买。

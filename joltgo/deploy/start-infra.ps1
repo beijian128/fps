@@ -62,9 +62,9 @@ if (Get-NetTCPConnection -LocalPort $redisPort -State Listen -ErrorAction Silent
     '--dir', $redisData,
     '--appendonly', 'yes'
   ) -WindowStyle Hidden
-  # 必须等到端口真的在监听再返回：gate / account / match 启动时会 Ping Redis，.
+  # 必须等到端口真的在监听再返回：gate / account / logic / match 启动时会 Ping Redis，.
   # 连不上就 log.Fatalf 直接退出（见 main.go 的 run）。Start-Process 立刻返回，.
-  # 不等的话 start-all 紧接着起的三个进程会稳定地「起来一下就没了」.
+  # 不等的话 start-all 紧接着起的四个进程会稳定地「起来一下就没了」.
   $deadline = (Get-Date).AddSeconds(10)
   while (-not (Get-NetTCPConnection -LocalPort $redisPort -State Listen -ErrorAction SilentlyContinue)) {
     if ((Get-Date) -ge $deadline) { throw "redis-server did not listen on $redisPort within 10s" }
