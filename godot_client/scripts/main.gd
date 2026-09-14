@@ -105,6 +105,7 @@ var _logic_coins: Label
 var _logic_status: Label
 var _logic_items_box: VBoxContainer
 var _logic_busy := false
+var _logic_authenticated := false
 var _logic_state := {
 	"ok": false,
 	"coins": 0,
@@ -148,6 +149,12 @@ func _on_connection(connected: bool) -> void:
 		conn_label.text = "正在连接服务器…"
 		conn_label.visible = true
 		_matched = false
+		_logic_busy = false
+		_logic_authenticated = false
+		if _logic_status != null:
+			_logic_status.text = ""
+		if _logic_panel != null:
+			_logic_panel.visible = false
 		# 断线后重置帧可能永远不会到达，闩锁留着会误静音重连后第一次真实销毁反馈。
 		_reset_pending = false
 		_store.clear()
@@ -252,7 +259,8 @@ func _unhandled_input(event: InputEvent) -> void:
 	if _login_panel != null and _login_panel.visible:
 		return  # 登录面板上的点击归面板，不该当成「进入游戏」
 	if event is InputEventKey and event.pressed and event.keycode == KEY_B:
-		_toggle_logic_panel()
+		if _logic_authenticated:
+			_toggle_logic_panel()
 		return
 	if _logic_panel != null and _logic_panel.visible:
 		return
@@ -877,8 +885,11 @@ func _build_logic_panel() -> void:
 func _toggle_logic_panel() -> void:
 	if _logic_panel == null:
 		return
-	_logic_panel.visible = not _logic_panel.visible
-	if _logic_panel.visible:
+	var opening := not _logic_panel.visible
+	if opening and not _logic_authenticated:
+		return
+	_logic_panel.visible = opening
+	if opening:
 		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 		if not _logic_busy:
 			_logic_busy = true
@@ -1092,11 +1103,13 @@ func _reason_text(reason: String) -> String:
 ## _on_login_result 登录/注册/resume 的统一回调。
 func _on_login_result(result: Dictionary) -> void:
 	if bool(result.get("ok", false)):
+		_logic_authenticated = true
 		_show_login_panel(false, "")
 		conn_label.text = "正在匹配…"
 		conn_label.visible = true
 		fps_client.send_match_join()
 	else:
+		_logic_authenticated = false
 		var reason := String(result.get("reason", ""))
 		if reason == "no_token":
 			# 没登录过：安静地显示面板，不报错。
