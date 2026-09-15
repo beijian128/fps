@@ -26,6 +26,7 @@ func (noopLockFactory) New(uint64) Lock { return noopLock{} }
 type serviceTestEnv struct {
 	svc   *Service
 	store *persist.PlayerStore
+	mr    *miniredis.Miniredis
 }
 
 func newServiceTestEnv(t *testing.T) *serviceTestEnv {
@@ -40,6 +41,7 @@ func newServiceTestEnv(t *testing.T) *serviceTestEnv {
 	return &serviceTestEnv{
 		svc:   NewService(store, MustDefaultCatalog(), noopLockFactory{}),
 		store: store,
+		mr:    mr,
 	}
 }
 
@@ -108,7 +110,7 @@ func newLockedServiceTestEnv(t *testing.T) (*serviceTestEnv, *countingLockFactor
 	t.Cleanup(func() { _ = pool.Close(); _ = rdb.Close() })
 	store := persist.NewPlayerStore(pool)
 	locks := &countingLockFactory{inner: NewRedisLockFactory(rdb)}
-	return &serviceTestEnv{svc: NewService(store, MustDefaultCatalog(), locks), store: store}, locks
+	return &serviceTestEnv{svc: NewService(store, MustDefaultCatalog(), locks), store: store, mr: mr}, locks
 }
 
 func TestEnsureProfileIsIdempotent(t *testing.T) {

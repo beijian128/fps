@@ -61,3 +61,38 @@ func (c *Component) Equip(ctx context.Context, msg *protos.EquipMsg) (*protos.Lo
 	state, err := c.service.Equip(ctx, c.boundAccount(ctx), msg.ItemId)
 	return stateReply(state, err), nil
 }
+
+// Profile 是客户端请求 handler（route "logic.profile"）：个人档案 + 最近对局历史。
+// 身份只来自会话绑定，客户端不能自报 uid。
+func (c *Component) Profile(ctx context.Context, _ *protos.PlayerProfileMsg) (*protos.PlayerProfileReply, error) {
+	profile, err := c.service.Profile(ctx, c.boundAccount(ctx))
+	if err != nil {
+		return &protos.PlayerProfileReply{Ok: false, Reason: ReasonOf(err)}, nil
+	}
+	reply := &protos.PlayerProfileReply{
+		Ok:             true,
+		Level:          Level(profile.XP),
+		Xp:             profile.XP,
+		XpIntoLevel:    XPIntoLevel(profile.XP),
+		XpForNextLevel: XPForNextLevel(),
+		Kills:          profile.Kills,
+		Deaths:         profile.Deaths,
+		Matches:        profile.Matches,
+		Wins:           profile.Wins,
+		Losses:         profile.Losses,
+		RecentMatches:  make([]*protos.MatchRecord, 0, len(profile.Recent)),
+	}
+	for _, rec := range profile.Recent {
+		reply.RecentMatches = append(reply.RecentMatches, &protos.MatchRecord{
+			MatchId:         rec.MatchID,
+			Won:             rec.Won,
+			Kills:           rec.Kills,
+			Deaths:          rec.Deaths,
+			OpponentKills:   rec.OpponentKills,
+			DurationSeconds: rec.DurationSeconds,
+			OpponentName:    rec.OpponentName,
+			EndedAt:         rec.EndedAt,
+		})
+	}
+	return reply, nil
+}

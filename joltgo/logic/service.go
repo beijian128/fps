@@ -20,6 +20,9 @@ const (
 	ReasonUnauthenticated  = "unauthenticated"
 	ReasonProfileMissing   = "profile_missing"
 	ReasonInternal         = "internal"
+	// ReasonNotEnoughPlayers 表示结算上报收到了，但槽位不齐（没有两名真实玩家），
+	// 按规则不入账。兜底单人局已删除，这条是防御。
+	ReasonNotEnoughPlayers = "not_enough_players"
 )
 
 type ReasonError struct {
@@ -49,6 +52,13 @@ type Store interface {
 	GetBag(context.Context, uint64) (persist.PlayerBag, bool, error)
 	SaveBag(context.Context, uint64, persist.PlayerBag) error
 	DeleteBag(context.Context, uint64) error
+	// 玩家档案（累计战绩）与最近对局历史
+	GetStats(context.Context, uint64) (persist.PlayerStats, bool, error)
+	SaveStats(context.Context, uint64, persist.PlayerStats) error
+	AddStats(context.Context, uint64, persist.PlayerStatsDelta) error
+	AppendMatchRecord(context.Context, uint64, persist.PlayerMatchRecord) error
+	ListMatchRecords(context.Context, uint64, int) ([]persist.PlayerMatchRecord, error)
+	UsernameByID(context.Context, uint64) (string, bool, error)
 }
 
 type Lock interface {
@@ -111,6 +121,15 @@ func (s *Service) EnsureProfile(ctx context.Context, accountID string) error {
 		return err
 	}
 	if hasWallet && hasBag {
+		// 存量账号（redis-data 永不清空）只有钱包与背包，没有档案行：登录建档时
+		// 顺带补一份零值档案，个人页就不会读到 profile_missing。
+		if _, hasStats, err := s.store.GetStats(ctx, id); err != nil {
+			return err
+		} else if !hasStats {
+			if err := s.store.SaveStats(ctx, id, persist.PlayerStats{}); err != nil {
+				return err
+			}
+		}
 		return nil
 	}
 
@@ -149,6 +168,16 @@ func (s *Service) EnsureProfile(ctx context.Context, accountID string) error {
 						log.Printf("logic: compensate wallet for account %d: %v", id, delErr)
 					}
 				}
+				return err
+			}
+		}
+		if _, statsExists, err := s.store.GetStats(ctx, id); err != nil {
+			return err
+		} else if !statsExists {
+			if lock.IsLost() {
+				return errLockLost
+			}
+			if err := s.store.SaveStats(ctx, id, persist.PlayerStats{}); err != nil {
 				return err
 			}
 		}
@@ -407,4 +436,123 @@ func (s *Service) Equip(ctx context.Context, accountID, itemID string) (State, e
 		return State{}, err
 	}
 	return out, nil
+}
+
+// Profile 是个人信息页要的一份档案快照：累计统计 + 最近对局历史。
+type Profile struct {
+	XP      int64
+	Kills   int32
+	Deaths  int32
+	Matches int32
+	Wins    int32
+	Losses  int32
+	Recent  []persist.PlayerMatchRecord
+}
+
+// MatchSlot 是一局里单个槽位的战绩（下标即 player_idx）。
+type MatchSlot struct {
+	UID    string
+	Kills  int32
+	Deaths int32
+}
+
+// MatchResult 是一局的结算结果，由 game 在对局结束时上报。
+type MatchResult struct {
+	MatchID         string
+	Slots           []MatchSlot
+	WinnerSlot      int32
+	DurationSeconds int32
+}
+
+// Profile 读取玩家档案。存量账号没有档案行（redis-data 永不清空，老账号一定缺），
+// 所以缺行要**就地补建零值档案**再返回，而不是报 profile_missing。
+func (s *Service) Profile(ctx context.Context, accountID string) (Profile, error) {
+	id, err := parseAccountID(accountID)
+	if err != nil {
+		return Profile{}, err
+	}
+	stats, ok, err := s.store.GetStats(ctx, id)
+	if err != nil {
+		return Profile{}, err
+	}
+	if !ok {
+		stats = persist.PlayerStats{}
+		if err := s.store.SaveStats(ctx, id, stats); err != nil {
+			return Profile{}, err
+		}
+	}
+	recent, err := s.store.ListMatchRecords(ctx, id, 20)
+	if err != nil {
+		return Profile{}, err
+	}
+	return Profile{
+		XP:      stats.XP,
+		Kills:   int32(stats.Kills),
+		Deaths:  int32(stats.Deaths),
+		Matches: int32(stats.Matches),
+		Wins:    int32(stats.Wins),
+		Losses:  int32(stats.Losses),
+		Recent:  recent,
+	}, nil
+}
+
+// RecordMatch 把一局结果记进两名玩家的档案与历史，返回是否真的入账。
+//
+// 两个槽位都必须有真实 uid 才入账：兜底单人局已删除，这条是防御 —— 将来若有练习局
+// 或调试入口，不至于把「刷木桩」记成胜率。上报方不重试，所以这里任何一步失败都只
+// 记日志（没有补偿机会），不把错误抛回去。
+func (s *Service) RecordMatch(ctx context.Context, res MatchResult) (bool, error) {
+	if len(res.Slots) < 2 || res.Slots[0].UID == "" || res.Slots[1].UID == "" {
+		return false, nil
+	}
+	if res.WinnerSlot != 0 && res.WinnerSlot != 1 {
+		return false, reason(ReasonInternal)
+	}
+
+	for slot := range res.Slots {
+		me := res.Slots[slot]
+		opp := res.Slots[1-slot]
+		id, err := parseAccountID(me.UID)
+		if err != nil {
+			return false, err
+		}
+		won := int32(slot) == res.WinnerSlot
+		delta := persist.PlayerStatsDelta{
+			XP:      MatchXP(won, me.Kills),
+			Kills:   int64(me.Kills),
+			Deaths:  int64(me.Deaths),
+			Matches: 1,
+		}
+		if won {
+			delta.Wins = 1
+		} else {
+			delta.Losses = 1
+		}
+		if err := s.store.AddStats(ctx, id, delta); err != nil {
+			log.Printf("logic: record match %s stats for %s failed: %v", res.MatchID, me.UID, err)
+			continue
+		}
+		opponentName := ""
+		if oppID, err := parseAccountID(opp.UID); err == nil {
+			if name, found, err := s.store.UsernameByID(ctx, oppID); err != nil {
+				log.Printf("logic: resolve username for %s failed: %v", opp.UID, err)
+			} else if found {
+				opponentName = name
+			}
+		}
+		rec := persist.PlayerMatchRecord{
+			MatchID:         res.MatchID,
+			Won:             won,
+			Kills:           me.Kills,
+			Deaths:          me.Deaths,
+			OpponentKills:   opp.Kills,
+			DurationSeconds: res.DurationSeconds,
+			OpponentName:    opponentName,
+			EndedAt:         s.now().Unix(),
+		}
+		if err := s.store.AppendMatchRecord(ctx, id, rec); err != nil {
+			log.Printf("logic: append match history for %s failed: %v", me.UID, err)
+		}
+	}
+	return true, nil
 }
