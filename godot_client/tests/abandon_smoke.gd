@@ -6,7 +6,7 @@ extends SceneTree
 ##   2. 放弃对局（`match.abandon`）**只释放当前玩家** —— 他自己不再被回局查询命中、
 ##      也不再被塞回那一局，而**对手那一局照常收到帧**（实例没有被终结）。
 ##
-## 运行：先起 etcd + nats + redis + gate/account/match/game 五进程，再：
+## 运行：先起 etcd + nats + redis + gate/account/logic/match/game/gm 六进程，再：
 ##   godot --headless --path <项目> --script res://tests/abandon_smoke.gd
 
 const PairHelper := preload("res://tests/pair_helper.gd")

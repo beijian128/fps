@@ -47,7 +47,7 @@ gate ── logic.logic.*（随机） ──▶ logic ──钱包/背包 Hash�
 account ── logic.logic.online（随机） ──▶ logic ──EnsureProfile──▶ Redis
 ```
 
-五个服务由**单二进制** `joltgo.exe` 用 `-type gate|account|logic|match|game` 区分角色，经
+六个服务由**单二进制** `joltgo.exe` 用 `-type gate|account|logic|match|game|gm` 区分角色，经
 **etcd**（服务发现）+ **NATS**（RPC）互相通信，共享状态放 **Redis**（`-redis`，默认
 `localhost:6379`），见 `joltgo/deploy/`。`logic` 读写钱包/背包，`game` 是纯计算节点，不连 Redis。
 
@@ -526,6 +526,57 @@ Jolt 的 Release 构建定义 `NDEBUG`、`JPH_DEBUG_RENDERER`、`JPH_PROFILE_ENA
   远端玩家渲染 avatar。
 - `FpsClient`（传输层）与渲染层通过信号解耦（`frame_received` / `matched_received` /
   `connection_changed`）。
+
+## GM 与机器人（`gm/` + `bot/`）
+
+### gm 是 backend，不占 pitaya 端口
+
+`-type gm` 以 `pitaya.Cluster` 模式构建 app（注册进 etcd、挂上 NATS），但它**不注册任何
+handler / remote、也不加 acceptor**：它只发不收。管理流量走它自己的 Gin HTTP 端口
+（`-gmaddr`，默认 `:8082`）+ 内嵌的单页操作页（`go:embed`，单二进制部署不必带 assets）。
+gate 的路由表里没有 `gm.*`，所以玩家侧完全看不到这个服务。
+
+它靠 `app.RPCTo` 调后端：`match.match.addbots`（塞机器人进队列）与
+`logic.logic.grantcoins`（发钱）。**能发 `RPCTo` 的前提是那个进程以 Cluster 模式构建了
+app，与它是 frontend 还是 backend 无关** —— `match` 调 `game`、`game` 调 `logic` 走的是
+同一条路；而内置 `pkg/client/client.go` 是 acceptor 客户端（连 frontend 的 WS 口、
+说 pomelo 握手），它发不出后端 RPC，这是两回事。
+
+身份与权限：
+
+- 页面与 `/api/*` 用共享密钥（`-gmkey` / `GM_KEY`）鉴权；**没配密钥 `gm` 直接拒绝启动**，
+  已启动的 `logic` / `match` 则按「空密钥一律拒绝」处理 —— 两个方向都是「默认拒绝」。
+- `logic` / `match` 侧的两条管理 handler 各查两道闸：**拒绝带会话的调用**（客户端经 gate
+  发的会真的到达后端）+ **校验共享密钥**（任何后端都能调）。route 名不是权限。
+- GM 操作**不审计**（只写 `deploy/gm.log`），这是本功能的明确取舍。
+
+### 机器人是队列里的普通成员
+
+uid 形如 `bot:<nuid>`，前缀的唯一真相在 `joltgo/bot/`（`match` 与 `game` 共用一个判据，
+不各写一份）。入队这件事由 `match` 自己做（`gm` 连 `match:queue` 的键名都不出现），
+它与真人共用同一条 ZSET 与同一个 Lua 脚本。
+
+配对时机器人走一条**不同**的路径：它没有 gate、没有会话、没有在线登记，照真人路径走会被
+100% 当成掉线剔除，所以 `startMatch` 对它跳过「读在线登记 + 请 gate 写会话数据」。
+槽位仍然按 uid 在名单里的下标确定，因此 `CreateGameMsg.Uids` 里机器人的位置就是它的
+`player_idx`，协议与客户端都不用改。
+
+两条丢弃规则：
+
+- **全机器人配对直接丢弃、不放回**：两个木头人对站谁都不动，只会空转到 30 分钟空闲回收；
+  放回还会让它们反复被弹出、反复重置等待时间。
+- **「机器人 + 掉线真人」保留机器人回队列**：机器人是 GM 特意塞进来凑人数的，为一个掉线的
+  真人把它一起丢掉等于让这次操作白做。
+
+对局内机器人是「**没有客户端的槽位**」：不收增量/全量帧、不在推送目标里、不进实例注册表
+（`game.rejoin` 与 `match.findInstance` 的 fan-out 都不会为它多跑一趟）、不参与回局。
+结算侧**不需要任何特殊处理** —— 它的 `SlotResult.Uid` 本来就是空串，`logic.RecordMatch`
+已经会跳过「空槽位」（既不计战绩、也不当错误），真人那一边照常入账。这里刻意**不复用**
+`left` 标记：`left` 的语义是「本来有这个人、他中途放弃了」，复用会让结算日志出现
+「机器人在中途放弃」这种假话。
+
+机器人全程不动、不开火（它没有客户端上报输入，`inputSystem` 拿到的是空输入），
+被打死就在出生点满血复活，直到真人拿到 10 杀结束这一局。
 
 ## 局外数据与 logic
 

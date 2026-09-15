@@ -164,7 +164,7 @@
 
 ### 服务端
 
-- 看服务日志：gate/account/logic/match/game 五进程各自有日志（`deploy/start-all.ps1` 写 `deploy/*.log`），
+- 看服务日志：gate/account/logic/match/game/gm 六进程各自有日志（`deploy/start-all.ps1` 写 `deploy/*.log`），
   pitaya 默认 logrus 会打印 handler 注册、服务发现、RPC 等日志
 - 看 Redis 数据：`deploy/redis-cli.exe` —— 账号 Hash `acct:1:<id>:0`、凭证 `sess:*`、
   会话归属 `online:*`、匹配队列 `match:queue`（ZSET）
@@ -190,7 +190,7 @@
   Response 帧（LEB128 mid、无 route、errorMask）与 `LoginReply` 解码、
   渲染路径（喂合成帧，不碰 WebSocket）、断线清理本地世界与插值状态、
   `LogicStateReply` 解码与商城/背包面板。
-- 冒烟测试（需要分布式服务端已启动：etcd + NATS + redis + gate/account/logic/match/game 五进程）：
+- 冒烟测试（需要分布式服务端已启动：etcd + NATS + redis + gate/account/logic/match/game/gm 六进程）：
 
   ```bash
   Godot_v4.7.2-stable_win64_console.exe --headless \
@@ -262,3 +262,39 @@
 - Logic 节点是无状态的，新增节点不应引入进程内玩家状态；跨请求状态必须进入 Redis，并继续遵守账号级锁、余额预检查、锁内复查与失败补偿边界。
 - 改协议结构（新增/删除 route 或修改 `game.proto` 字段号/类型）：重生成 `joltgo/game/protos/game.pb.go`，同步 `joltgo/game/`、`joltgo/match/`、`joltgo/account/`、`joltgo/logic/` 与 `godot_client/scripts/fps_client.gd`，再跑协议回归测试。仅改同步属性不需要改 proto。
 - 改登录上线链路：同时检查 account 的 `logic.logic.online` RPC、logic 的 `EnsureProfile`、Redis player key 与 `login_smoke` / `logic_smoke`。
+
+## GM 服务 / 机器人 runbook
+
+GM 是第六个角色，只对运维可见：HTTP（Gin）+ 内嵌 Web 操作页，**不经过 gate**。
+
+```powershell
+cd joltgo; .\build.ps1
+cd deploy; .\start-all.ps1           # 含 gm，密钥默认 local-dev-key
+# 浏览器打开 http://localhost:8082/，在页面上填同一个密钥
+```
+
+**密钥必须三个角色一致**（`gm` / `logic` / `match`）。用命令行手动起时：
+
+```powershell
+.\joltgo.exe -type logic -gmkey mykey
+.\joltgo.exe -type match -gmkey mykey
+.\joltgo.exe -type gm -gmkey mykey -gmaddr :8082
+```
+
+改了 `gm` 的行为后至少跑：`go test -count=1 ./gm ./match ./logic ./bot`。
+
+### 加机器人这条链路的几个坑
+
+- **route 名 = 服务名 + 小写 Go 方法名**。`match.addbots` 不是配置出来的，是
+  `func (c *Component) AddBots(...)` 推出来的 —— 把方法改名成 `QueueBots`，编译照过、
+  日志里会安静地变成 `registered remote match.queuebots`，而 `gm` 的
+  `RPCTo("match.match.addbots")` 在运行期报 `route not found`。
+  `match/addbots_route_test.go` 就是钉这个的，改方法名它会红。
+- **两个机器人不会互打**：它们配成的那一对会被直接丢弃（不放回队列），
+  所以裸加 2 个机器人不会自己动起来，必须等一个真人入队才开一局。
+- **「机器人 + 掉线真人」会保住机器人**：真人在探活时被剔掉，机器人放回队列等下一个真人。
+- **机器人不动也不开枪**：它没有客户端上报输入，`inputSystem` 拿到的是空输入；
+  这不是 bug，是设计（它是凑人数的靶子）。
+- **机器人不落战绩**：它在结算里是「空槽位」（`SlotResult.Uid` 为空串），`logic.RecordMatch`
+  本来就跳过这种槽位，所以个人页里不会出现「对手叫 bot:xxx」。
+- **GM 操作没有审计**：只写 `deploy/gm.log`。要追账得自己看日志或抄 Redis 里的历史键。

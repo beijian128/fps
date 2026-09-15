@@ -18,8 +18,10 @@
 
 ```
 fps/
-├── joltgo/                  # 服务端（Go，单二进制五角色）
-│   ├── main.go              # 入口：解析 -type(gate|account|logic|match|game) 与 -redis，按角色装配 pitaya app
+├── joltgo/                  # 服务端（Go，单二进制六角色）
+│   ├── main.go              # 入口：解析 -type(gate|account|logic|match|game|gm) / -redis / -gmaddr / -gmkey，按角色装配 pitaya app
+│   ├── bot/                 # ★ 机器人 uid 前缀的唯一真相（bot:），match 与 game 共用
+│   ├── gm/                  # ★ GM 服务：Gin HTTP 端口 + 内嵌 Web 操作页 + 两个后端 RPC 客户端（不经过 gate）
 │   ├── gate/                # gate 服务：AddRoute 路由（account.*/match.* 轮询 / logic.* 均匀随机 / game.* 按会话数据定点）
 │   │   └── session.go       # ★ 会话归属登记（online:{accountID} → 本 gate）+ 远端 remote gate.bindgame
 │   ├── account/             # account 服务：注册 / 登录 / 凭证恢复 + distlock 注册临界区（token.go / store.go / component.go）
@@ -172,10 +174,23 @@ fps/
 - **界面按技能清单走**：**本项目自己的规范沉淀在个人技能 `fps-ui-rules`**（分层 / 八条不可协商 / 改界面的固定动作 / 踩过的坑 + `references/theme-vocabulary.md` 主题词汇表），改 `godot_client/` 界面时先加载它；通用技巧再往下看 godot-prompter 的 `godot-ui`（Control / 容器 / 锚点 / 焦点导航）、`responsive-ui`（分辨率 / 安全区）、`hud-system`（对局内 HUD）。可执行底线只有三条：交互控件有**可见焦点**并在屏幕打开时 `grab_focus()`；可点区域高度 ≥ `tokens.HIT_MIN`；HUD 整层 `mouse_filter = IGNORE`。
 - **主题取值集中在 `theme/tokens.gd`**：`theme/build_theme.gd` 把它写成 `theme/tactical_theme.tres`，`tests/theme_test.gd` 校验两者一致（改了 tokens 要重跑生成，否则测试红）。界面优先用 `theme_type_variation` 挑样式；只有必须参与运算的取值（按血量取色、按用户名取头像色）才 import tokens。要加新样式就在 `build_theme.gd` 里加变体，别在界面代码里 `duplicate()` 出界面私有的样式盒。
 - **`ui/*.tscn` 是手写的**：结构与样式直接在编辑器里改，没有生成器要同步。布局用锚点 + Container；HUD 的四个贴边面板用「锚点 + `offset_*` 贴角」（`offset_*` 在贴边元素上是正确工具，在普通内容里会被窗口拉伸拉坏）。
-- **多进程部署**：单二进制 `joltgo.exe -type gate|account|logic|match|game` 五角色（**只有 `-type` 与 `-redis` 两个 flag**，
-  gate 的 WS 端口 8080 写死），先起 etcd + nats + redis（`deploy/start-all.ps1` 一把梭）；服务日志在
-  `deploy/gate.log` / `account.log` / `logic.log` / `match.log` / `game.log`（pitaya 写 stderr，`*.out.log` 是 stdout 基本为空）。
-  `gate` / `account` / `logic` / `match` 启动时 Ping 一次 Redis，连不上直接退出；`game` 不碰 Redis。
+- **多进程部署**：单二进制 `joltgo.exe -type gate|account|logic|match|game|gm` 六角色（flag 是 `-type` / `-redis` /
+  `-gmaddr` / `-gmkey`，gate 的 WS 端口 8080 仍写死），先起 etcd + nats + redis（`deploy/start-all.ps1` 一把梭）；
+  服务日志在 `deploy/gate.log` / `account.log` / `logic.log` / `match.log` / `game.log` / `gm.log`
+  （pitaya 写 stderr，`*.out.log` 是 stdout 基本为空）。
+  `gate` / `account` / `logic` / `match` / `gm` 启动时 Ping 一次 Redis，连不上直接退出；`game` 不碰 Redis。
+- **GM 指令不进玩家协议**：`gm` 是第六个角色（backend），自己起 Gin HTTP 端口（默认 `:8082`）+ 内嵌 Web 操作页，
+  gate 的路由表里没有 `gm.*`，它也不监听任何 pitaya 端口、不注册 handler / remote。它只**主动**发后端 RPC
+  （`match.match.addbots` / `logic.logic.grantcoins`），能这么做的前提是它以 `pitaya.Cluster` 构建 app ——
+  **能不能发 `app.RPCTo` 取决于 app 的模式，与 frontend/backend 无关**（`pkg/client/client.go` 是 acceptor
+  客户端，它发不出后端 RPC，别混）。两条 route 都要求「调用方没有会话」+ 共享密钥（`-gmkey` / `GM_KEY`）：
+  前者挡客户端经 gate 发来的调用（**route 名不是权限**），后者挡其它后端；密钥为空 = 不提供管理入口。
+  三个进程（`gm` / `logic` / `match`）必须配同一个密钥，`start-all.ps1` 统一传。GM 操作**不审计**，只写 `gm.log`。
+- **机器人是队列里的普通成员**：uid 前缀 `bot:`（唯一真相在 `joltgo/bot/`），由 `match` 自己入队
+  （`gm` 不碰 `match:queue`，也不构造 bot uid）。配对时机器人跳过「读在线登记 + 请 gate 写会话数据」；
+  全机器人配对直接丢弃且**不放回**（放回会让它们反复被弹出、反复重置等待时间）；「机器人 + 掉线真人」这一对
+  则保留机器人回队列等下一个真人。对局内它是不收帧、不进注册表的「无客户端槽位」，结算靠既有的「空槽位」
+  规则跳过 —— **logic 不需要认识机器人**。机器人全程不动、不开火（没有客户端上报输入），被打死在出生点复活。
 - **多节点正确性**：`match` 的队列在 Redis（`match:queue` ZSET + Lua 原子脚本），所以 match 节点无状态、可横向扩；
   `gate` 在会话绑定时写 `online:{accountID}` → 本节点、断开时清除，account 靠它把顶号踢到**正确的那个 gate**，
   match 靠它找到玩家所在 gate 去写会话数据（`gate.gate.bindgame`）。这个登记是 **best-effort**：Redis 写失败只会漏踢一次，
@@ -195,7 +210,7 @@ fps/
 cd joltgo; .\gen-redis.ps1
 cd joltgo; .\build.ps1
 
-# 本地起分布式服务端（etcd + nats + redis + gate/account/logic/match/game 五进程）
+# 本地起分布式服务端（etcd + nats + redis + gate/account/logic/match/game/gm 六进程）
 cd joltgo\deploy; .\start-all.ps1     # 停：.\stop-infra.ps1
 
 # 客户端（Godot 4.7）—— 命令行要用 _console.exe 才看得到 stdout
@@ -246,7 +261,7 @@ Godot_..._console.exe --headless --path godot_client --script res://tests/pause_
 Godot_..._console.exe --headless --path godot_client --script res://tests/pending_match_decode_test.gd # 进大厅询问 / 放弃对局的 Response 解码与 mid 认领
 Godot_..._console.exe --headless --path godot_client --script res://tests/rejoin_prompt_test.gd # 进大厅的询问框：弹框 / 回到对局 / 放弃 / 稍后决定（ESC）
 
-# 冒烟：需要活集群（etcd + NATS + redis + gate/account/logic/match/game 五进程）
+# 冒烟：需要活集群（etcd + NATS + redis + gate/account/logic/match/game/gm 六进程）
 Godot_..._console.exe --headless --path godot_client --script res://tests/login_smoke.gd            # 注册 → LoginReply → 断线 → resume → onMatched（两客户端配对）
 Godot_..._console.exe --headless --path godot_client --script res://tests/ws_smoke.gd               # 登录 + 匹配 + 20Hz 增量帧
 Godot_..._console.exe --headless --path godot_client --script res://tests/rejoin_smoke.gd           # 登录 + 断线回同一局

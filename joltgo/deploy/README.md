@@ -17,7 +17,7 @@
 
 ```powershell
 .\start-infra.ps1          # 起 etcd + nats + redis（先停旧 etcd 并清空 etcd-data；nats/redis 已在跑则沿用）
-.\start-all.ps1            # start-infra + gate / account / logic / match / game 五进程
+.\start-all.ps1            # start-infra + gate / account / logic / match / game / gm 六进程
 .\stop-infra.ps1           # 全部停掉（等到端口真正释放再返回；不删任何数据目录）
 ```
 
@@ -78,29 +78,40 @@ volumes:
   redis-data:
 ```
 
-## 启动服务端（五个进程）
+## 启动服务端（六个进程）
 
-先起基础设施，再起五个服务（单二进制按 `-type` 区分角色）：
+先起基础设施，再起六个服务（单二进制按 `-type` 区分角色）：
 
 ```powershell
 cd joltgo
 .\joltgo.exe -type gate      # frontend，监听 ws://localhost:8080
 .\joltgo.exe -type account   # 账号注册/登录/凭证恢复
-.\joltgo.exe -type logic     # 玩家档案 / 钱包 / 背包 / 商城 / 装备
-.\joltgo.exe -type match     # 匹配服务
+.\joltgo.exe -type logic     -gmkey <secret>   # 玩家档案 / 钱包 / 背包 / 商城 / 装备
+.\joltgo.exe -type match     -gmkey <secret>   # 匹配服务
 .\joltgo.exe -type game      # 游戏逻辑（对局实例）
+.\joltgo.exe -type gm -gmkey <secret>          # GM：http://localhost:8082 + Web 操作页
 ```
 
-Redis 地址由 `-redis`（默认 `localhost:6379`）指定。`gate` / `account` / `logic` / `match` 启动时会
+`-gmkey` 是 GM 管理密钥（也可用环境变量 `GM_KEY`），**三个角色必须配同一个值**：
+`gm` 用它给页面请求鉴权，`logic` / `match` 用它校验 GM 发来的后端 RPC。
+只给 `gm` 配、忘了给 `logic` / `match` 配的话，后端会按「空密钥一律拒绝」把每条指令挡掉
+（页面上表现为 503）；只给 `logic` / `match` 配、忘了给 `gm` 配的话 `gm` 直接拒绝启动。
+不想要 GM 入口就别起 `gm` 进程，另外两个角色的密钥留空即可。
+`start-all.ps1` 默认用 `local-dev-key`（可用 `-gmKey <secret>` 覆盖）。
+
+Redis 地址由 `-redis`（默认 `localhost:6379`）指定。`gate` / `account` / `logic` / `match` / `gm` 启动时会
 Ping 一次 Redis，**连不上就直接退出**（早失败比运行中途才暴露好排查）；`game` 是纯计算节点，
 不碰 Redis，也就不会被 Redis 故障拖着起不来。因此 `start-infra.ps1` 起完 redis 会等端口真的
 在监听再返回 —— 不等的话后面四个进程会稳定地「起来一下就没了」。
 
-每个进程各自注册到 etcd，通过 NATS 互相 RPC。`start-all.ps1` 把五个角色的日志分别写到
-`gate.log` / `account.log` / `logic.log` / `match.log` / `game.log` —— **pitaya 的日志走 stderr 而不是
-stdout**，所以这五个对应的是 `-RedirectStandardError`（stdout 另存为同名的 `*.out.log`，基本
+每个进程各自注册到 etcd，通过 NATS 互相 RPC。`start-all.ps1` 把六个角色的日志分别写到
+`gate.log` / `account.log` / `logic.log` / `match.log` / `game.log` / `gm.log` —— **pitaya 的日志走 stderr 而不是
+stdout**，所以这六个对应的是 `-RedirectStandardError`（stdout 另存为同名的 `*.out.log`，基本
 为空；两个流不能指向同一个文件，各自从头写会互相覆盖）。排查问题时 `tail -f deploy/game.log`
 即可；日志是 debug 级别、涨得很快（几分钟就 ~10 MB）且不轮转，长时间跑记得清一下。
+
+GM 页面在 <http://localhost:8082/>：页面上填 `-gmkey` 的值，就能给账号发钱（用户名或
+accountID 都行）、往匹配队列里塞机器人。GM 操作**不审计**，只写 `gm.log`。
 
 ## etcd-data 清、redis-data 不清
 

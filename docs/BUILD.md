@@ -59,7 +59,7 @@ replace github.com/topfreegames/pitaya/v3 => ./third_party/pitaya
   需网络可达（本项目用 `GOPROXY=goproxy.cn,direct`）
 - 若改动/升级内置的 pitaya，重跑 `go mod tidy` 同步 `go.sum`；二进制体积较大是
   pitaya 的固有代价
-- **Cluster 模式**：gate/account/logic/match/game 五服务经 etcd（服务发现）+ nats-server（RPC）
+- **Cluster 模式**：gate/account/logic/match/game/gm 六服务经 etcd（服务发现）+ nats-server（RPC）
   通信，账号/凭证/会话归属/匹配队列这些共享状态放 Redis，本地运行见
   `joltgo/deploy/README.md`
 
@@ -75,6 +75,16 @@ protoc --go_out=. --go_opt=paths=source_relative -I . game/protos/game.proto
 
 需要 `protoc` 与 `protoc-gen-go`（见上方环境要求表）。生成后客户端
 `godot_client/scripts/fps_client.gd` 里的手写 wire 编解码也要同步改。
+
+`game.proto` 里除了客户端消息，还有服务间契约（`CreateGameMsg` / `BindGameMsg` /
+`RecordMatchMsg` 以及 GM 的 `AddBotsMsg` / `GrantCoinsMsg`），改它们不需要动客户端。
+
+## 依赖（go.mod）
+
+除 pitaya（内置）、redis 客户端与 protobuf 之外，服务端只用了一个非内置依赖：
+**`github.com/gin-gonic/gin`（v1.12.0）** —— GM 服务的 HTTP 路由与页面。它是纯 Go，
+**不引入 cgo、不影响 UCRT64 / Jolt 的构建链**。它在 `go.mod` 里表现为 `direct`，
+其余 Gin 的传递依赖都是 `indirect`。
 
 ## Redis 持久化模型（persist/protos/）
 
@@ -125,30 +135,34 @@ joltgo/
 
 ## 运行
 
-服务端是分布式五服务，先起基础设施再起五个角色：
+服务端是分布式六服务，先起基础设施再起六个角色：
 
 ```powershell
 # 1. 起 etcd + nats-server + redis-server（服务发现 + RPC 总线 + 共享状态）
 cd joltgo\deploy
-# `.\start-all.ps1` 内含 start-infra + 五进程；或手动起
+# `.\start-all.ps1` 内含 start-infra + 六进程；或手动起
 
-# 手动起五个服务（同一二进制按 -type 区分）：
+# 手动起六个服务（同一二进制按 -type 区分）：
 cd joltgo
 .\joltgo.exe -type gate      # frontend，监听 ws://localhost:8080
 .\joltgo.exe -type account   # 账号注册/登录/凭证恢复
-.\joltgo.exe -type logic     # 玩家档案 / 钱包 / 背包 / 商城 / 装备
-.\joltgo.exe -type match     # 匹配服务
+.\joltgo.exe -type logic     -gmkey <secret>   # 玩家档案 / 钱包 / 背包 / 商城 / 装备
+.\joltgo.exe -type match     -gmkey <secret>   # 匹配服务
 .\joltgo.exe -type game      # 游戏逻辑（对局实例）
+.\joltgo.exe -type gm -gmkey <secret>          # GM：http://localhost:8082 + Web 操作页
 ```
 
-**只有两个 flag**（gate 的 WS 端口 8080 目前写死在 `main.go` 里，没有 `-port`）：
+**四个 flag**（gate 的 WS 端口 8080 目前写死在 `main.go` 里，没有 `-port`）：
 
 | flag | 默认值 | 说明 |
 |---|---|---|
-| `-type` | `gate` | 角色：`gate` / `account` / `logic` / `match` / `game`，其它值直接报错退出 |
-| `-redis` | `localhost:6379` | Redis 地址。`gate` / `account` / `logic` / `match` 启动时 Ping 一次，**连不上就退出**；`game` 不碰 Redis，这个 flag 对它无效 |
+| `-type` | `gate` | 角色：`gate` / `account` / `logic` / `match` / `game` / `gm`，其它值直接报错退出 |
+| `-redis` | `localhost:6379` | Redis 地址。`gate` / `account` / `logic` / `match` / `gm` 启动时 Ping 一次，**连不上就退出**；`game` 不碰 Redis，这个 flag 对它无效 |
+| `-gmkey` | 空（回落到 `$GM_KEY`） | GM 管理密钥。`gm` 用它给页面鉴权、`logic` / `match` 用它校验 GM 发来的 RPC —— **三个角色必须配同一个值**。`gm` 没配就拒绝启动 |
+| `-gmaddr` | `:8082` | 仅 `gm` 有效：它的 HTTP 监听地址。 |
 
 gate 监听 <ws://localhost:8080/>，用 Godot 客户端连接游玩（见根目录 README）。
+GM 页面在 <http://localhost:8082/>（页面里填 `-gmkey` 即可发钱 / 加机器人）。
 停服务用 `deploy\stop-infra.ps1`（它不删任何数据目录）。
 
 ## 常见问题

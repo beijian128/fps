@@ -26,13 +26,14 @@
   跨 account 节点的同名注册临界区用 [distlock](https://github.com/beijian128/distlock) 串行化
 - **断线重连回到同一对局**：客户端持久化服务端签发的 token，重连后自动登回同一账号、
   找回原实例与原槽位，服务端单独下发一份全量帧把本地世界整体重建
-- 服务端采用 **pitaya 分布式游戏服务端框架**（内置源码，**Cluster 模式**）拆成五个微服务：
+- 服务端采用 **pitaya 分布式游戏服务端框架**（内置源码，**Cluster 模式**）拆成六个微服务：
   - **gate**（前端接入，WS 直连客户端，路由业务消息，登记会话归属）
   - **account**（注册/登录/凭证恢复，签发与轮换 token）
   - **logic**（玩家档案、钱包、背包、商城购买与装备）
   - **match**（对局匹配，配对 2 名真实玩家、可取消、状态主动推送，分配 game 节点；队列在 Redis）
   - **game**（对局逻辑，每个对局一个 goroutine 顺序执行、无锁）
-  - 五服务经 etcd（服务发现）+ NATS（RPC）通信，共享状态（账号/凭证/会话归属/匹配队列/钱包/背包）
+  - **gm**（GM 指令入口：Gin HTTP + Web 操作页，发钱 / 往队列塞机器人；不经过 gate）
+  - 六服务经 etcd（服务发现）+ NATS（RPC）通信，共享状态（账号/凭证/会话归属/匹配队列/钱包/背包）
     放 Redis；协议为 pomelo 帧 + protobuf payload
 - **双玩家**：每局两个玩家各自独立位置/血量/战绩，击杀与死亡分别记在各自身上；客户端第一人称视角 + 远端玩家 avatar
 - 服务端业务层采用 **ECS（实体-组件-系统）架构**：物理实体 id 即实体 id，每 tick 只同步一次
@@ -81,28 +82,30 @@ cd joltgo
 .\build.ps1
 ```
 
-### 4. 运行（分布式五服务）
+### 4. 运行（分布式六服务）
 
-先起基础设施（etcd + nats-server + redis-server），再起五个服务：
+先起基础设施（etcd + nats-server + redis-server），再起六个服务：
 
 ```powershell
 cd joltgo\deploy
-.\start-all.ps1     # 内含 etcd + nats + redis + gate/account/logic/match/game 五进程
+.\start-all.ps1     # 内含 etcd + nats + redis + gate/account/logic/match/game/gm 六进程
 ```
 
-或用五个终端手动起（单二进制按 `-type` 区分角色）：
+或用六个终端手动起（单二进制按 `-type` 区分角色）：
 
 ```powershell
 cd joltgo
 .\joltgo.exe -type gate      # frontend，监听 ws://localhost:8080
 .\joltgo.exe -type account   # 账号注册/登录/凭证恢复
-.\joltgo.exe -type logic     # 玩家档案 / 钱包 / 背包 / 商城 / 装备
-.\joltgo.exe -type match     # 匹配服务
+.\joltgo.exe -type logic     -gmkey <secret>   # 玩家档案 / 钱包 / 背包 / 商城 / 装备
+.\joltgo.exe -type match     -gmkey <secret>   # 匹配服务
 .\joltgo.exe -type game      # 游戏逻辑（对局实例）
+.\joltgo.exe -type gm -gmkey <secret>          # GM：http://localhost:8082 + Web 操作页
 ```
 
-只有 `-type` 和 `-redis`（默认 `localhost:6379`）两个 flag；gate/account/logic/match 启动时会
-Ping 一次 Redis，连不上就退出。
+flag 是 `-type` / `-redis`（默认 `localhost:6379`）/ `-gmaddr` / `-gmkey`；
+gate/account/logic/match/gm 启动时会 Ping 一次 Redis，连不上就退出。
+`gm` 的密钥要和 `logic` / `match` 配成同一个值（详见 [docs/BUILD.md](docs/BUILD.md)）。
 
 然后用 Godot 4.7 打开 `godot_client/project.godot` 按 F5，或命令行运行：
 
@@ -131,7 +134,7 @@ Logic 客户端解码、UI 与端到端冒烟：
 ```bash
 Godot_v4.7.2-stable_win64_console.exe --headless --path godot_client --script res://tests/logic_state_decode_test.gd
 Godot_v4.7.2-stable_win64_console.exe --headless --path godot_client --script res://tests/logic_panel_test.gd
-# 需要先启动上面的五进程集群
+# 需要先启动上面的六进程集群
 Godot_v4.7.2-stable_win64_console.exe --headless --path godot_client --script res://tests/logic_smoke.gd
 ```
 
@@ -154,13 +157,13 @@ Godot_v4.7.2-stable_win64_console.exe --headless --path godot_client --script re
 
 ```text
 fps/
-├── joltgo/                  # Go 服务端（单二进制五角色）
+├── joltgo/                  # Go 服务端（单二进制六角色）
 │   ├── third_party/pitaya/  # 内置 pitaya 框架源码（pkg/ + go.mod + go.sum）
 │   ├── third_party/distlock/ # 固定提交内置的 Redis 分布式锁（MIT）
 │   ├── wrapper/
 │   │   ├── jolt_c.h         # C ABI 声明（extern "C"，纯物理桥、无业务）
 │   │   └── jolt_c.cpp       # Jolt C++ 原生 API → C ABI 实现
-│   ├── main.go              # 入口：解析 -type(gate|account|logic|match|game) 与 -redis，按角色装配
+│   ├── main.go              # 入口：解析 -type(gate|account|logic|match|game|gm) / -redis / -gmaddr / -gmkey，按角色装配
 │   ├── gate/                # gate 服务：AddRoute 路由（account.* / logic.* / match.* 轮询 / game.* 定点）
 │   ├── account/             # account 服务：注册/登录/resume，bcrypt + token 轮换
 │   ├── logic/               # logic 服务：玩家档案 / 钱包 / 背包 / 商城 / 装备
@@ -169,6 +172,8 @@ fps/
 │   ├── match/               # match 服务：Redis 配对队列 + 分配 game 节点
 │   ├── game/                # game 服务：对局实例（instance.go 每局一 goroutine 无锁）
 │   │   └── protos/          # protobuf 消息定义 + 生成码（wire 契约；新增同步属性无需改此文件）
+│   ├── gm/                  # gm 服务：Gin HTTP + 内嵌 Web 操作页（发钱 / 加机器人），不经过 gate
+│   ├── bot/                 # 机器人 uid 前缀（bot:）的唯一真相，match 与 game 共用
 │   ├── kv/                  # Redis 连接（共享状态的唯一入口）
 │   ├── online/              # 会话归属登记：accountID → 所在 gate 节点
 │   ├── physics/             # cgo 物理桥（sim.Physics 接口的 Jolt 实现，唯一 cgo 包）

@@ -238,7 +238,7 @@ Godot_v4.7.2-stable_win64_console.exe --headless --path godot_client --script re
 - `pending_match_decode_test.gd`：`match.pending` / `match.abandon` 的 Response 解码与 mid 认领
 - `rejoin_prompt_test.gd`：进大厅的询问框（弹框条件 / 回到对局 / 放弃失败要保留框 / ESC 稍后决定）
 
-下面是**冒烟测试，需要活集群**（etcd + NATS + redis + gate/account/logic/match/game 五进程），
+下面是**冒烟测试，需要活集群**（etcd + NATS + redis + gate/account/logic/match/game/gm 六进程），
 其中 `login_smoke` / `ws_smoke` / `rejoin_smoke` 都需要**两个客户端真配对**（单人兜底已删除）：
 
 ```bash

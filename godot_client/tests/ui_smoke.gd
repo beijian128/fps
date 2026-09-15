@@ -1,5 +1,5 @@
 extends SceneTree
-## 真实集群上的界面闭环冒烟（需要 etcd + NATS + redis + gate/account/logic/match/game 五进程）：
+## 真实集群上的界面闭环冒烟（需要 etcd + NATS + redis + gate/account/logic/match/game/gm 六进程）：
 ##   登录页注册 → 进大厅（**没有自动匹配**）→ 拉到档案与商城状态 → 底部条进搜索中
 ##   → 第二个客户端加入队列 → 配对成功进对局（HUD 可见）
 ##

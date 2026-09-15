@@ -1,7 +1,8 @@
 # 网络协议
 
 客户端只连一个 WebSocket 端点：`ws://localhost:8080/`（gate 服务）。服务端是
-**分布式五服务**（gate / account / logic / match / game），客户端只感知 route，不感知后端节点分布。
+**分布式六服务**（gate / account / logic / match / game / gm），客户端只感知 route，不感知后端节点分布。
+其中 `gm` 只面向运维（HTTP + 后端 RPC），**不参与玩家协议、不在 gate 的路由表里**。
 传输走 **pitaya 的 pomelo 帧格式**（二进制），payload 用 **protobuf** 序列化
 （schema 见 `joltgo/game/protos/game.proto`）。
 
@@ -79,9 +80,19 @@ Response： flag (1B) ─ mid (LEB128 变长) ─ protobuf payload
 | `gate.gate.bindgame` | RPC | match → gate | `BindGameMsg` → `BindGameReply` |
 | `logic.logic.online` | RPC | account → logic（随机） | `UserOnlineMsg` → `UserOnlineReply` |
 | `gate.sys.kick` | RPC | account → gate | pitaya 内置 `KickMsg` → `KickAnswer` |
+| `match.match.addbots` | RPC（remote） | gm → match | `AddBotsMsg` → `AddBotsReply` |
+| `logic.logic.grantcoins` | RPC（remote） | gm → logic | `GrantCoinsMsg` → `GrantCoinsReply` |
 
 `gate.gate.bindgame` 注册用的是 `RegisterRemote` 而不是 `Register`，所以它只在 remote 表里、
 只能被 `RPCTo` 命中；客户端发同名 route 会被路由到 handler 池、找不到而报错。
+
+`match.match.addbots` / `logic.logic.grantcoins` 同理走 remote 表，但它们**不假设调用方可信**：
+gate 会把 `match.*` / `logic.*` 按前缀转给后端，客户端发的同名 route 会真的到达 handler 池 ——
+所以这两个 handler 都要求「ctx 里没有会话」+ 密钥匹配（见下文「GM 管理指令」）。
+
+> **route 名 = 服务名 + 小写 Go 方法名**。`match.addbots` 是 `func (c *Component) AddBots(...)`
+> 推出来的，不是配置项：方法改名会静默改掉 route（编译照过、运行期 `route not found`）。
+> `match/addbots_route_test.go` 钉住了这一条。
 
 ## 握手与登录流程
 
@@ -457,6 +468,60 @@ message RecordMatchReply { bool ok = 1; bool applied = 2; string reason = 3; }
 
 account → gate 的踢人用的是 pitaya 内置的 `gate.sys.kick`（`KickMsg` / `KickAnswer`），
 本项目的 proto 里没有、也不该自己造一套。
+
+### GM 管理指令（service `gm`，HTTP + 后端 RPC）
+
+GM **不经过 gate、不进玩家协议**：`gm` 是 backend，自己起一个 Gin HTTP 端口（默认 `:8082`），
+页面与接口都在那里；它再用 `app.RPCTo` 主动调 `match` / `logic`（能不能发 `app.RPCTo`
+取决于该进程是否以 `pitaya.Cluster` 构建 app，**与 frontend / backend 无关**）。
+
+页面：
+
+| 方法 | 路径 | 鉴权 | 请求 | 成功响应 |
+| --- | --- | --- | --- | --- |
+| GET | `/` | 无（页面不含数据） | — | HTML |
+| POST | `/api/coins` | `Authorization: Bearer <gmkey>` | `{"target":"alice"\|"10001","delta":500}` | `{"ok":true,"account_id":"10001","coins":1500}` |
+| POST | `/api/bots` | 同上 | `{"count":1}` | `{"ok":true,"enqueued":1}` |
+
+状态码：`400 bad_request`（非法 JSON / `delta=0` / `target` 为空 / `count<=0`）、
+`401 unauthorized`（缺密钥或密钥不符）、`404 player_not_found`（用户名查不到）、
+`503 upstream_failed`（下游拒绝或集群不可达 —— 不假装成功）。
+`target` 是纯十进制就按 accountID 处理，否则当用户名（大小写不敏感，走账号的名字映射）。
+
+两条内部 route（同样「客户端不可见」，但**客户端其实发得到** —— 所以服务端有两道闸）：
+
+```proto
+// gm → match，往匹配队列塞 N 个机器人（route "match.match.addbots"，remote）
+message AddBotsMsg {
+  int32 count = 1;      // 单次上限 8，超出截断
+  string admin_key = 2; // 共享密钥
+}
+message AddBotsReply { bool ok = 1; int32 enqueued = 2; string reason = 3; }
+
+// gm → logic，给账号加/扣金币（route "logic.logic.grantcoins"，remote）
+message GrantCoinsMsg {
+  string account_id = 1;
+  int64 delta = 2;      // 负数表示扣
+  string admin_key = 3;
+}
+message GrantCoinsReply { bool ok = 1; int64 coins = 2; string reason = 3; }
+```
+
+**两道入口检查（两个 handler 都有，缺一不可）**：
+
+1. **拒绝带会话的调用**。gate 把 `match.*` / `logic.*` 按前缀转发，客户端发出的
+   `match.match.addbots` / `logic.logic.grantcoins` 会真的到达后端（RPCType_Sys，
+   ctx 里带 Remote 会话）；而 `gm` 用 `RPCTo` 发的（RPCType_User）不带会话。
+   **route 名不是权限**。
+2. **校验共享密钥**（`-gmkey` / `GM_KEY`，常数时间比对）。任何后端都能调这两条 route。
+   密钥为空 = 不提供管理入口（拒绝，而不是放行）。
+
+原因码：`forbidden`（两道闸任一不过）、`account_not_found`（发钱目标账号不存在，
+**不隐式建档**）、`internal`、`noop`（`count<=0` 的空操作，`ok` 仍为 true）。
+
+机器人 uid 形如 `bot:<nuid>`（唯一真相在 `joltgo/bot/`）：配对时跳过在线探活与会话数据写入，
+对局内不推帧、不进实例注册表，结算走既有的「空槽位」规则（见 [ARCHITECTURE.md](ARCHITECTURE.md)）。
+三个进程（`gm` / `logic` / `match`）必须配同一个密钥，否则 GM 页面只会看到 503。
 
 ## 对局规则（PVP）
 
