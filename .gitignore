@@ -32,3 +32,6 @@ joltgo/deploy/redis-data/
 *.obj
 *.gch
 *.log
+
+# AI 协作工具的本地草稿（SDD 台账、brainstorm 视觉伴侣）
+.superpowers/
