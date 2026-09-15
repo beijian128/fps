@@ -22,6 +22,7 @@ import (
 const (
 	gameServerType  = "game"               // game 服务类型（AddRoute 与服务发现用）
 	matchedRoute    = "onMatched"          // match → 客户端 push 的 route
+	statusRoute     = "onMatchStatus"      // match → 客户端 push 的 route（匹配期队列状态）
 	gameCreateRoute = "game.game.create"   // game 服务的创建对局 RPC route（三段式）
 	gameRejoinRoute = "game.game.rejoin"   // 回局查询 RPC route（三段式）
 	bindGameRoute   = "gate.gate.bindgame" // 请玩家所属 gate 写会话数据（三段式）
@@ -144,9 +145,64 @@ func (c *Component) AfterInit() {
 		ticker := time.NewTicker(tickInterval)
 		defer ticker.Stop()
 		for range ticker.C {
-			c.tryMatch(context.Background())
+			ctx := context.Background()
+			c.tryMatch(ctx)
+			c.pushMatchStatus(ctx)
 		}
 	}()
+}
+
+// pushMatchStatus 把队列状态推给每个正在等待的玩家。
+//
+// 逐个推而不是一批推同一个载荷：等待时长因人而异。队列规模小时成本可忽略；
+// 将来队列上千就改成「批量推人数 + 客户端本地计时」（见 spec §6.4）。
+func (c *Component) pushMatchStatus(ctx context.Context) {
+	total, entries, err := c.queue.Snapshot(ctx)
+	if err != nil {
+		log.Printf("match: queue snapshot failed: %v", err)
+		return
+	}
+	if total == 0 {
+		return
+	}
+	for _, entry := range entries {
+		status := &protos.MatchStatus{
+			QueuedPlayers: int32(total),
+			WaitedSeconds: entry.WaitedSeconds,
+		}
+		if _, err := c.app.SendPushToUsers(statusRoute, status, []string{entry.UID}, "gate"); err != nil {
+			log.Printf("match: push %s to %s failed: %v", statusRoute, entry.UID, err)
+		}
+	}
+}
+
+// Cancel 是客户端请求 handler（route "match.cancel"）：把已登录会话移出匹配队列。
+//
+// 三态语义（见 spec §5.3）：真的移出了才 ok=true；ZREM 返回 0 说明人已经不在这条队列里
+// —— 可能是 tick 刚把他配对走（那就顺手走一次回局查询，把他带进已经开好的对局，而不是
+// 从局里拽出来），也可能只是从来没排过队。
+func (c *Component) Cancel(ctx context.Context, _ *protos.MatchCancelMsg) (*protos.MatchCancelReply, error) {
+	s := c.app.GetSessionFromCtx(ctx)
+	if s == nil || s.UID() == "" {
+		log.Printf("match: cancel rejected: session not bound")
+		return &protos.MatchCancelReply{Ok: false, Reason: "unauthenticated"}, nil
+	}
+	uid := s.UID()
+	removed, err := c.queue.Remove(ctx, uid)
+	if err != nil {
+		log.Printf("match: cancel %s failed: %v", uid, err)
+		return &protos.MatchCancelReply{Ok: false, Reason: "internal"}, nil
+	}
+	if removed {
+		log.Printf("match: uid %s cancelled matchmaking", uid)
+		return &protos.MatchCancelReply{Ok: true, Reason: "cancelled"}, nil
+	}
+	// 竞态窗口：tick 可能刚把他弹出去、实例还没建好。这里查不到就返回 not_queued，
+	// 紧接着 onMatched 会照常到达，客户端切进对局 —— 不会出现「悬空玩家」。
+	if c.tryRejoin(ctx, uid) {
+		return &protos.MatchCancelReply{Ok: false, Reason: "already_matched"}, nil
+	}
+	return &protos.MatchCancelReply{Ok: false, Reason: "not_queued"}, nil
 }
 
 // tryMatch 尝试配对：队列凑满 2 人即开局。多个 match 节点同时抢也只有一个
