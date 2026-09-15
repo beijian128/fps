@@ -88,6 +88,9 @@ var _fps_ema := 60.0
 # HUD 读数：本机战绩 + 对手血量 + 对局结果（全部从 store 的属性名读，见 _update_hud）。
 var _last_health := 100.0
 var _last_opp_health := 100.0
+## 本局第一帧只做初始化：它是「初始快照」而不是事件，拿它比血量会把「对方本来就不是满血」
+## 读成一次命中（准星白闪 + 白响一声）。进局时归零，第一帧之后才开始比较。
+var _feedback_primed := false
 var _hit_flash: ColorRect
 var _hud_kills := 0
 var _hud_deaths := 0
@@ -141,6 +144,11 @@ func _on_matched(result: Dictionary) -> void:
 	_my_player_idx = int(result.get("player_idx", 0))
 	# 出生在船的艏/艉两端，开局朝向船中（与服务端 playerSpawnYaw 一致）。
 	_yaw = PI if _my_player_idx == 1 else 0.0
+	# 新一局双方都是满血：把「上一帧血量」对齐到满血，否则开局第一帧的初始快照
+	# （读到对方 100 以外的真实血量）会被当成一次命中，白闪一下准星、白响一声。
+	_last_health = 100.0
+	_last_opp_health = 100.0
+	_feedback_primed = false
 	# 由客户端驱动全量补齐：收到 full 帧之前，WorldStore 之外的一切都不可信。
 	_store.clear()
 	_reset_interp()
@@ -524,16 +532,18 @@ func _update_feedback() -> void:
 			hp = float(_store.attr(eid, "Health"))
 		else:
 			opp_hp = float(_store.attr(eid, "Health"))
-	if hp < _last_health - 0.001:
-		sfx.play("damage")
-		_flash_hit()
-	# 对手掉血 = 打中了：每一发命中都该有回馈（击杀数只在中枪者血尽时跳一次）。
-	if opp_hp < _last_opp_health - 0.001 and winner < 0:
-		sfx.play("destroy")
-		if ui.hud != null:
-			ui.hud.notify_hit_landed()
+	if _feedback_primed:
+		if hp < _last_health - 0.001:
+			sfx.play("damage")
+			_flash_hit()
+		# 对手掉血 = 打中了：每一发命中都该有回馈（击杀数只在中枪者血尽时跳一次）。
+		if opp_hp < _last_opp_health - 0.001 and winner < 0:
+			sfx.play("destroy")
+			if ui.hud != null:
+				ui.hud.notify_hit_landed()
 	_last_health = hp
 	_last_opp_health = opp_hp
+	_feedback_primed = true
 
 func _shoot() -> void:
 	# 弹道从枪口/角色胸口出发，收敛到准星 60 m 处的目标点：

@@ -154,6 +154,8 @@ func on_match_status(status: Dictionary) -> void:
 
 func on_matched(result: Dictionary) -> void:
 	_my_slot = int(result.get("player_idx", 0))
+	if hud != null:
+		hud.reset()   # 新一局：战绩、播报、准星状态都从头来
 	_set_state(State.IN_MATCH)
 
 func on_match_ended(result: Dictionary) -> void:
