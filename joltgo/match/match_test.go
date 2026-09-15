@@ -63,7 +63,7 @@ func newTestComponent(t *testing.T, sess session.Session) (*Component, *miniredi
 	mr := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { _ = rdb.Close() })
-	return New(&joinTestApp{sess: sess}, NewQueue(rdb), online.NewStore(rdb)), mr
+	return New(&joinTestApp{sess: sess}, NewQueue(rdb), online.NewStore(rdb), ""), mr
 }
 
 // 排队等待期间断线重连：同一个 uid 再 Join 一次，队列里必须还是只有一条
@@ -169,7 +169,7 @@ func newStartMatchComponent(t *testing.T, app *startMatchTestApp) (*Component, *
 	qrdb := redis.NewClient(&redis.Options{Addr: qmr.Addr()})
 	ordb := redis.NewClient(&redis.Options{Addr: omr.Addr()})
 	t.Cleanup(func() { _ = qrdb.Close(); _ = ordb.Close() })
-	return New(app, NewQueue(qrdb), online.NewStore(ordb)), omr
+	return New(app, NewQueue(qrdb), online.NewStore(ordb), ""), omr
 }
 
 // queued 返回队列里现有的 uid（升序）。

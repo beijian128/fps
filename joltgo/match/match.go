@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nuid"
@@ -61,11 +62,30 @@ type Component struct {
 	app    pitaya.Pitaya
 	queue  *Queue
 	online *online.Store
+
+	// secret 是 GM 管理指令的共享密钥（来自 -gmkey）。为空 = 不提供管理入口，
+	// 因此 adminKeyAllowed 对空密钥一律拒绝。启动时由 main.go 写入。
+	//
+	// 用 atomic.Value 而不是裸字段：它由 main.go 在 app.Start() 之前写入、
+	// 由 RPC handler goroutine 读取，两者之间没有 happens-before（pitaya 的 RPC
+	// 走 NATS 回调），裸字段在这里是数据竞争。
+	secret atomic.Value // string
 }
 
-// New 构造 match 组件。
-func New(app pitaya.Pitaya, queue *Queue, onl *online.Store) *Component {
-	return &Component{app: app, queue: queue, online: onl}
+// UpdateSecret 更新 GM 管理密钥。
+func (c *Component) UpdateSecret(secret string) { c.secret.Store(secret) }
+
+// adminSecret 读当前密钥，未设置时返回空串（adminKeyAllowed 会因此拒绝一切请求）。
+func (c *Component) adminSecret() string {
+	v, _ := c.secret.Load().(string)
+	return v
+}
+
+// New 构造 match 组件。secret 为空表示本节点不提供 GM 管理入口。
+func New(app pitaya.Pitaya, queue *Queue, onl *online.Store, secret string) *Component {
+	c := &Component{app: app, queue: queue, online: onl}
+	c.UpdateSecret(secret)
+	return c
 }
 
 // Join 是远端 RPC handler（route "match.join"）：把已登录的会话加入匹配队列。

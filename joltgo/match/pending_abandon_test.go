@@ -83,7 +83,7 @@ func newPendingAbandonComponent(t *testing.T, app *pendingAbandonApp) (*Componen
 	qrdb := redis.NewClient(&redis.Options{Addr: qmr.Addr()})
 	ordb := redis.NewClient(&redis.Options{Addr: omr.Addr()})
 	t.Cleanup(func() { _ = qrdb.Close(); _ = ordb.Close() })
-	return New(app, NewQueue(qrdb), online.NewStore(ordb)), ordb
+	return New(app, NewQueue(qrdb), online.NewStore(ordb), ""), ordb
 }
 
 // 命中存量对局：只回 match_id，一个字节的副作用都不许有。

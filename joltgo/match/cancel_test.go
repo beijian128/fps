@@ -46,7 +46,7 @@ func newPushTestComponent(t *testing.T, sess session.Session) (*Component, *push
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { _ = rdb.Close() })
 	app := &pushRecordingApp{sess: sess}
-	return New(app, NewQueue(rdb), online.NewStore(rdb)), app
+	return New(app, NewQueue(rdb), online.NewStore(rdb), ""), app
 }
 
 func TestCancelRemovesFromQueue(t *testing.T) {
