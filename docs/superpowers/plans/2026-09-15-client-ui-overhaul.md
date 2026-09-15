@@ -299,6 +299,8 @@ git commit -m "feat: 客户端主题与字体 token" -m "Co-Authored-By: Codex <
 
 要点（完整实现按 spec §7 的布局逐屏搭节点树）：
 
+**同时创建每个界面的骨架脚本**（`ui/*.gd`，各自只有 `extends <控件类型>` + 一段职责注释，函数留到对应任务里实现）：生成的场景要在根节点挂上脚本，后续任务才有地方写 `render()` / `bind()`；脚本不存在时生成器会跳过挂载，届时就只能手改场景，所以这一步必须一起做。
+
 ```gdscript
 extends SceneTree
 ## 一次性生成 ui/ 下所有 .tscn 骨架。
