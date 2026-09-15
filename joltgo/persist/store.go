@@ -17,6 +17,10 @@ const (
 	// acct:<namespace>:<accountID>:0，便于将来按业务空间隔离。
 	accountNamespace uint32 = 1
 	accountKeyFormat        = "acct:%d:%d:%d"
+
+	// accountUsernameField 是账号 Hash 里用户名字段的编号。字段号一律取自
+	// 生成码，不手写数字（生成码改了字段顺序就会错位）。
+	accountUsernameField = protos.FieldDBAccount_Username
 )
 
 // AccountRecord 是业务层看到的账号持久化记录；生成类型不会越过本包。

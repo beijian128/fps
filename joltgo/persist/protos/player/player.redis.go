@@ -23,6 +23,7 @@ const (
 	REDBKey_REDB_KEY_UNSPECIFIED REDBKey = 0
 	REDBKey_UserBagDB            REDBKey = 1
 	REDBKey_UserWalletDB         REDBKey = 2
+	REDBKey_UserProfileDB        REDBKey = 3
 )
 
 // --- protobuf wire format 辅助函数（语言无关序列化，规则见 https://protobuf.dev/programming-guides/encoding/） ---
@@ -1131,6 +1132,949 @@ func (p *DBUserBag_DBItem) SetFields(conn redis.Conn, REDBKey uint32, ida, idb u
 
 			// --- 直存字段: AcquiredAt ---
 			args = append(args, fieldID, p.AcquiredAt)
+
+		default:
+			return fmt.Errorf("未知字段编号: %d", fieldID)
+		}
+	}
+
+	// 所有字段统一一次 HSET 写入
+	if len(args) > 1 {
+		_, err := conn.Do("HSET", args...)
+		return err
+	}
+	return nil
+}
+
+// ---------- 字段级 protobuf 编码/解码模板块（MarshalRedisProto / UnmarshalRedisProto
+// 与集合字段的字段级序列化方法共用） ----------
+//
+// 约定上下文变量：fieldEncode 向 buf 追加字节；fieldDecode 从 b 消费一个字段段，
+// 校验 wire 变量，解码结果写入 p.<Name>。
+
+// --- Message: DBUserProfile ---
+
+// FieldDBUserProfile 用于标识 Redis Hash 中的字段编号
+type FieldDBUserProfile uint32
+
+// FieldDBUserProfile_Xp 是字段 Xp 对应的 Redis Hash field 编号
+const FieldDBUserProfile_Xp FieldDBUserProfile = 1
+
+// FieldDBUserProfile_Kills 是字段 Kills 对应的 Redis Hash field 编号
+const FieldDBUserProfile_Kills FieldDBUserProfile = 2
+
+// FieldDBUserProfile_Deaths 是字段 Deaths 对应的 Redis Hash field 编号
+const FieldDBUserProfile_Deaths FieldDBUserProfile = 3
+
+// FieldDBUserProfile_Matches 是字段 Matches 对应的 Redis Hash field 编号
+const FieldDBUserProfile_Matches FieldDBUserProfile = 4
+
+// FieldDBUserProfile_Wins 是字段 Wins 对应的 Redis Hash field 编号
+const FieldDBUserProfile_Wins FieldDBUserProfile = 5
+
+// FieldDBUserProfile_Losses 是字段 Losses 对应的 Redis Hash field 编号
+const FieldDBUserProfile_Losses FieldDBUserProfile = 6
+
+// FieldDBUserProfile_SchemaVersion 是字段 SchemaVersion 对应的 Redis Hash field 编号
+const FieldDBUserProfile_SchemaVersion FieldDBUserProfile = 7
+
+// FieldDBUserProfileIDs 是所有字段编号常量的集合，类型为 []FieldDBUserProfile
+var FieldDBUserProfileIDs = []FieldDBUserProfile{
+	FieldDBUserProfile_Xp,
+	FieldDBUserProfile_Kills,
+	FieldDBUserProfile_Deaths,
+	FieldDBUserProfile_Matches,
+	FieldDBUserProfile_Wins,
+	FieldDBUserProfile_Losses,
+	FieldDBUserProfile_SchemaVersion,
+}
+
+// DBUserProfile 提供针对 DBUserProfile 消息的 Redis 存取操作
+type DBUserProfile struct {
+	Xp int64
+
+	Kills int32
+
+	Deaths int32
+
+	Matches int32
+
+	Wins int32
+
+	Losses int32
+
+	SchemaVersion DBSchemaVersion
+}
+
+// NewDBUserProfile 创建一个新的 DBUserProfile 实例
+func NewDBUserProfile() *DBUserProfile {
+	return &DBUserProfile{}
+}
+
+// MarshalRedisProto 将 DBUserProfile 序列化为 protobuf wire format 字节流。
+// 字节流与语言无关：任何语言使用同一份 .proto 定义即可解析。
+// 编码遵循 proto3 语义：零值标量/空字符串/空 bytes 不编码，message 字段恒编码，
+// repeated 逐元素编码（含零值），map 每键值对编码为子消息（field 1=key, field 2=value）。
+func (p *DBUserProfile) MarshalRedisProto() ([]byte, error) {
+	var buf []byte
+
+	// 字段 Xp（tag 1）
+
+	// 枚举与整型（varint）
+	if p.Xp != 0 {
+		buf = redisProtoAppendTag(buf, 1, 0)
+		buf = redisProtoAppendVarint(buf, uint64(p.Xp))
+	}
+
+	// 字段 Kills（tag 2）
+
+	// 枚举与整型（varint）
+	if p.Kills != 0 {
+		buf = redisProtoAppendTag(buf, 2, 0)
+		buf = redisProtoAppendVarint(buf, uint64(p.Kills))
+	}
+
+	// 字段 Deaths（tag 3）
+
+	// 枚举与整型（varint）
+	if p.Deaths != 0 {
+		buf = redisProtoAppendTag(buf, 3, 0)
+		buf = redisProtoAppendVarint(buf, uint64(p.Deaths))
+	}
+
+	// 字段 Matches（tag 4）
+
+	// 枚举与整型（varint）
+	if p.Matches != 0 {
+		buf = redisProtoAppendTag(buf, 4, 0)
+		buf = redisProtoAppendVarint(buf, uint64(p.Matches))
+	}
+
+	// 字段 Wins（tag 5）
+
+	// 枚举与整型（varint）
+	if p.Wins != 0 {
+		buf = redisProtoAppendTag(buf, 5, 0)
+		buf = redisProtoAppendVarint(buf, uint64(p.Wins))
+	}
+
+	// 字段 Losses（tag 6）
+
+	// 枚举与整型（varint）
+	if p.Losses != 0 {
+		buf = redisProtoAppendTag(buf, 6, 0)
+		buf = redisProtoAppendVarint(buf, uint64(p.Losses))
+	}
+
+	// 字段 SchemaVersion（tag 7）
+
+	// 枚举与整型（varint）
+	if p.SchemaVersion != 0 {
+		buf = redisProtoAppendTag(buf, 7, 0)
+		buf = redisProtoAppendVarint(buf, uint64(p.SchemaVersion))
+	}
+
+	return buf, nil
+}
+
+// UnmarshalRedisProto 从 protobuf wire format 字节流反序列化到 DBUserProfile。
+// 反序列化前会先重置自身；未知字段跳过，缺失字段保持零值（proto3 语义）。
+func (p *DBUserProfile) UnmarshalRedisProto(b []byte) error {
+	*p = DBUserProfile{}
+	for len(b) > 0 {
+		tag, n, err := redisProtoReadVarint(b)
+		if err != nil {
+			return fmt.Errorf("protobuf 读取字段 tag 失败: %v", err)
+		}
+		b = b[n:]
+		field := tag >> 3
+		wire := tag & 7
+		switch field {
+
+		case 1: // Xp
+
+			// 枚举与整型（varint）
+			if wire != 0 {
+				return fmt.Errorf("protobuf 字段 %s wire type 错误: %d", "Xp", wire)
+			}
+			v, n, err := redisProtoReadVarint(b)
+			if err != nil {
+				return err
+			}
+			b = b[n:]
+			p.Xp = int64(v)
+
+		case 2: // Kills
+
+			// 枚举与整型（varint）
+			if wire != 0 {
+				return fmt.Errorf("protobuf 字段 %s wire type 错误: %d", "Kills", wire)
+			}
+			v, n, err := redisProtoReadVarint(b)
+			if err != nil {
+				return err
+			}
+			b = b[n:]
+			p.Kills = int32(v)
+
+		case 3: // Deaths
+
+			// 枚举与整型（varint）
+			if wire != 0 {
+				return fmt.Errorf("protobuf 字段 %s wire type 错误: %d", "Deaths", wire)
+			}
+			v, n, err := redisProtoReadVarint(b)
+			if err != nil {
+				return err
+			}
+			b = b[n:]
+			p.Deaths = int32(v)
+
+		case 4: // Matches
+
+			// 枚举与整型（varint）
+			if wire != 0 {
+				return fmt.Errorf("protobuf 字段 %s wire type 错误: %d", "Matches", wire)
+			}
+			v, n, err := redisProtoReadVarint(b)
+			if err != nil {
+				return err
+			}
+			b = b[n:]
+			p.Matches = int32(v)
+
+		case 5: // Wins
+
+			// 枚举与整型（varint）
+			if wire != 0 {
+				return fmt.Errorf("protobuf 字段 %s wire type 错误: %d", "Wins", wire)
+			}
+			v, n, err := redisProtoReadVarint(b)
+			if err != nil {
+				return err
+			}
+			b = b[n:]
+			p.Wins = int32(v)
+
+		case 6: // Losses
+
+			// 枚举与整型（varint）
+			if wire != 0 {
+				return fmt.Errorf("protobuf 字段 %s wire type 错误: %d", "Losses", wire)
+			}
+			v, n, err := redisProtoReadVarint(b)
+			if err != nil {
+				return err
+			}
+			b = b[n:]
+			p.Losses = int32(v)
+
+		case 7: // SchemaVersion
+
+			// 枚举与整型（varint）
+			if wire != 0 {
+				return fmt.Errorf("protobuf 字段 %s wire type 错误: %d", "SchemaVersion", wire)
+			}
+			v, n, err := redisProtoReadVarint(b)
+			if err != nil {
+				return err
+			}
+			b = b[n:]
+			p.SchemaVersion = DBSchemaVersion(v)
+
+		default:
+			n, err = redisProtoSkip(b, wire)
+			if err != nil {
+				return err
+			}
+			b = b[n:]
+		}
+	}
+	return nil
+}
+
+// GetFields 从 Redis Hash 中读取指定字段的值，填充到当前结构体实例中
+// conn: Redis 连接
+// REDBKey: 业务维度 Key
+// ida, idb: 用于组成唯一 Hash Key 的两个 uint64 分片维度
+// fields: 要读取的字段编号列表，如 FieldDBUserProfile_Name, FieldDBUserProfile_Age
+//
+//	如果 fields 为空（长度为 0），则默认读取所有字段（即 FieldDBUserProfileIDs）
+//	集合字段（map/repeated）整体 protobuf 反序列化
+func (p *DBUserProfile) GetFields(conn redis.Conn, REDBKey uint32, ida, idb uint64, fields ...FieldDBUserProfile) error {
+	key := fmt.Sprintf("REDB#%d:%d:%d", REDBKey, ida, idb)
+
+	// 决定要操作的字段列表
+	fieldsToUse := fields
+	if len(fieldsToUse) == 0 {
+		fieldsToUse = FieldDBUserProfileIDs
+	}
+
+	// 构造 HMGET 参数：key + fieldID1 + fieldID2 + ...，一次取回全部字段值
+	args := []interface{}{key}
+	for _, fieldID := range fieldsToUse {
+		args = append(args, fieldID)
+	}
+
+	// 一次 HMGET 获取所有字段值
+	reply, err := conn.Do("HMGET", args...)
+	if err != nil {
+		return fmt.Errorf("HMGET 失败: %v", err)
+	}
+
+	// 解析返回的 []interface{} 列表
+	values, err := redis.Values(reply, nil)
+	if err != nil {
+		return fmt.Errorf("解析 HMGET 结果失败: %v", err)
+	}
+
+	// 逐一处理每个字段
+	fieldIndex := 0
+	for _, fieldID := range fieldsToUse {
+		switch fieldID {
+
+		case FieldDBUserProfile_Xp:
+
+			// --- 直读字段: Xp ---
+			if val, ok := values[fieldIndex].([]byte); ok && val != nil {
+
+				id, err := strconv.ParseInt(string(val), 10, 64)
+				if err != nil {
+					return fmt.Errorf("解析字段 %s 失败: %v", "Xp", err)
+				}
+				p.Xp = id
+
+			}
+
+		case FieldDBUserProfile_Kills:
+
+			// --- 直读字段: Kills ---
+			if val, ok := values[fieldIndex].([]byte); ok && val != nil {
+
+				id, err := strconv.ParseInt(string(val), 10, 32)
+				if err != nil {
+					return fmt.Errorf("解析字段 %s 失败: %v", "Kills", err)
+				}
+				p.Kills = int32(id)
+
+			}
+
+		case FieldDBUserProfile_Deaths:
+
+			// --- 直读字段: Deaths ---
+			if val, ok := values[fieldIndex].([]byte); ok && val != nil {
+
+				id, err := strconv.ParseInt(string(val), 10, 32)
+				if err != nil {
+					return fmt.Errorf("解析字段 %s 失败: %v", "Deaths", err)
+				}
+				p.Deaths = int32(id)
+
+			}
+
+		case FieldDBUserProfile_Matches:
+
+			// --- 直读字段: Matches ---
+			if val, ok := values[fieldIndex].([]byte); ok && val != nil {
+
+				id, err := strconv.ParseInt(string(val), 10, 32)
+				if err != nil {
+					return fmt.Errorf("解析字段 %s 失败: %v", "Matches", err)
+				}
+				p.Matches = int32(id)
+
+			}
+
+		case FieldDBUserProfile_Wins:
+
+			// --- 直读字段: Wins ---
+			if val, ok := values[fieldIndex].([]byte); ok && val != nil {
+
+				id, err := strconv.ParseInt(string(val), 10, 32)
+				if err != nil {
+					return fmt.Errorf("解析字段 %s 失败: %v", "Wins", err)
+				}
+				p.Wins = int32(id)
+
+			}
+
+		case FieldDBUserProfile_Losses:
+
+			// --- 直读字段: Losses ---
+			if val, ok := values[fieldIndex].([]byte); ok && val != nil {
+
+				id, err := strconv.ParseInt(string(val), 10, 32)
+				if err != nil {
+					return fmt.Errorf("解析字段 %s 失败: %v", "Losses", err)
+				}
+				p.Losses = int32(id)
+
+			}
+
+		case FieldDBUserProfile_SchemaVersion:
+
+			// --- 直读字段: SchemaVersion ---
+			if val, ok := values[fieldIndex].([]byte); ok && val != nil {
+
+				intValue, err := strconv.ParseInt(string(val), 10, 64)
+				if err != nil {
+					return fmt.Errorf("解析枚举字段 %s 失败: %v", "SchemaVersion", err)
+				}
+				p.SchemaVersion = DBSchemaVersion(int32(intValue))
+
+			}
+
+		default:
+			return fmt.Errorf("未知字段编号: %d", fieldID)
+		}
+		fieldIndex++
+	}
+
+	return nil
+}
+
+// SetFields 将当前结构体实例的字段值，存储到 Redis Hash 中
+// conn: Redis 连接
+// REDBKey: 业务维度 Key
+// ida, idb: 用于组成唯一 Hash Key 的两个 uint64 分片维度
+// fields: 要存储的字段编号列表，如 FieldDBUserProfile_Name, FieldDBUserProfile_Age
+//
+//	如果 fields 为空（长度为 0），则默认存储所有字段（即 FieldDBUserProfileIDs）
+//	集合字段（map/repeated）整体 protobuf 序列化后写入
+func (p *DBUserProfile) SetFields(conn redis.Conn, REDBKey uint32, ida, idb uint64, fields ...FieldDBUserProfile) error {
+	key := fmt.Sprintf("REDB#%d:%d:%d", REDBKey, ida, idb)
+	args := []interface{}{key}
+
+	// 决定要操作的字段列表
+	fieldsToUse := fields
+	if len(fieldsToUse) == 0 {
+		fieldsToUse = FieldDBUserProfileIDs
+	}
+
+	for _, fieldID := range fieldsToUse {
+		switch fieldID {
+
+		case FieldDBUserProfile_Xp:
+
+			// --- 直存字段: Xp ---
+			args = append(args, fieldID, p.Xp)
+
+		case FieldDBUserProfile_Kills:
+
+			// --- 直存字段: Kills ---
+			args = append(args, fieldID, p.Kills)
+
+		case FieldDBUserProfile_Deaths:
+
+			// --- 直存字段: Deaths ---
+			args = append(args, fieldID, p.Deaths)
+
+		case FieldDBUserProfile_Matches:
+
+			// --- 直存字段: Matches ---
+			args = append(args, fieldID, p.Matches)
+
+		case FieldDBUserProfile_Wins:
+
+			// --- 直存字段: Wins ---
+			args = append(args, fieldID, p.Wins)
+
+		case FieldDBUserProfile_Losses:
+
+			// --- 直存字段: Losses ---
+			args = append(args, fieldID, p.Losses)
+
+		case FieldDBUserProfile_SchemaVersion:
+
+			// --- 直存字段: SchemaVersion ---
+			args = append(args, fieldID, p.SchemaVersion)
+
+		default:
+			return fmt.Errorf("未知字段编号: %d", fieldID)
+		}
+	}
+
+	// 所有字段统一一次 HSET 写入
+	if len(args) > 1 {
+		_, err := conn.Do("HSET", args...)
+		return err
+	}
+	return nil
+}
+
+// ---------- 字段级 protobuf 编码/解码模板块（MarshalRedisProto / UnmarshalRedisProto
+// 与集合字段的字段级序列化方法共用） ----------
+//
+// 约定上下文变量：fieldEncode 向 buf 追加字节；fieldDecode 从 b 消费一个字段段，
+// 校验 wire 变量，解码结果写入 p.<Name>。
+
+// --- Message: DBMatchRecord ---
+
+// FieldDBMatchRecord 用于标识 Redis Hash 中的字段编号
+type FieldDBMatchRecord uint32
+
+// FieldDBMatchRecord_MatchId 是字段 MatchId 对应的 Redis Hash field 编号
+const FieldDBMatchRecord_MatchId FieldDBMatchRecord = 1
+
+// FieldDBMatchRecord_Won 是字段 Won 对应的 Redis Hash field 编号
+const FieldDBMatchRecord_Won FieldDBMatchRecord = 2
+
+// FieldDBMatchRecord_Kills 是字段 Kills 对应的 Redis Hash field 编号
+const FieldDBMatchRecord_Kills FieldDBMatchRecord = 3
+
+// FieldDBMatchRecord_Deaths 是字段 Deaths 对应的 Redis Hash field 编号
+const FieldDBMatchRecord_Deaths FieldDBMatchRecord = 4
+
+// FieldDBMatchRecord_OpponentKills 是字段 OpponentKills 对应的 Redis Hash field 编号
+const FieldDBMatchRecord_OpponentKills FieldDBMatchRecord = 5
+
+// FieldDBMatchRecord_DurationSeconds 是字段 DurationSeconds 对应的 Redis Hash field 编号
+const FieldDBMatchRecord_DurationSeconds FieldDBMatchRecord = 6
+
+// FieldDBMatchRecord_OpponentName 是字段 OpponentName 对应的 Redis Hash field 编号
+const FieldDBMatchRecord_OpponentName FieldDBMatchRecord = 7
+
+// FieldDBMatchRecord_EndedAt 是字段 EndedAt 对应的 Redis Hash field 编号
+const FieldDBMatchRecord_EndedAt FieldDBMatchRecord = 8
+
+// FieldDBMatchRecordIDs 是所有字段编号常量的集合，类型为 []FieldDBMatchRecord
+var FieldDBMatchRecordIDs = []FieldDBMatchRecord{
+	FieldDBMatchRecord_MatchId,
+	FieldDBMatchRecord_Won,
+	FieldDBMatchRecord_Kills,
+	FieldDBMatchRecord_Deaths,
+	FieldDBMatchRecord_OpponentKills,
+	FieldDBMatchRecord_DurationSeconds,
+	FieldDBMatchRecord_OpponentName,
+	FieldDBMatchRecord_EndedAt,
+}
+
+// DBMatchRecord 提供针对 DBMatchRecord 消息的 Redis 存取操作
+type DBMatchRecord struct {
+	MatchId string
+
+	Won bool
+
+	Kills int32
+
+	Deaths int32
+
+	OpponentKills int32
+
+	DurationSeconds int32
+
+	OpponentName string
+
+	EndedAt int64
+}
+
+// NewDBMatchRecord 创建一个新的 DBMatchRecord 实例
+func NewDBMatchRecord() *DBMatchRecord {
+	return &DBMatchRecord{}
+}
+
+// MarshalRedisProto 将 DBMatchRecord 序列化为 protobuf wire format 字节流。
+// 字节流与语言无关：任何语言使用同一份 .proto 定义即可解析。
+// 编码遵循 proto3 语义：零值标量/空字符串/空 bytes 不编码，message 字段恒编码，
+// repeated 逐元素编码（含零值），map 每键值对编码为子消息（field 1=key, field 2=value）。
+func (p *DBMatchRecord) MarshalRedisProto() ([]byte, error) {
+	var buf []byte
+
+	// 字段 MatchId（tag 1）
+
+	if p.MatchId != "" {
+		buf = redisProtoAppendTag(buf, 1, 2)
+		buf = redisProtoAppendLen(buf, []byte(p.MatchId))
+	}
+
+	// 字段 Won（tag 2）
+
+	if p.Won {
+		buf = redisProtoAppendTag(buf, 2, 0)
+		buf = redisProtoAppendVarint(buf, 1)
+	}
+
+	// 字段 Kills（tag 3）
+
+	// 枚举与整型（varint）
+	if p.Kills != 0 {
+		buf = redisProtoAppendTag(buf, 3, 0)
+		buf = redisProtoAppendVarint(buf, uint64(p.Kills))
+	}
+
+	// 字段 Deaths（tag 4）
+
+	// 枚举与整型（varint）
+	if p.Deaths != 0 {
+		buf = redisProtoAppendTag(buf, 4, 0)
+		buf = redisProtoAppendVarint(buf, uint64(p.Deaths))
+	}
+
+	// 字段 OpponentKills（tag 5）
+
+	// 枚举与整型（varint）
+	if p.OpponentKills != 0 {
+		buf = redisProtoAppendTag(buf, 5, 0)
+		buf = redisProtoAppendVarint(buf, uint64(p.OpponentKills))
+	}
+
+	// 字段 DurationSeconds（tag 6）
+
+	// 枚举与整型（varint）
+	if p.DurationSeconds != 0 {
+		buf = redisProtoAppendTag(buf, 6, 0)
+		buf = redisProtoAppendVarint(buf, uint64(p.DurationSeconds))
+	}
+
+	// 字段 OpponentName（tag 7）
+
+	if p.OpponentName != "" {
+		buf = redisProtoAppendTag(buf, 7, 2)
+		buf = redisProtoAppendLen(buf, []byte(p.OpponentName))
+	}
+
+	// 字段 EndedAt（tag 8）
+
+	// 枚举与整型（varint）
+	if p.EndedAt != 0 {
+		buf = redisProtoAppendTag(buf, 8, 0)
+		buf = redisProtoAppendVarint(buf, uint64(p.EndedAt))
+	}
+
+	return buf, nil
+}
+
+// UnmarshalRedisProto 从 protobuf wire format 字节流反序列化到 DBMatchRecord。
+// 反序列化前会先重置自身；未知字段跳过，缺失字段保持零值（proto3 语义）。
+func (p *DBMatchRecord) UnmarshalRedisProto(b []byte) error {
+	*p = DBMatchRecord{}
+	for len(b) > 0 {
+		tag, n, err := redisProtoReadVarint(b)
+		if err != nil {
+			return fmt.Errorf("protobuf 读取字段 tag 失败: %v", err)
+		}
+		b = b[n:]
+		field := tag >> 3
+		wire := tag & 7
+		switch field {
+
+		case 1: // MatchId
+
+			if wire != 2 {
+				return fmt.Errorf("protobuf 字段 %s wire type 错误: %d", "MatchId", wire)
+			}
+			v, n, err := redisProtoReadBytes(b)
+			if err != nil {
+				return err
+			}
+			b = b[n:]
+			p.MatchId = string(v)
+
+		case 2: // Won
+
+			if wire != 0 {
+				return fmt.Errorf("protobuf 字段 %s wire type 错误: %d", "Won", wire)
+			}
+			v, n, err := redisProtoReadVarint(b)
+			if err != nil {
+				return err
+			}
+			b = b[n:]
+			p.Won = v != 0
+
+		case 3: // Kills
+
+			// 枚举与整型（varint）
+			if wire != 0 {
+				return fmt.Errorf("protobuf 字段 %s wire type 错误: %d", "Kills", wire)
+			}
+			v, n, err := redisProtoReadVarint(b)
+			if err != nil {
+				return err
+			}
+			b = b[n:]
+			p.Kills = int32(v)
+
+		case 4: // Deaths
+
+			// 枚举与整型（varint）
+			if wire != 0 {
+				return fmt.Errorf("protobuf 字段 %s wire type 错误: %d", "Deaths", wire)
+			}
+			v, n, err := redisProtoReadVarint(b)
+			if err != nil {
+				return err
+			}
+			b = b[n:]
+			p.Deaths = int32(v)
+
+		case 5: // OpponentKills
+
+			// 枚举与整型（varint）
+			if wire != 0 {
+				return fmt.Errorf("protobuf 字段 %s wire type 错误: %d", "OpponentKills", wire)
+			}
+			v, n, err := redisProtoReadVarint(b)
+			if err != nil {
+				return err
+			}
+			b = b[n:]
+			p.OpponentKills = int32(v)
+
+		case 6: // DurationSeconds
+
+			// 枚举与整型（varint）
+			if wire != 0 {
+				return fmt.Errorf("protobuf 字段 %s wire type 错误: %d", "DurationSeconds", wire)
+			}
+			v, n, err := redisProtoReadVarint(b)
+			if err != nil {
+				return err
+			}
+			b = b[n:]
+			p.DurationSeconds = int32(v)
+
+		case 7: // OpponentName
+
+			if wire != 2 {
+				return fmt.Errorf("protobuf 字段 %s wire type 错误: %d", "OpponentName", wire)
+			}
+			v, n, err := redisProtoReadBytes(b)
+			if err != nil {
+				return err
+			}
+			b = b[n:]
+			p.OpponentName = string(v)
+
+		case 8: // EndedAt
+
+			// 枚举与整型（varint）
+			if wire != 0 {
+				return fmt.Errorf("protobuf 字段 %s wire type 错误: %d", "EndedAt", wire)
+			}
+			v, n, err := redisProtoReadVarint(b)
+			if err != nil {
+				return err
+			}
+			b = b[n:]
+			p.EndedAt = int64(v)
+
+		default:
+			n, err = redisProtoSkip(b, wire)
+			if err != nil {
+				return err
+			}
+			b = b[n:]
+		}
+	}
+	return nil
+}
+
+// GetFields 从 Redis Hash 中读取指定字段的值，填充到当前结构体实例中
+// conn: Redis 连接
+// REDBKey: 业务维度 Key
+// ida, idb: 用于组成唯一 Hash Key 的两个 uint64 分片维度
+// fields: 要读取的字段编号列表，如 FieldDBMatchRecord_Name, FieldDBMatchRecord_Age
+//
+//	如果 fields 为空（长度为 0），则默认读取所有字段（即 FieldDBMatchRecordIDs）
+//	集合字段（map/repeated）整体 protobuf 反序列化
+func (p *DBMatchRecord) GetFields(conn redis.Conn, REDBKey uint32, ida, idb uint64, fields ...FieldDBMatchRecord) error {
+	key := fmt.Sprintf("REDB#%d:%d:%d", REDBKey, ida, idb)
+
+	// 决定要操作的字段列表
+	fieldsToUse := fields
+	if len(fieldsToUse) == 0 {
+		fieldsToUse = FieldDBMatchRecordIDs
+	}
+
+	// 构造 HMGET 参数：key + fieldID1 + fieldID2 + ...，一次取回全部字段值
+	args := []interface{}{key}
+	for _, fieldID := range fieldsToUse {
+		args = append(args, fieldID)
+	}
+
+	// 一次 HMGET 获取所有字段值
+	reply, err := conn.Do("HMGET", args...)
+	if err != nil {
+		return fmt.Errorf("HMGET 失败: %v", err)
+	}
+
+	// 解析返回的 []interface{} 列表
+	values, err := redis.Values(reply, nil)
+	if err != nil {
+		return fmt.Errorf("解析 HMGET 结果失败: %v", err)
+	}
+
+	// 逐一处理每个字段
+	fieldIndex := 0
+	for _, fieldID := range fieldsToUse {
+		switch fieldID {
+
+		case FieldDBMatchRecord_MatchId:
+
+			// --- 直读字段: MatchId ---
+			if val, ok := values[fieldIndex].([]byte); ok && val != nil {
+
+				p.MatchId = string(val)
+
+			}
+
+		case FieldDBMatchRecord_Won:
+
+			// --- 直读字段: Won ---
+			if val, ok := values[fieldIndex].([]byte); ok && val != nil {
+
+				if len(val) > 0 && val[0] == '1' {
+					p.Won = true
+				} else if len(val) > 0 && val[0] == '0' {
+					p.Won = false
+				}
+
+			}
+
+		case FieldDBMatchRecord_Kills:
+
+			// --- 直读字段: Kills ---
+			if val, ok := values[fieldIndex].([]byte); ok && val != nil {
+
+				id, err := strconv.ParseInt(string(val), 10, 32)
+				if err != nil {
+					return fmt.Errorf("解析字段 %s 失败: %v", "Kills", err)
+				}
+				p.Kills = int32(id)
+
+			}
+
+		case FieldDBMatchRecord_Deaths:
+
+			// --- 直读字段: Deaths ---
+			if val, ok := values[fieldIndex].([]byte); ok && val != nil {
+
+				id, err := strconv.ParseInt(string(val), 10, 32)
+				if err != nil {
+					return fmt.Errorf("解析字段 %s 失败: %v", "Deaths", err)
+				}
+				p.Deaths = int32(id)
+
+			}
+
+		case FieldDBMatchRecord_OpponentKills:
+
+			// --- 直读字段: OpponentKills ---
+			if val, ok := values[fieldIndex].([]byte); ok && val != nil {
+
+				id, err := strconv.ParseInt(string(val), 10, 32)
+				if err != nil {
+					return fmt.Errorf("解析字段 %s 失败: %v", "OpponentKills", err)
+				}
+				p.OpponentKills = int32(id)
+
+			}
+
+		case FieldDBMatchRecord_DurationSeconds:
+
+			// --- 直读字段: DurationSeconds ---
+			if val, ok := values[fieldIndex].([]byte); ok && val != nil {
+
+				id, err := strconv.ParseInt(string(val), 10, 32)
+				if err != nil {
+					return fmt.Errorf("解析字段 %s 失败: %v", "DurationSeconds", err)
+				}
+				p.DurationSeconds = int32(id)
+
+			}
+
+		case FieldDBMatchRecord_OpponentName:
+
+			// --- 直读字段: OpponentName ---
+			if val, ok := values[fieldIndex].([]byte); ok && val != nil {
+
+				p.OpponentName = string(val)
+
+			}
+
+		case FieldDBMatchRecord_EndedAt:
+
+			// --- 直读字段: EndedAt ---
+			if val, ok := values[fieldIndex].([]byte); ok && val != nil {
+
+				id, err := strconv.ParseInt(string(val), 10, 64)
+				if err != nil {
+					return fmt.Errorf("解析字段 %s 失败: %v", "EndedAt", err)
+				}
+				p.EndedAt = id
+
+			}
+
+		default:
+			return fmt.Errorf("未知字段编号: %d", fieldID)
+		}
+		fieldIndex++
+	}
+
+	return nil
+}
+
+// SetFields 将当前结构体实例的字段值，存储到 Redis Hash 中
+// conn: Redis 连接
+// REDBKey: 业务维度 Key
+// ida, idb: 用于组成唯一 Hash Key 的两个 uint64 分片维度
+// fields: 要存储的字段编号列表，如 FieldDBMatchRecord_Name, FieldDBMatchRecord_Age
+//
+//	如果 fields 为空（长度为 0），则默认存储所有字段（即 FieldDBMatchRecordIDs）
+//	集合字段（map/repeated）整体 protobuf 序列化后写入
+func (p *DBMatchRecord) SetFields(conn redis.Conn, REDBKey uint32, ida, idb uint64, fields ...FieldDBMatchRecord) error {
+	key := fmt.Sprintf("REDB#%d:%d:%d", REDBKey, ida, idb)
+	args := []interface{}{key}
+
+	// 决定要操作的字段列表
+	fieldsToUse := fields
+	if len(fieldsToUse) == 0 {
+		fieldsToUse = FieldDBMatchRecordIDs
+	}
+
+	for _, fieldID := range fieldsToUse {
+		switch fieldID {
+
+		case FieldDBMatchRecord_MatchId:
+
+			// --- 直存字段: MatchId ---
+			args = append(args, fieldID, p.MatchId)
+
+		case FieldDBMatchRecord_Won:
+
+			// --- 直存字段: Won ---
+			args = append(args, fieldID, p.Won)
+
+		case FieldDBMatchRecord_Kills:
+
+			// --- 直存字段: Kills ---
+			args = append(args, fieldID, p.Kills)
+
+		case FieldDBMatchRecord_Deaths:
+
+			// --- 直存字段: Deaths ---
+			args = append(args, fieldID, p.Deaths)
+
+		case FieldDBMatchRecord_OpponentKills:
+
+			// --- 直存字段: OpponentKills ---
+			args = append(args, fieldID, p.OpponentKills)
+
+		case FieldDBMatchRecord_DurationSeconds:
+
+			// --- 直存字段: DurationSeconds ---
+			args = append(args, fieldID, p.DurationSeconds)
+
+		case FieldDBMatchRecord_OpponentName:
+
+			// --- 直存字段: OpponentName ---
+			args = append(args, fieldID, p.OpponentName)
+
+		case FieldDBMatchRecord_EndedAt:
+
+			// --- 直存字段: EndedAt ---
+			args = append(args, fieldID, p.EndedAt)
 
 		default:
 			return fmt.Errorf("未知字段编号: %d", fieldID)

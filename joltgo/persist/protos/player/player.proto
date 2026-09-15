@@ -8,6 +8,7 @@ enum REDBKey {
   REDB_KEY_UNSPECIFIED = 0;
   UserBagDB = 1;
   UserWalletDB = 2;
+  UserProfileDB = 3;
 }
 
 enum DBSchemaVersion {
@@ -34,4 +35,25 @@ message DBUserBag {
     int64 quantity = 2;
     int64 acquired_at = 3;
   }
+}
+
+message DBUserProfile {
+  int64 xp = 1;
+  int32 kills = 2;
+  int32 deaths = 3;
+  int32 matches = 4;
+  int32 wins = 5;
+  int32 losses = 6;
+  DBSchemaVersion schema_version = 7;
+}
+
+message DBMatchRecord {
+  string match_id = 1;
+  bool won = 2;
+  int32 kills = 3;
+  int32 deaths = 4;
+  int32 opponent_kills = 5;
+  int32 duration_seconds = 6;
+  string opponent_name = 7;
+  int64 ended_at = 8;
 }
