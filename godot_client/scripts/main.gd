@@ -75,13 +75,6 @@ var _jump_held := false
 var _jump_queued := false
 # 本帧待上报的射击 / 重置：与输入合并成一条 game.cmd 发出，帧是最小发送单位。
 var _pending_shot := {}
-var _pending_reset := false
-# 服务端 Reset() 会把**全部**存活实体标死（含玩家与静态刚体），重置帧因此带回一整批
-# destroy；那是「重开」不是「命中/拾取」，照常反馈就会在重置瞬间按每个存活弹丸放一声
-# 命中、每枚金币放一声拾取。按了 Reset 后置起此闩锁，识别出重置帧再清掉。
-# 不能只静音「下一帧」：重置命令要等下一个服务端 tick 才生效，其间还会先到常规帧，
-# 而且重置生效的那个 tick 也未必正好落在客户端紧接着收到的下一帧上。
-var _reset_pending := false
 
 var _fps_ema := 60.0
 # HUD 读数：本机战绩 + 对手血量 + 对局结果（全部从 store 的属性名读，见 _update_hud）。
@@ -123,6 +116,7 @@ func _ready() -> void:
 	_build_hud()
 	fps_client.frame_received.connect(_on_frame)
 	fps_client.matched_received.connect(_on_matched)
+	fps_client.match_ended_received.connect(_on_match_ended)
 	fps_client.connection_changed.connect(_on_connection)
 	fps_client.login_result.connect(_on_login_result)
 	fps_client.logic_state_received.connect(_on_logic_state)
@@ -140,6 +134,35 @@ func _on_matched(result: Dictionary) -> void:
 	_reset_interp()
 	fps_client.send_resync()
 
+## _on_match_ended 本局结束：服务端实例已经终结，帧流不会再来。
+##
+## 三件事缺一不可：离开对局态（等于停掉 2.5 秒接收看门狗）、清空本地世界（下一局的实体
+## id 会从头开始，残留的渲染节点会串台）、给出可见提示。**不自动重新入队** —— 重新匹配
+## 必须由玩家主动发起（正式的大厅/结算界面属于 B 子项目，这里只留临时提示）。
+func _on_match_ended(result: Dictionary) -> void:
+	_matched = false
+	_store.clear()
+	_reset_interp()
+	for id in _entities:
+		_entities[id].queue_free()
+	_entities = {}
+	conn_label.text = _match_ended_text(result)
+	conn_label.visible = true
+
+## _match_ended_text 结算提示的临时文案（B 子项目会用真正的结算界面替换它）。
+## 读的是**自己槽位**的战绩，不是胜者槽位的 —— 两边的 k/d 是一对镜像数字，
+## 读错了会把自己的战绩显示成对手的。
+func _match_ended_text(result: Dictionary) -> String:
+	var winner := int(result.get("winner_slot", -1))
+	var slots: Array = result.get("slots", [])
+	var duration := int(result.get("duration_seconds", 0))
+	if winner < 0 or slots.size() < 2 or _my_player_idx >= slots.size():
+		return "本局结束，按 Enter 重新匹配"
+	var result_text := "胜利" if winner == _my_player_idx else "失败"
+	var mine: Dictionary = slots[_my_player_idx]
+	return "本局结束：%s（我方 %d 杀 %d 死，用时 %d 秒），按 Enter 重新匹配" % [
+		result_text, int(mine["kills"]), int(mine["deaths"]), duration]
+
 func _on_connection(connected: bool) -> void:
 	if connected:
 		# 登录成功之前不能写「正在匹配…」——那时候还没有发 join。
@@ -153,8 +176,6 @@ func _on_connection(connected: bool) -> void:
 		_clear_logic_state()
 		if _logic_panel != null:
 			_logic_panel.visible = false
-		# 断线后重置帧可能永远不会到达，闩锁留着会误静音重连后第一次真实销毁反馈。
-		_reset_pending = false
 		_store.clear()
 		_reset_interp()
 		# 刚体渲染节点一并清空：重连前不知道哪些 id 还会复用，全部交给重连后的
@@ -239,8 +260,8 @@ func _process(delta: float) -> void:
 	#
 	# 匹配成功**前**不发：那时 gate 还没把 gameServerId 绑定到会话（要等 match
 	# 配对完走 bindGameOn），每条 game.cmd 都会落进 gate 的「no game server bound
-	# to session」分支、被 pitaya 打一条错误日志 —— 匹配最坏要等 10 s（单人兜底），
-	# 按每秒上百行算就是上千行噪音。待上报的跳跃/射击/重置状态照常消费清空，
+	# to session」分支、被 pitaya 打一条错误日志 —— 匹配期（没有单人兜底，可能等更久）
+	# 按每秒上百行算就是上千行噪音。待上报的跳跃/射击状态照常消费清空，
 	# 只是不发出（否则重建连接后会把过期输入补发出去）。
 	var move := _wish_velocity() if captured else Vector2.ZERO
 	var jump := _jump_queued
@@ -277,6 +298,13 @@ func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and event.keycode == KEY_B:
 		if _logic_authenticated:
 			_toggle_logic_panel()
+		return
+	if event is InputEventKey and event.pressed and event.keycode == KEY_ENTER:
+		# 结算后的临时「再来一局」入口：B 子项目会用真正的匹配/结算界面替换它。
+		if _logic_authenticated and not _matched:
+			conn_label.text = "正在匹配…"
+			conn_label.visible = true
+			fps_client.send_match_join()
 		return
 	if _logic_panel != null and _logic_panel.visible:
 		return
@@ -354,13 +382,8 @@ func _on_frame(frame: Dictionary) -> void:
 
 	_reconcile_scene()
 	var destroyed: Array = res.get("destroyed", [])
-	if _reset_pending and _is_reset_frame(destroyed):
-		# 识别出重置帧：整批 destroy 都是「重开」，不触发命中/拾取反馈（只做场景清理，
-		# 那已由上面的 _reconcile_scene 完成）。
-		_reset_pending = false
-	else:
-		for ev: Variant in destroyed:
-			_on_entity_destroyed(ev as Dictionary)
+	for ev: Variant in destroyed:
+		_on_entity_destroyed(ev as Dictionary)
 	_update_hud()
 	# 收尾再插值一次。Godot 先跑父节点 _process（里面已有一次 _render_interpolated）
 	# 再跑子节点 FpsClient._process，而后者同步 emit frame_received → 这里；上面
@@ -395,17 +418,6 @@ func _refresh_derived() -> void:
 			_remote_pos_target = feet
 			_prev_remote_yaw = _remote_yaw
 			_remote_yaw_target = float(_store.attr(eid, "Facing"))
-
-## _is_reset_frame 判定这一帧的销毁是不是服务端 Reset() 引发的。Reset 会销毁包括
-## 玩家（带 Player.Idx）与静态刚体（Body.Static）在内的**全部**实体，而正常玩法里
-## 这两类从不销毁（玩家血尽只是原地满血复活，不销毁实体）。销毁事件按实体 id 升序
-## 到达，不能等撞见玩家那一条再回头补救，必须在整帧开始反馈之前就判定。
-func _is_reset_frame(destroyed: Array) -> bool:
-	for ev: Variant in destroyed:
-		var attrs: Dictionary = (ev as Dictionary).get("attrs", {})
-		if attrs.has("Player.Idx") or bool(attrs.get("Body.Static", false)):
-			return true
-	return false
 
 ## _on_entity_destroyed 消失的实体触发对应反馈。销毁事件带着消失前的属性，
 ## 所以这里能分辨消失的是弹丸（爆闪 + 命中音）还是别的什么。
@@ -558,14 +570,6 @@ func _shoot() -> void:
 		create_tween().tween_property(_muzzle_flash, "visible", false, 0.0).set_delay(0.05)
 	# 射击与移动/跳跃合并进本渲染帧的一条 game.cmd：这里只记下待上报的弹道。
 	_pending_shot = {"origin": origin, "dir": dir}
-
-func _on_reset_pressed() -> void:
-	_last_health = 100.0
-	_last_opp_health = 100.0
-	# reset 是一个边沿：下一渲染帧与输入合并成一条命令上报一次。
-	_pending_reset = true
-	# 同时置起销毁反馈闩锁：重置帧会带回整批 destroy，不该被当成命中/拾取（见变量说明）。
-	_reset_pending = true
 
 func _pop(point: Vector3, color: Color, size: float, ttl: float) -> void:
 	var m := SphereMesh.new()
@@ -1188,16 +1192,6 @@ func _build_hud() -> void:
 	hint.offset_right = 420.0
 	hint.offset_bottom = -20.0
 	layer.add_child(hint)
-
-	var reset_btn := Button.new()
-	reset_btn.text = "Reset"
-	reset_btn.set_anchors_preset(Control.PRESET_TOP_RIGHT)
-	reset_btn.offset_left = -110.0
-	reset_btn.offset_top = 12.0
-	reset_btn.offset_right = -14.0
-	reset_btn.offset_bottom = 44.0
-	reset_btn.pressed.connect(_on_reset_pressed)
-	layer.add_child(reset_btn)
 
 	overlay = ColorRect.new()
 	overlay.color = Color(Color("0d1117"), 0.85)
