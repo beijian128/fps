@@ -302,14 +302,8 @@ func TestDeltaStreamRebuildsFullState(t *testing.T) {
 		t.Fatalf("弹丸 %d 已被销毁，客户端 store 里不应还有它：%+v", doomed, attrs)
 	}
 
-	// 场景重建走的是「所有旧实体各发一条 destroy、随后整体重建」的路径，
-	// 而且刚体 id 会从头复用 —— 正好覆盖上面 destroy+set 同帧那个分支。
-	s.Reset()
-	for i := 0; i < 5; i++ {
-		s.Step()
-		applyFrame(s.DrainFrame())
-	}
-
+	// 场景重置已删除（一局结束即终结实例），所以同一实例内的刚体 id 不再复用，
+	// 上面那条「已下发过的实体被销毁」已经覆盖了 destroy 路径。
 	// 客户端 store 从零开始，只吃增量流；跑完应与服务端的全量逐项相等。
 	got := storeAttrsOf(client)
 	want := expectedAttrs(s)

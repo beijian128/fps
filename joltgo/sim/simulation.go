@@ -163,13 +163,11 @@ func New(p Physics) *Simulation {
 	}
 }
 
-// Init 创建物理世界与初始场景。只在启动时调用一次；重复调用等同 Reset（幂等，
-// 不会叠加场景或残留旧实体）。
+// Init 创建物理世界与初始场景。**每个 Simulation 只调用一次**（实例创建时调用）：
+// 世界生命周期 = 实例生命周期，因此实体 id 在单个实例内不会复用。
+//
+// 场景重置功能已删除（见 spec §6.1）：一局结束即终结实例，要再打一局就回大厅重新匹配。
 func (s *Simulation) Init() {
-	if s.players[0] != ecs.InvalidEntity {
-		s.reset()
-		return
-	}
 	s.init()
 }
 
@@ -203,11 +201,6 @@ func (s *Simulation) Shoot(playerIdx int, origin, dir [3]float32) uint32 {
 		return 0
 	}
 	return s.shoot(playerIdx, origin, dir)
-}
-
-// Reset 销毁并重建整个场景，重置所有游戏状态与输入。
-func (s *Simulation) Reset() {
-	s.reset()
 }
 
 // Step 推进一个模拟 tick（1/20 秒），按固定顺序运行各系统。
@@ -292,21 +285,6 @@ func (s *Simulation) init() {
 	// 同步一次变换，让首帧快照带上角色着地后的真实位置；命中盒也一并贴上去。
 	s.syncSystem()
 	s.hitboxFollowSystem()
-}
-
-func (s *Simulation) reset() {
-	s.physics.Destroy()
-	s.world = ecs.New()
-	s.rep.Reset() // 与世界一起重建：清掉终值表与已下发基线，重建后的世界整体重新下发
-	for i := range s.players {
-		s.players[i] = ecs.InvalidEntity
-		s.hitboxes[i] = ecs.InvalidEntity
-	}
-	s.game = ecs.InvalidEntity
-	s.step = 0
-	s.score = [MaxPlayers]PlayerScore{}
-	s.winner = -1
-	s.init() // init 里统一重置对局状态并搭建场景
 }
 
 // syncGameState 把 Simulation 的对局结果写进单例实体的 GameState 组件。

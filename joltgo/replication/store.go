@@ -153,25 +153,6 @@ func (s *Store) Destroy(id uint32) {
 	s.dead[id] = true
 }
 
-// Reset 丢弃全部实体与脏集，保留属性声明（对局 Reset 用）。
-//
-// 两条都不能少：
-//   - 已下发过的实体各自保留一条待发的 destroy，否则场景重建后客户端会残留
-//     那些 id 不再被复用的旧实体。
-//   - 已下发基线（sent）必须一并清掉：重建后刚体 id 会从头发放，若基线还在，
-//     新实体的 Set 会因为「与旧实体的值相同」被静默抑制 —— 客户端收到 destroy
-//     却再也收不到重建，而那些只在创建时 Set 一次的属性（Body.*）就永久丢了。
-//     清掉基线的副作用正是我们想要的：重建后的世界整体重新下发一次。
-func (s *Store) Reset() {
-	for id := range s.values {
-		s.dead[id] = true
-	}
-	s.values = map[uint32]map[uint32]Value{}
-	s.sent = map[uint32]map[uint32]Value{}
-	s.dirty = map[uint32]map[uint32]bool{}
-	s.gone = map[uint32]map[uint32]bool{}
-}
-
 // Get 返回实体 id 的属性 attr 的终值；不存在时返回 (Value{}, false)。
 // 供测试与调试使用，不参与同步路径。属性名未声明时与 Set 一样 panic
 // （先校验名字再查实体，避免同一个错误在实体不存在时被静默吞掉）。

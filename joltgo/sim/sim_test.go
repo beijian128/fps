@@ -794,41 +794,6 @@ func TestApplyInputMovesPlayer(t *testing.T) {
 	}
 }
 
-func TestResetRebuildsScene(t *testing.T) {
-	s, p := newTestSim(t)
-	s.Shoot(0, shoot0(), [3]float32{1, 0, 0})
-	proj := s.Shoot(0, shoot0(), [3]float32{1, 0, 0})
-	p.queueContact(proj, uint32(s.hitboxes[1]))
-	for i := 0; i < 5; i++ {
-		s.Step()
-	}
-
-	s.Reset()
-
-	st := snapshotWorld(s)
-	if st.Step != 0 || st.Winner != -1 {
-		t.Fatalf("Reset 后对局状态应清零，得到 step=%d winner=%d", st.Step, st.Winner)
-	}
-	if h := st.Players[1].Health; h != float32(playerMaxHealth) {
-		t.Fatalf("Reset 后血量应为满血，得到 %v", h)
-	}
-	want := sceneBodyCount()
-	if len(st.Bodies) != want {
-		t.Fatalf("Reset 后场景应重建（%d 个可渲染刚体），得到 %d", want, len(st.Bodies))
-	}
-	if got := p.bodyCount(); got != want+MaxPlayers {
-		t.Fatalf("Reset 后命中盒也应重建（物理刚体共 %d），得到 %d", want+MaxPlayers, got)
-	}
-	// 物理世界重建后刚体 id 从头开始分配（命中盒在场景之后创建，因此排在它们后面）。
-	if st.Bodies[0].ID != 1 || st.Bodies[len(st.Bodies)-1].ID != uint32(want) {
-		t.Fatalf("重建后刚体 id 应从 1 重新分配，得到 %d..%d",
-			st.Bodies[0].ID, st.Bodies[len(st.Bodies)-1].ID)
-	}
-	if uint32(s.hitboxes[0]) <= uint32(want) {
-		t.Fatalf("命中盒应在场景之后创建（id > %d），得到 %d", want, s.hitboxes[0])
-	}
-}
-
 func TestSnapshotStableAfterRemovals(t *testing.T) {
 	s, p := newTestSim(t)
 	deck := snapshotWorld(s).Bodies[0].ID
@@ -863,33 +828,6 @@ func TestInputClampedToMaxSpeed(t *testing.T) {
 	}
 }
 
-func TestInitIsIdempotent(t *testing.T) {
-	s, p := newTestSim(t)
-	before := p.bodyCount()
-	// 造点"噪音"：发弹、推进几 tick。
-	s.Shoot(0, shoot0(), [3]float32{1, 0, 0})
-	for i := 0; i < 3; i++ {
-		s.Step()
-	}
-
-	// 重复 Init 应等同 Reset：重建场景而不是叠加/残留。
-	s.Init()
-	if p.createCalls != 2 {
-		t.Fatalf("重复 Init 应重建物理世界（Create 共 2 次），得到 %d", p.createCalls)
-	}
-	if got := p.bodyCount(); got != before {
-		t.Fatalf("重复 Init 不应叠加场景：刚体 %d → %d", before, got)
-	}
-	st := snapshotWorld(s)
-	if st.Step != 0 || st.Winner != -1 || player0(st).Health != float32(playerMaxHealth) {
-		t.Fatalf("重复 Init 后状态应回到初始，得到 step=%d winner=%d hp=%v",
-			st.Step, st.Winner, player0(st).Health)
-	}
-	if len(projectilesOf(st)) != 0 {
-		t.Fatalf("重复 Init 后应无残留弹丸，得到 %d", len(projectilesOf(st)))
-	}
-}
-
 // 全局状态单例在 init 之后必须立刻与 Go 侧字段一致（组件是用零值建的，
 // 漏掉这次同步会让客户端在首次分出胜负前就读到「已结束」）。
 func TestGameStateSyncedAtInit(t *testing.T) {
@@ -902,15 +840,6 @@ func TestGameStateSyncedAtInit(t *testing.T) {
 		t.Fatalf("init 后组件应与 Go 侧一致：组件 Winner=%d，Go 侧 winner=%d", gs.Winner, s.winner)
 	}
 
-	// Reset 重建世界后同样要立刻同步：单例是新实体、组件又回到零值。
-	s.Reset()
-	gs, ok = ecs.Get[GameState](s.world, s.GameEntity())
-	if !ok {
-		t.Fatal("Reset 后应有全局状态单例实体")
-	}
-	if gs.Winner != s.winner {
-		t.Fatalf("Reset 后组件应与 Go 侧一致：组件 Winner=%d，Go 侧 winner=%d", gs.Winner, s.winner)
-	}
 }
 
 // TestTwoPlayersIndependentInputs 验证两名玩家有独立输入与位置。

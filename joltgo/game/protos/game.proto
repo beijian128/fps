@@ -23,8 +23,8 @@ package game;
 
 option go_package = "joltgo/game/protos";
 
-// CommandMsg 是一帧的上行命令：把输入、射击、重置合并成一条消息发送
-// （帧是最小发送单位）。shoot/reset 是边沿触发，未触发时为 false。
+// CommandMsg 是一帧的上行命令：把输入与射击合并成一条消息发送（帧是最小发送单位）。
+// shoot 是边沿触发，未触发时为 false。
 message CommandMsg {
   repeated float move = 1;   // [wx, wz]，世界空间水平期望速度（m/s）
   float yaw = 2;             // 水平朝向（弧度，绕 Y 轴）
@@ -32,7 +32,8 @@ message CommandMsg {
   bool shoot = 4;            // 射击边沿触发
   repeated float origin = 5; // [x, y, z] 枪口位置（shoot 为 true 时有效）
   repeated float dir = 6;    // [x, y, z] 射击方向（服务端会归一化）
-  bool reset = 7;            // 重建场景边沿触发
+  reserved 7;                // 曾是 bool reset（场景重置），功能已删除，字段号不再复用
+  reserved "reset";
 }
 
 // JoinMsg 是加入匹配的请求。身份来自会话绑定（account 服务在登录时做的），

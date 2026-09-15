@@ -276,8 +276,3 @@ func (i *Instance) ApplyInput(playerIdx int, move [2]float32, yaw float32, jump 
 func (i *Instance) Shoot(playerIdx int, origin, dir [3]float32) {
 	i.enqueue(func() { i.sim.Shoot(playerIdx, origin, dir) })
 }
-
-// Reset 重建对局场景。
-func (i *Instance) Reset() {
-	i.enqueue(func() { i.sim.Reset() })
-}

@@ -186,11 +186,6 @@ func (c *Component) Cmd(ctx context.Context, msg *protos.CommandMsg) {
 		}
 		inst.Shoot(idx, origin, dir)
 	}
-	// 字段名 reset 与 protoc-gen-go 生成的 Reset() 方法冲突，被重命名为 Reset_
-	// （wire 字段号仍是 7，语义不变）。
-	if msg.Reset_ {
-		inst.Reset()
-	}
 }
 
 // Resync 是远端 RPC handler（route "game.resync"）：把该玩家的下一帧标为全量。
