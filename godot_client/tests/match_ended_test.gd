@@ -1,64 +1,127 @@
 extends SceneTree
-## 对局结束（onMatchEnded）必须让客户端进入「已结束」状态：停掉接收看门狗、清空本地
-## 世界，且**不触发重连、不自动重新入队**。
+## 本局结束后客户端必须进入结算态，而且**不自动重新入队**。
 ##
-## 这是去掉自动重开之后最容易被忽略的一条：服务端实例一终结，帧流就断；若客户端仍认为
-## 自己在对局里，2.5 秒的接收看门狗会把「本局结束」误判成掉线，于是重连、resume、重新
-## 入队 —— 玩家看到的是「打完了 → 闪一下重连 → 又排上队」。
+## 两件事分属两层，各自断言：
+##   - 界面状态：screen_manager 订阅 match_ended_received → RESULT（结算层可见、HUD 与大厅隐藏）
+##   - 本地世界：main 订阅同一个信号 → 清空实体缓存与插值状态（下一局的实体 id 会从头开始，
+##     残留节点会串台）
+## 测试里注入假客户端驱动界面层；世界清理直接调 main 的处理函数（真实接线由冒烟测试覆盖）。
 ##
-## 运行：godot --headless --path godot_client --script res://tests/match_ended_test.gd
+## 运行：Godot_v4.7.2-stable_win64_console.exe --headless --path godot_client \
+##         --script res://tests/match_ended_test.gd
 
 const MainScene := preload("res://scenes/main.tscn")
+const ScreenManager := preload("res://ui/screen_manager.gd")
 
 var _failures := 0
 var _done := {}
+var _main: Node = null
+var _fake: Node = null
+
+class FakeClient:
+	extends Node
+
+	signal frame_received(frame: Dictionary)
+	signal matched_received(result: Dictionary)
+	signal connection_changed(connected: bool)
+	signal login_result(result: Dictionary)
+	signal logic_state_received(result: Dictionary)
+	signal profile_received(result: Dictionary)
+	signal match_cancel_received(result: Dictionary)
+	signal match_status_received(result: Dictionary)
+	signal match_ended_received(result: Dictionary)
+
+	var client_token := ""
+	var calls: Array[String] = []
+
+	func send_logic_state() -> void:
+		calls.append("logic_state")
+
+	func send_profile() -> void:
+		calls.append("profile")
+
+	func send_match_join() -> void:
+		calls.append("join")
+
+	func send_cancel_match() -> void:
+		calls.append("cancel")
+
+	func send_resync() -> void:
+		calls.append("resync")
+
+	func send_purchase(_i: String, _q: int) -> void:
+		pass
+
+	func send_equip(_i: String) -> void:
+		pass
+
+	func send_register(_u: String, _p: String) -> void:
+		pass
+
+	func send_login(_u: String, _p: String) -> void:
+		pass
+
+	func send_command(_m: Vector2, _y: float, _j: bool, _s: bool,
+			_origin: Vector3, _dir: Vector3) -> void:
+		pass
 
 func _initialize() -> void:
 	_run()
 
 func _run() -> void:
-	var main: Node = MainScene.instantiate()
-	root.add_child(main)
-	# _initialize 阶段 root 还没进树，_ready 不会触发（HUD 节点全是 null）；等两帧让
-	# 场景真正入树、_ready 跑完（与 game_frame_test.gd / reconnect_cleanup_test.gd 同一套路）。
+	_main = MainScene.instantiate()
+	root.add_child(_main)
 	await process_frame
 	await process_frame
+	_fake = FakeClient.new()
+	_main.add_child(_fake)
+	_main.ui.setup(_fake, _main)
 
-	# 用场景里的**真实** FpsClient：这样连「main.gd 有没有把信号接上」一起测到。
-	# （不能用替换 fps_client 的假客户端 —— @onready 会在 _ready 时把它覆盖回 $FpsClient。）
-	var client: Node = main.fps_client
-	_check(client != null, "场景里应有 FpsClient 节点")
+	# 进大厅 → 匹配 → 进局
+	_fake.login_result.emit({"ok": true, "username": "u1"})
+	_check(_main.ui.state() == ScreenManager.State.LOBBY, "登录成功后应在大厅")
+	_main.ui.intent_start_match()
+	_fake.matched_received.emit({"match_id": "m1", "game_server_id": "g1", "player_idx": 0})
+	_check(_main.ui.state() == ScreenManager.State.IN_MATCH, "onMatched 后应处于对局态")
+	_check(_main.ui.hud.visible, "对局中 HUD 应可见")
 
-	client.connection_changed.emit(true)
-	# 进入对局：匹配成功 → 客户端会请求 full 帧（离线时 send_resync 是空操作）。
-	client.matched_received.emit({"match_id": "m1", "game_server_id": "g1", "player_idx": 0})
-	_check(main._matched, "onMatched 之后应处于对局态")
-	_check(not main.conn_label.visible, "onMatched 之后应把「正在匹配」提示收起来")
+	# 造一点本地世界状态，验证结算时会清掉。
+	_main._entities[100] = Node3D.new()
+	_main.add_child(_main._entities[100])
+	_fake.calls.clear()
 
-	# 造一点本地世界状态，验证结算时会清掉。直接塞渲染节点即可 ——
-	# 合成整帧属于 game_frame_test.gd 的职责（它驱动 _on_frame）。
-	main._entities[100] = Node3D.new()
-	main.add_child(main._entities[100])
-	_done["seeded"] = true
+	var ended := {
+		"match_id": "m1", "winner_slot": 0, "duration_seconds": 84,
+		"slots": [{"uid": "7", "kills": 10, "deaths": 3}, {"uid": "8", "kills": 3, "deaths": 10}],
+	}
+	_fake.match_ended_received.emit(ended)
 
-	client.match_ended_received.emit({
-		"match_id": "m1",
-		"winner_slot": 0,
-		"duration_seconds": 84,
-		"slots": [
-			{"uid": "7", "kills": 10, "deaths": 3},
-			{"uid": "8", "kills": 3, "deaths": 10},
-		],
-	})
+	_check(_main.ui.state() == ScreenManager.State.RESULT, "onMatchEnded 后应进入结算态")
+	_check(_main.ui.result_overlay.visible, "结算层应可见")
+	_check(not _main.ui.shell.visible, "结算时大厅应隐藏")
+	_check(not _main.ui.hud.visible, "结算时 HUD 应隐藏")
+	_check(not _fake.calls.has("join"), "结算不得自动重新入队，得到 %s" % str(_fake.calls))
+	_check(not _fake.calls.has("profile"), "结算瞬间不该额外拉档案（回大厅时再拉）")
+
+	# 世界清理（main 那一层）
+	_main._on_client_match_ended(ended)
+	_check(_main._entities.is_empty(), "结算应清空本地实体缓存")
+
+	# 回大厅 → 拉一次档案（这局刚记进战绩）
+	_fake.calls.clear()
+	_main.ui.intent_back_to_lobby()
+	_check(_main.ui.state() == ScreenManager.State.LOBBY, "回大厅后应处于大厅")
+	_check(_fake.calls.has("profile"), "回大厅应重拉一次档案")
+
 	_done["ended"] = true
+	_finish()
 
-	_check(not main._matched, "收到 onMatchEnded 后必须离开对局态（否则看门狗会误判断线）")
-	_check(main._entities.is_empty(), "结算应清空本地实体缓存")
-	_check(main.conn_label.visible, "结算应给出可见的临时提示（正式界面在 B 子项目）")
-	_check(int(main._my_player_idx) == 0, "结算不应改动本客户端的槽位")
-	# 匹配等待看门狗必须处于「未武装」状态：结算不是重新排队。
-	_check(client._match_retry_at == 0.0, "结算不得武装匹配等待看门狗（否则会自己重新入队）")
+func _check(cond: bool, msg: String) -> void:
+	if not cond:
+		_failures += 1
+		printerr("FAIL: " + msg)
 
+func _finish() -> void:
 	if not _done.has("ended"):
 		_failures += 1
 		printerr("FAIL: 用例没跑完（中途抛错了？）")
@@ -68,8 +131,3 @@ func _run() -> void:
 	else:
 		print("match_ended_test: OK")
 		quit(0)
-
-func _check(cond: bool, msg: String) -> void:
-	if not cond:
-		_failures += 1
-		printerr("FAIL: " + msg)

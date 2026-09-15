@@ -1,0 +1,12 @@
+[gd_scene format=3]
+
+[ext_resource type="Theme" path="res://theme/tactical_theme.tres" id="1_j0f3g"]
+[ext_resource type="Script" path="res://ui/shell.gd" id="2_mg4gw"]
+
+[node name="Shell" type="Control" unique_id=710166851]
+layout_mode = 3
+anchors_preset = 0
+size_flags_horizontal = 3
+size_flags_vertical = 3
+theme = ExtResource("1_j0f3g")
+script = ExtResource("2_mg4gw")

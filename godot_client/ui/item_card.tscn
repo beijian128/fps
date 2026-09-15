@@ -1,0 +1,11 @@
+[gd_scene format=3]
+
+[ext_resource type="Theme" path="res://theme/tactical_theme.tres" id="1_wwa13"]
+[ext_resource type="Script" path="res://ui/item_card.gd" id="2_afnk7"]
+
+[node name="ItemCard" type="PanelContainer" unique_id=876425907]
+custom_minimum_size = Vector2(170, 190)
+size_flags_horizontal = 3
+size_flags_vertical = 3
+theme = ExtResource("1_wwa13")
+script = ExtResource("2_afnk7")

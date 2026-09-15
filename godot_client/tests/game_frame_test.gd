@@ -45,7 +45,7 @@ func _run() -> void:
 	_test_last_write_in_frame_is_interpolated()
 	_test_local_player_and_remote_yaw_interpolated()
 	_test_render_interpolated_is_idempotent()
-	_test_hud_reads_pvp_attrs()
+	_test_feedback_reads_pvp_attrs()
 	_test_destroy_for_unknown_id_is_safe()
 	for name: String in ["full", "delta", "interp_node", "interp_player", "idempotent", "coin", "unknown"]:
 		if not _done.has(name):
@@ -201,39 +201,40 @@ func _test_render_interpolated_is_idempotent() -> void:
 	var first: Vector3 = _main._player_pos
 	_main._render_interpolated()
 	var second: Vector3 = _main._player_pos
-	# 幂等：第二次调用必须与第一次完全一致（显示值不能又当插值输入）。
-	_check(first.is_equal_approx(second),
-		"连续两次 _render_interpolated 必须幂等（target/display 拆分）；第一次 %s 第二次 %s"
-		% [first, second])
+	# 幂等：第二次调用必须与第一次一致（显示值不能又当插值输入）。
+	#
+	# 容差 = 一个 alpha 步长：alpha 由 `Time.get_ticks_msec()` 推出、只有 1ms 分辨率
+	# （1ms / TICK = 0.02），两次调用之间时钟可能正好跨过毫秒边界，于是 alpha 差一档。
+	# 8 个单位的跨度上这是 0.16 —— 而它要抓的「就地 lerp」会让第二次把间距直接减半
+	# （约 4 个单位），比容差大一个数量级，判据依然有效，只是不再靠运气。
+	var drift := first.distance_to(second)
+	_check(drift <= 0.2,
+		"连续两次 _render_interpolated 必须幂等（target/display 拆分）；第一次 %s 第二次 %s 差 %f"
+		% [first, second, drift])
 	# 反向保护：alpha≈0.5 时结果确实落在 prev 与 target 之间，证明上面不是恒等式。
 	_check(first.distance_to(Vector3(0, 0.2, 10.0)) > 0.1,
 		"alpha≈0.5 时玩家位置应离开 raw target (0,0.2,10)；实际 %s" % first)
 	_done["idempotent"] = true
 
-## HUD 读数全部走属性名：本机战绩挂在玩家实体上（Player.Kills / Player.Deaths），
-## 对局结果是全局单例上的 Game.Winner。这几条属性名写错不会报错、只会显示成恒定值，
-## 所以在这里钉住。
-func _test_hud_reads_pvp_attrs() -> void:
+## 玩法反馈走属性名：受击红闪与命中音效靠的是「血量下降」这个判定，而本机/对手是靠
+## Player.Idx 区分的。属性名或槽位写错不会报错、只会恒定不触发，所以在这里钉住。
+##
+## （纯显示的血条、K/D、回合进度、准星现在归 ui/hud.gd，由 tests/hud_test.gd 覆盖。）
+func _test_feedback_reads_pvp_attrs() -> void:
 	# 300 是本机（player_idx 0）、301 是对手；400 是全局单例。
 	_main._on_frame({"full": false, "entities": [
 		{"id": 300, "set": _player_attrs(0, Vector3(0, 0.2, 18), 0.0, 66.0, 4, 2)},
 		{"id": 301, "set": _player_attrs(1, Vector3(0, 0.2, -18), PI, 32.0)},
 		{"id": 400, "set": [_attr(10, {"i": -1})]},   # Game.Winner
 	]})
-	_check(_main._hud_kills == 4, "HUD 击杀数应取本机 Player.Kills，得到 %d" % _main._hud_kills)
-	_check(_main._hud_deaths == 2, "HUD 死亡数应取本机 Player.Deaths，得到 %d" % _main._hud_deaths)
-	_check(absf(_main._hud_opp_health - 32.0) < 0.01,
-		"HUD 对手血量应取另一名玩家的 Health，得到 %s" % _main._hud_opp_health)
-	_check(absf(_main.health_bar.value - 66.0) < 0.01,
-		"血条应取本机 Health，得到 %s" % _main.health_bar.value)
-	_check(_main._hud_winner == -1, "winner=-1 表示进行中，得到 %d" % _main._hud_winner)
-	_check(_main._match_over_text() == "", "进行中不应有结果文案")
+	_check(absf(_main._last_health - 66.0) < 0.01,
+		"本机血量应取 Player.Idx=0 那条 Health，得到 %s" % _main._last_health)
+	_check(absf(_main._last_opp_health - 32.0) < 0.01,
+		"对手血量应取另一名玩家的 Health，得到 %s" % _main._last_opp_health)
 
-	# 分出胜负：0 号获胜 → 本机（0 号）看到 YOU WIN。
+	# 分出胜负后再来一帧：不应崩，也不该把它当成一次命中反馈。
 	_main._on_frame({"full": false, "entities": [_attr_entity(400, _attr(10, {"i": 0}))]})
-	_check(_main._hud_winner == 0, "HUD 应读到大局已定，得到 %d" % _main._hud_winner)
-	_check(_main._match_over_text() == "YOU WIN\n",
-		"本机获胜应显示 YOU WIN，得到 %s" % _main._match_over_text())
+	_check(absf(_main._last_health - 66.0) < 0.01, "胜负已定后血量读数不应跳变")
 	# 战绩属性不该让玩家实体多长出一个刚体节点（玩家由 Avatar 渲染，
 	# _refresh_derived 只把带 Body.Kind 的实体算作刚体）。
 	var player_nodes := 0

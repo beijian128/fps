@@ -1,220 +1,140 @@
 extends SceneTree
+## 商城 / 背包的「请求时机」与「意图 → 协议调用」：界面层只发意图，真正发请求的是
+## screen_manager，所以这里用假客户端驱动它，断言的是两件事：
+##
+##   1. 什么时候**不**该请求 —— 没登录时不请求 state；在途（或已有快照）时不重复请求；
+##      切页面本身不产生请求（切页面只换渲染）。
+##   2. 购买 / 装备的意图是否按预期参数落到 fps_client 上。
+##
+## 卡片渲染（数量步进器、禁用条件、装备文案）由 tests/item_grid_test.gd 覆盖。
+##
+## 运行：Godot_v4.7.2-stable_win64_console.exe --headless --path godot_client \
+##         --script res://tests/logic_panel_test.gd
 
 const MainScene := preload("res://scenes/main.tscn")
+const ScreenManager := preload("res://ui/screen_manager.gd")
 
 var _failures := 0
+var _done := {}
+var _main: Node = null
+var _fake: Node = null
 
 class FakeClient:
-    extends Node
+	extends Node
 
-    var state_requests := 0
-    var match_requests := 0
-    var last_username := ""
-    var client_token := ""
+	signal frame_received(frame: Dictionary)
+	signal matched_received(result: Dictionary)
+	signal connection_changed(connected: bool)
+	signal login_result(result: Dictionary)
+	signal logic_state_received(result: Dictionary)
+	signal profile_received(result: Dictionary)
+	signal match_cancel_received(result: Dictionary)
+	signal match_status_received(result: Dictionary)
+	signal match_ended_received(result: Dictionary)
 
-    func send_logic_state() -> void:
-        state_requests += 1
+	var client_token := ""
+	var calls: Array[String] = []
+	var last_args := {}
 
-    func send_match_join() -> void:
-        match_requests += 1
+	func send_logic_state() -> void:
+		calls.append("logic_state")
 
-func _init() -> void:
-    var main: Node = MainScene.instantiate()
-    var fake := FakeClient.new()
-    main.fps_client = fake
-    main.add_child(fake)
-    main.conn_label = Label.new()
-    main.add_child(main.conn_label)
-    root.add_child(main)
-    main._build_logic_panel()
-    main._login_panel = CanvasLayer.new()
-    main.add_child(main._login_panel)
-    main._login_user = LineEdit.new()
-    main._login_user.text = "tester"
-    main.add_child(main._login_user)
-    main._login_pass = LineEdit.new()
-    main._login_pass.text = "secret"
-    main.add_child(main._login_pass)
-    main._login_error = Label.new()
-    main._login_panel.add_child(main._login_error)
-    main._login_panel.visible = true
+	func send_profile() -> void:
+		calls.append("profile")
 
-    _check(not main._logic_panel.visible, "商城面板初始应隐藏")
-    _check(not main._logic_authenticated, "初始状态不应视为已认证")
+	func send_purchase(item_id: String, quantity: int) -> void:
+		calls.append("purchase")
+		last_args["purchase"] = [item_id, quantity]
 
-    main._login_panel.visible = false
-    main._logic_panel.visible = false
-    main._logic_busy = false
-    main._logic_status.text = ""
-    fake.state_requests = 0
-    var unauth_key := InputEventKey.new()
-    unauth_key.keycode = KEY_B
-    unauth_key.pressed = true
-    main._unhandled_input(unauth_key)
-    _check(not main._logic_panel.visible, "恢复登录未完成时 B 不能打开商城")
-    _check(not main._logic_busy, "未认证的 B 操作不能设置请求中")
-    _check(main._logic_status.text == "", "未认证的 B 操作不能显示加载状态")
-    _check(fake.state_requests == 0, "未认证的 B 操作不能请求状态")
+	func send_equip(item_id: String) -> void:
+		calls.append("equip")
+		last_args["equip"] = item_id
 
-    main._logic_panel.visible = false
-    main._logic_busy = false
-    main._logic_status.text = ""
-    fake.state_requests = 0
-    main._toggle_logic_panel()
-    _check(not main._logic_panel.visible, "未认证时直接切换也不能打开商城")
-    _check(not main._logic_busy, "未认证的直接切换不能设置请求中")
-    _check(main._logic_status.text == "", "未认证的直接切换不能显示加载状态")
-    _check(fake.state_requests == 0, "未认证的直接切换不能请求状态")
+	func send_match_join() -> void:
+		calls.append("join")
 
-    main._logic_panel.visible = false
-    main._logic_busy = false
-    main._logic_status.text = ""
-    fake.state_requests = 0
-    main._on_login_result({"ok": true})
-    _check(main._logic_authenticated, "登录成功后才应放行商城")
-    _check(fake.state_requests == 0, "登录成功不应自动请求商城状态")
-    _check(fake.match_requests == 1, "登录成功仍应发起匹配")
+	func send_cancel_match() -> void:
+		calls.append("cancel")
 
-    main._login_panel.visible = true
-    fake.state_requests = 0
-    var key_b := InputEventKey.new()
-    key_b.keycode = KEY_B
-    key_b.pressed = true
-    main._unhandled_input(key_b)
-    _check(not main._logic_panel.visible, "登录面板可见时 B 不能打开商城")
-    _check(fake.state_requests == 0, "登录面板可见时不能请求商城状态")
+	func send_resync() -> void:
+		pass
 
-    main._login_panel.visible = false
-    main._logic_authenticated = true
-    main._logic_panel.visible = false
-    main._logic_busy = false
-    main._logic_status.text = ""
-    fake.state_requests = 0
-    main._toggle_logic_panel()
-    _check(main._logic_panel.visible, "商城打开后应可见")
-    _check(fake.state_requests == 1, "打开商城应请求一次状态")
-    _check(main._logic_busy, "打开商城后应处于请求中")
+	func send_register(_u: String, _p: String) -> void:
+		pass
 
-    main._logic_authenticated = true
-    main._logic_panel.visible = false
-    main._logic_busy = true
-    main._logic_status.text = "加载中…"
-    fake.state_requests = 0
-    main._toggle_logic_panel()
-    _check(main._logic_panel.visible, "请求在途时仍应打开商城面板")
-    _check(fake.state_requests == 0, "请求在途时不能重复请求状态")
-    _check(main._logic_busy, "重复打开不能提前清除请求中状态")
+	func send_login(_u: String, _p: String) -> void:
+		pass
 
-    main._logic_authenticated = true
-    main._logic_panel.visible = true
-    main._logic_busy = true
-    main._logic_status.text = "加载中…"
-    main._toggle_logic_panel()
-    _check(not main._logic_panel.visible, "再次切换应关闭商城面板")
-    _check(main._logic_busy, "关闭面板不能清除在途请求")
-    _check(main._logic_status.text == "加载中…", "关闭面板不能清除请求状态文本")
+	func send_command(_m: Vector2, _y: float, _j: bool, _s: bool,
+			_origin: Vector3, _dir: Vector3) -> void:
+		pass
 
-    main._logic_state = {
-        "ok": true,
-        "coins": 777,
-        "equipped_primary_weapon": "shotgun",
-        "items": [
-            {"item_id": "shotgun", "display_name": "霰弹枪", "price": 450,
-             "equip_slot": "primary_weapon", "owned_quantity": 1},
-        ],
-    }
-    main._on_logic_state({
-        "ok": true,
-        "coins": 777,
-        "equipped_primary_weapon": "shotgun",
-        "items": [
-            {"item_id": "shotgun", "display_name": "霰弹枪", "price": 450,
-             "equip_slot": "primary_weapon", "owned_quantity": 1},
-        ],
-    })
-    _check(main._logic_coins.text.contains("777"), "准备用例时应显示旧账号金币")
-    main._on_connection(false)
-    _check(not main._logic_busy, "断线应清除在途商城请求")
-    _check(main._logic_status.text == "", "断线应清除商城状态文本")
-    _check(not main._logic_authenticated, "断线应撤销商城认证门")
-    _check(not main._logic_panel.visible, "断线应隐藏商城面板")
-    _check(not bool(main._logic_state.get("ok", false)), "断线应清空商城状态")
-    _check(int(main._logic_state.get("coins", 0)) == 0, "断线应清空金币状态")
-    _check(String(main._logic_state.get("equipped_primary_weapon", "")) == "",
-            "断线应清空装备状态")
-    _check((main._logic_state.get("items", []) as Array).size() == 0,
-            "断线应清空商品列表")
-    _check(main._logic_coins.text == "", "断线应清空金币显示")
+func _initialize() -> void:
+	_run()
 
-    main._logic_state = {
-        "ok": true,
-        "coins": 400,
-        "equipped_primary_weapon": "rifle",
-        "items": [
-            {"item_id": "rifle", "display_name": "步枪", "price": 300,
-             "equip_slot": "primary_weapon", "owned_quantity": 2},
-        ],
-    }
-    main._logic_busy = true
-    main._on_logic_state({
-        "ok": true,
-        "coins": 500,
-        "equipped_primary_weapon": "shotgun",
-        "items": [
-            {"item_id": "shotgun", "display_name": "霰弹枪", "price": 450,
-             "equip_slot": "primary_weapon", "owned_quantity": 1},
-        ],
-    })
-    _check(int(main._logic_state.get("coins", 0)) == 500, "成功响应应替换完整状态")
-    _check(String(main._logic_state.get("equipped_primary_weapon", "")) == "shotgun",
-            "成功响应应替换装备状态")
-    _check(main._logic_coins.text.contains("500"), "成功响应应刷新金币显示")
-    _check(not main._logic_busy, "成功响应应清除请求中状态")
+func _run() -> void:
+	_main = MainScene.instantiate()
+	root.add_child(_main)
+	await process_frame
+	await process_frame
+	_fake = FakeClient.new()
+	_main.add_child(_fake)
+	_main.ui.setup(_fake, _main)
 
-    var before: Dictionary = main._logic_state.duplicate(true) as Dictionary
-    main._logic_busy = true
-    main._on_logic_state({"ok": false, "reason": "insufficient_funds"})
-    _check(int(main._logic_state.get("coins", 0)) == int(before.get("coins", -1)),
-            "失败响应不能污染金币状态")
-    _check(String(main._logic_state.get("equipped_primary_weapon", "")) ==
-            String(before.get("equipped_primary_weapon", "")),
-            "失败响应不能污染装备状态")
-    _check((main._logic_state.get("items", []) as Array).size() ==
-            (before.get("items", []) as Array).size(),
-            "失败响应不能污染商品状态")
-    _check(main._logic_status.text == "金币不足", "失败响应应显示余额不足")
-    _check(not main._logic_busy, "失败响应应清除请求中状态")
+	# 1) 没登录：切页面不该请求任何东西（登录前根本进不了大厅，但意图层要挡住）
+	_check(_main.ui.state() == ScreenManager.State.LOGIN, "没有凭证时应停在登录页")
+	_main.ui.intent_show_page("shop")
+	_check(not _fake.calls.has("logic_state"), "未登录时切页面不该请求商城状态")
+	_check(not _fake.calls.has("profile"), "未登录时切页面不该请求档案")
 
-    main._logic_state = {
-        "ok": true,
-        "coins": 888,
-        "equipped_primary_weapon": "rifle",
-        "items": [
-            {"item_id": "rifle", "display_name": "步枪", "price": 300,
-             "equip_slot": "primary_weapon", "owned_quantity": 1},
-        ],
-    }
-    main._logic_coins.text = "金币：888"
-    main._logic_busy = true
-    main._on_login_result({"ok": false, "reason": "bad_credentials"})
-    _check(not bool(main._logic_state.get("ok", false)), "登录失败应清空商城状态")
-    _check(int(main._logic_state.get("coins", 0)) == 0, "登录失败应清空金币状态")
-    _check(String(main._logic_state.get("equipped_primary_weapon", "")) == "",
-            "登录失败应清空装备状态")
-    _check((main._logic_state.get("items", []) as Array).size() == 0,
-            "登录失败应清空商品列表")
-    _check(main._logic_coins.text == "", "登录失败应清空金币显示")
-    _check(not main._logic_busy, "登录失败应清除请求中状态")
+	# 2) 登录成功：恰好各拉一次
+	_fake.calls.clear()
+	_fake.login_result.emit({"ok": true, "username": "u1"})
+	_check(_fake.calls.count("logic_state") == 1, "进大厅应恰好请求一次商城状态，得到 %s" % str(_fake.calls))
+	_check(_fake.calls.count("profile") == 1, "进大厅应恰好请求一次档案，得到 %s" % str(_fake.calls))
 
-    main.queue_free()
-    if _failures > 0:
-        printerr("logic_panel_test: %d 项失败" % _failures)
-        quit(1)
-    else:
-        print("logic_panel_test: OK")
-        quit(0)
+	# 3) 已有快照：切页面 + 收到数据变化都不再重复请求
+	_fake.calls.clear()
+	_main.ui.intent_show_page("shop")
+	_main.ui.intent_show_page("bag")
+	_main.ui.intent_show_page("profile")
+	_check(_main.ui.current_page() == "profile", "当前页应切到 profile")
+	_check(_fake.calls.is_empty(), "切页面不该产生任何请求，得到 %s" % str(_fake.calls))
+	_check(_main.ui.logic_state().is_empty(), "还没有状态时应是空快照")
+
+	# 4) 服务端推来状态 → 进快照（界面从这里读）
+	_fake.logic_state_received.emit({
+		"ok": true, "coins": 1000, "equipped_primary_weapon": "pistol",
+		"items": [
+			{"item_id": "rifle", "display_name": "步枪", "price": 300,
+				"equip_slot": "primary_weapon", "owned_quantity": 0},
+		],
+	})
+	_check(int(_main.ui.logic_state().get("coins", 0)) == 1000, "金币应进快照")
+	_check(_fake.calls.is_empty(), "收到状态不该触发新请求，得到 %s" % str(_fake.calls))
+
+	# 5) 购买 / 装备意图 → 参数原样落到协议层
+	_main.ui.intent_purchase("medkit", 5)
+	_check(_fake.last_args.get("purchase", []) == ["medkit", 5],
+		"购买意图应带 item_id 与数量，得到 %s" % str(_fake.last_args.get("purchase", [])))
+	_main.ui.intent_equip("rifle")
+	_check(String(_fake.last_args.get("equip", "")) == "rifle", "装备意图应带 item_id")
+
+	_done["logic"] = true
+	_finish()
 
 func _check(cond: bool, msg: String) -> void:
-    if not cond:
-        _failures += 1
-        printerr("FAIL: " + msg)
+	if not cond:
+		_failures += 1
+		printerr("FAIL: " + msg)
+
+func _finish() -> void:
+	if not _done.has("logic"):
+		_failures += 1
+		printerr("FAIL: 用例没跑完（中途抛错了？）")
+	if _failures > 0:
+		printerr("logic_panel_test: %d 项失败" % _failures)
+		quit(1)
+	else:
+		print("logic_panel_test: OK")
+		quit(0)

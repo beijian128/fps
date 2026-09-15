@@ -1,0 +1,11 @@
+[gd_scene format=3]
+
+[ext_resource type="Theme" path="res://theme/tactical_theme.tres" id="1_t3krr"]
+[ext_resource type="Script" path="res://ui/match_status_bar.gd" id="2_hw74d"]
+
+[node name="MatchStatusBar" type="PanelContainer" unique_id=500768865]
+size_flags_horizontal = 3
+size_flags_vertical = 3
+theme = ExtResource("1_t3krr")
+theme_type_variation = &"BarPanel"
+script = ExtResource("2_hw74d")

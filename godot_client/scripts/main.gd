@@ -23,11 +23,19 @@ const PITCH_LIMIT := PI / 2.0 - 0.05
 # 用 preload 而不是 class_name：纯命令行运行时（未在编辑器里导入过）也能解析。
 const BodyEntityScript := preload("res://scripts/body_entity.gd")
 const WorldStore := preload("res://scripts/world_store.gd")
+const ScreenManager := preload("res://ui/screen_manager.gd")
 
 @onready var fps_client: Node = $FpsClient
 @onready var sfx: Node = $Sfx
+## 界面栈：唯一的状态源（见 ui/screen_manager.gd）。main 只把渲染相关的信号喂给世界，
+## 界面状态、页面切换、结算/匹配的显示全部由它管。
+@onready var ui: Node = $UI
 
 var camera: Camera3D
+
+# ---- 以下字段与文件末尾那批 _build_* / _show_* / _submit_* 函数是**旧界面遗留**，
+# 自本任务起已经没有任何调用点（新界面在 ui/ 下，见 screen_manager）。它们暂时留着只为
+# 让文件可解析，由 Task 8 统一删除（那时会连这些字段一起清掉）。
 var stat_label: Label
 var health_bar: ProgressBar
 var overlay: Control
@@ -78,16 +86,13 @@ var _pending_shot := {}
 
 var _fps_ema := 60.0
 # HUD 读数：本机战绩 + 对手血量 + 对局结果（全部从 store 的属性名读，见 _update_hud）。
+var _last_health := 100.0
+var _last_opp_health := 100.0
+var _hit_flash: ColorRect
 var _hud_kills := 0
 var _hud_deaths := 0
 var _hud_opp_health := 100.0
 var _hud_winner := -1
-var _last_health := 100.0
-var _last_opp_health := 100.0
-var _hit_flash: ColorRect
-# 登录/注册面板（未认证时遮住 HUD，认证成功后隐藏并发 match.join）。
-# 类型是 CanvasLayer 而非 Control：面板整体挂在自己的 CanvasLayer 上（与 HUD 同构），
-# 显隐直接切图层的 visible，一次开关整块 UI。
 var _login_panel: CanvasLayer
 var _login_user: LineEdit
 var _login_pass: LineEdit
@@ -105,6 +110,9 @@ var _logic_state := {
 	"equipped_primary_weapon": "",
 	"items": [],
 }
+# 登录/注册面板（未认证时遮住 HUD，认证成功后隐藏并发 match.join）。
+# 类型是 CanvasLayer 而非 Control：面板整体挂在自己的 CanvasLayer 上（与 HUD 同构），
+# 显隐直接切图层的 visible，一次开关整块 UI。
 # 自动化测试钩子：无头环境无法真正捕获鼠标，设置该环境变量后视作已捕获。
 var _capture_override := OS.get_environment("JOLT_FORCE_CAPTURE") != ""
 
@@ -113,69 +121,43 @@ func _ready() -> void:
 	_build_avatar()
 	_build_remote_avatar()
 	_build_viewmodel()
-	_build_hud()
+	_build_fx_layer()
 	fps_client.frame_received.connect(_on_frame)
 	fps_client.matched_received.connect(_on_matched)
-	fps_client.match_ended_received.connect(_on_match_ended)
+	fps_client.match_ended_received.connect(_on_client_match_ended)
 	fps_client.connection_changed.connect(_on_connection)
-	fps_client.login_result.connect(_on_login_result)
-	fps_client.logic_state_received.connect(_on_logic_state)
-	_build_logic_panel()
-	_build_login_panel()
+	# 界面栈自己订阅登录/档案/商城/匹配/结算信号（见 screen_manager.setup），
+	# main 只管渲染与输入 —— 两条路各自订阅同一个 client，互不依赖。
+	ui.setup(fps_client, self)
+	ui.state_changed.connect(_on_ui_state)
+	_on_ui_state(ui.state())
+
+## _on_ui_state 界面状态是「我是否在对局中」的唯一来源：只有 IN_MATCH 才上报命令、
+## 才允许锁定鼠标开火。
+func _on_ui_state(state: int) -> void:
+	_matched = state == ScreenManager.State.IN_MATCH
 
 func _on_matched(result: Dictionary) -> void:
 	_my_player_idx = int(result.get("player_idx", 0))
-	_matched = true
 	# 出生在船的艏/艉两端，开局朝向船中（与服务端 playerSpawnYaw 一致）。
 	_yaw = PI if _my_player_idx == 1 else 0.0
-	conn_label.visible = false
 	# 由客户端驱动全量补齐：收到 full 帧之前，WorldStore 之外的一切都不可信。
 	_store.clear()
 	_reset_interp()
 	fps_client.send_resync()
 
-## _on_match_ended 本局结束：服务端实例已经终结，帧流不会再来。
-##
-## 三件事缺一不可：离开对局态（等于停掉 2.5 秒接收看门狗）、清空本地世界（下一局的实体
-## id 会从头开始，残留的渲染节点会串台）、给出可见提示。**不自动重新入队** —— 重新匹配
-## 必须由玩家主动发起（正式的大厅/结算界面属于 B 子项目，这里只留临时提示）。
-func _on_match_ended(result: Dictionary) -> void:
-	_matched = false
+## _on_client_match_ended 本局结束：服务端实例已经终结、帧流不会再来，本地世界必须立刻清掉
+## （下一局的实体 id 会从头开始，残留的渲染节点会串台）。界面状态切换（进结算层、停掉接收
+## 看门狗）由 screen_manager 负责；这里只管世界。
+func _on_client_match_ended(_result: Dictionary) -> void:
 	_store.clear()
 	_reset_interp()
 	for id in _entities:
 		_entities[id].queue_free()
 	_entities = {}
-	conn_label.text = _match_ended_text(result)
-	conn_label.visible = true
-
-## _match_ended_text 结算提示的临时文案（B 子项目会用真正的结算界面替换它）。
-## 读的是**自己槽位**的战绩，不是胜者槽位的 —— 两边的 k/d 是一对镜像数字，
-## 读错了会把自己的战绩显示成对手的。
-func _match_ended_text(result: Dictionary) -> String:
-	var winner := int(result.get("winner_slot", -1))
-	var slots: Array = result.get("slots", [])
-	var duration := int(result.get("duration_seconds", 0))
-	if winner < 0 or slots.size() < 2 or _my_player_idx >= slots.size():
-		return "本局结束，按 Enter 重新匹配"
-	var result_text := "胜利" if winner == _my_player_idx else "失败"
-	var mine: Dictionary = slots[_my_player_idx]
-	return "本局结束：%s（我方 %d 杀 %d 死，用时 %d 秒），按 Enter 重新匹配" % [
-		result_text, int(mine["kills"]), int(mine["deaths"]), duration]
 
 func _on_connection(connected: bool) -> void:
-	if connected:
-		# 登录成功之前不能写「正在匹配…」——那时候还没有发 join。
-		conn_label.text = "正在登录…"
-		conn_label.visible = true
-	else:
-		conn_label.text = "正在连接服务器…"
-		conn_label.visible = true
-		_matched = false
-		_logic_authenticated = false
-		_clear_logic_state()
-		if _logic_panel != null:
-			_logic_panel.visible = false
+	if not connected:
 		_store.clear()
 		_reset_interp()
 		# 刚体渲染节点一并清空：重连前不知道哪些 id 还会复用，全部交给重连后的
@@ -183,26 +165,8 @@ func _on_connection(connected: bool) -> void:
 		for id in _entities:
 			_entities[id].queue_free()
 		_entities = {}
-
-## _clear_logic_state 清掉当前账号的商城/背包展示状态。断线、登录失败或本地无凭证时
-## 都必须调用，避免上一个账号的金币/商品继续留在面板上。这里不隐藏面板，只清内容：
-## 成功重连后应等新的 logic.state 到达再刷新，而不是把面板提前抹成空屏。
-func _clear_logic_state() -> void:
-	_logic_state = {
-		"ok": false,
-		"coins": 0,
-		"equipped_primary_weapon": "",
-		"items": [],
-	}
-	_logic_busy = false
-	if _logic_coins != null:
-		_logic_coins.text = ""
-	if _logic_status != null:
-		_logic_status.text = ""
-	if _logic_items_box != null:
-		for child in _logic_items_box.get_children():
-			_logic_items_box.remove_child(child)
-			child.queue_free()
+	# 「我是否在对局中」由界面状态决定（见 _on_ui_state），断线时 screen_manager 会把
+	# 状态收回大厅/登录页。
 
 ## _reset_interp 清空插值状态。重连后第一帧没有「上一帧」，直接在当前位置落位。
 func _reset_interp() -> void:
@@ -239,12 +203,9 @@ func _process(delta: float) -> void:
 
 	_render_interpolated()
 	_update_camera()
-	stat_label.text = "KILLS %d\nDEATHS %d\nHP %d\nOPP HP %d\n%sFPS %d" % [
-		_hud_kills, _hud_deaths, roundi(_last_health), roundi(_hud_opp_health),
-		_match_over_text(), roundi(_fps_ema),
-	]
-
-	overlay.visible = not captured
+	# HUD 每渲染帧从本地世界同步一次（血条、K/D、回合进度、准星）。界面只读属性，不上报。
+	if _matched:
+		ui.hud.update_from_world(_store, _my_player_idx, _fps_ema)
 
 	# 匹配成功后，每渲染帧都上报一条命令（输入 + 射击 + 重置合并成一条，帧是最小
 	# 发送单位），**包括鼠标未捕获（按了 ESC 暂停）时**。两个理由：
@@ -277,8 +238,6 @@ func _process(delta: float) -> void:
 		fps_client.send_command(move, _yaw, jump, shoot, origin, dir)
 
 func _input(event: InputEvent) -> void:
-	if _logic_panel != null and _logic_panel.visible:
-		return
 	if Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
 		return
 	if event is InputEventMouseMotion:
@@ -293,24 +252,10 @@ func _input(event: InputEvent) -> void:
 		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 
 func _unhandled_input(event: InputEvent) -> void:
-	if _login_panel != null and _login_panel.visible:
-		return  # 登录面板上的点击归面板，不该当成「进入游戏」
-	if event is InputEventKey and event.pressed and event.keycode == KEY_B:
-		if _logic_authenticated:
-			_toggle_logic_panel()
-		return
-	if event is InputEventKey and event.pressed and event.keycode == KEY_ENTER:
-		# 结算后的临时「再来一局」入口：B 子项目会用真正的匹配/结算界面替换它。
-		if _logic_authenticated and not _matched:
-			conn_label.text = "正在匹配…"
-			conn_label.visible = true
-			fps_client.send_match_join()
-		return
-	if _logic_panel != null and _logic_panel.visible:
-		return
 	if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 		return
-	if event is InputEventMouseButton and event.pressed:
+	# 只有对局中才用「点击画面」重新锁定鼠标；大厅与登录页上的点击属于界面。
+	if _matched and event is InputEventMouseButton and event.pressed:
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
 func _apply_look(rel: Vector2) -> void:
@@ -384,7 +329,7 @@ func _on_frame(frame: Dictionary) -> void:
 	var destroyed: Array = res.get("destroyed", [])
 	for ev: Variant in destroyed:
 		_on_entity_destroyed(ev as Dictionary)
-	_update_hud()
+	_update_feedback()
 	# 收尾再插值一次。Godot 先跑父节点 _process（里面已有一次 _render_interpolated）
 	# 再跑子节点 FpsClient._process，而后者同步 emit frame_received → 这里；上面
 	# _reconcile_scene 刚把**原始**变换写进节点，若不在此收尾，本渲染帧画的就是未插值
@@ -547,6 +492,48 @@ func _flash_hit() -> void:
 	var tw := _hit_flash.create_tween()
 	tw.tween_property(_hit_flash, "color:a", 0.28, 0.03)
 	tw.tween_property(_hit_flash, "color:a", 0.0, 0.35)
+
+## _build_fx_layer 建一个只放全屏受击红闪的 CanvasLayer。
+## （旧界面里这层是 _build_hud 顺手建的，界面搬走之后由 main 自己负责 —— 它是玩法反馈，
+## 不是界面。）
+func _build_fx_layer() -> void:
+	var layer := CanvasLayer.new()
+	layer.name = "Fx"
+	add_child(layer)
+	_hit_flash = ColorRect.new()
+	_hit_flash.color = Color(1, 0.1, 0.1, 0.0)
+	_hit_flash.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_hit_flash.set_anchors_preset(Control.PRESET_FULL_RECT)
+	layer.add_child(_hit_flash)
+
+## _update_feedback 从本地世界推「有回馈的那部分」：受击红闪 + 伤害/命中音效。
+##
+## 纯显示（血条、K/D、回合进度、准星）归 ui/hud.gd 的 update_from_world —— 那条路每帧从
+## 同一个 store 读属性，两者互不干涉。命中反馈（准星变琥珀）走 notify_hit_landed：
+## 「对手掉血 = 我打中了」这个判定只有这里做，HUD 不重复实现。
+func _update_feedback() -> void:
+	var hp := 100.0
+	var opp_hp := 100.0
+	var winner := -1
+	for id: Variant in _store.entities_with("Game.Winner"):
+		winner = int(_store.attr(int(id), "Game.Winner"))
+		break
+	for id: Variant in _store.entities_with("Player.Idx"):
+		var eid := int(id)
+		if int(_store.attr(eid, "Player.Idx")) == _my_player_idx:
+			hp = float(_store.attr(eid, "Health"))
+		else:
+			opp_hp = float(_store.attr(eid, "Health"))
+	if hp < _last_health - 0.001:
+		sfx.play("damage")
+		_flash_hit()
+	# 对手掉血 = 打中了：每一发命中都该有回馈（击杀数只在中枪者血尽时跳一次）。
+	if opp_hp < _last_opp_health - 0.001 and winner < 0:
+		sfx.play("destroy")
+		if ui.hud != null:
+			ui.hud.notify_hit_landed()
+	_last_health = hp
+	_last_opp_health = opp_hp
 
 func _shoot() -> void:
 	# 弹道从枪口/角色胸口出发，收敛到准星 60 m 处的目标点：
@@ -844,6 +831,27 @@ func _build_viewmodel() -> void:
 	_viewmodel.add_child(_muzzle_flash)
 
 ## _build_logic_panel 搭商城/背包面板。用 Control + 手动定位，不依赖外部场景资源。
+# ---- 旧界面遗留（Task 8 删除）----
+
+## _clear_logic_state 旧界面的商城/背包面板状态清理。新界面不经过这里（screen_manager 的
+## on_logic_state 直接覆盖快照），保留只为让旧块可解析。
+func _clear_logic_state() -> void:
+	_logic_state = {
+		"ok": false,
+		"coins": 0,
+		"equipped_primary_weapon": "",
+		"items": [],
+	}
+	_logic_busy = false
+	if _logic_coins != null:
+		_logic_coins.text = ""
+	if _logic_status != null:
+		_logic_status.text = ""
+	if _logic_items_box != null:
+		for child in _logic_items_box.get_children():
+			_logic_items_box.remove_child(child)
+			child.queue_free()
+
 func _build_logic_panel() -> void:
 	if _logic_panel != null:
 		return
