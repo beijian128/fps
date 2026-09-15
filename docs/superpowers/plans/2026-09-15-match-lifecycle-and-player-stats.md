@@ -2998,6 +2998,8 @@ git commit -m "test: 冒烟测试改为两个客户端真配对" -m "Co-Authored
 - Modify: `AGENTS.md`
 - Modify: `docs/API.md`
 - Modify: `docs/ARCHITECTURE.md`
+- Modify: `docs/BUILD.md`
+- Modify: `joltgo/deploy/README.md`
 - Modify: `README.md`、`godot_client/README.md`
 
 **Interfaces:**
@@ -3020,6 +3022,19 @@ git commit -m "test: 冒烟测试改为两个客户端真配对" -m "Co-Authored
 - route 表补 `match.match.cancel`（Request/Response）、`logic.logic.profile`（Request/Response）、`logic.logic.recordmatch`（remote，game → logic）。
 - 推送表补 `onMatchStatus`、`onMatchEnded`（含字段表）。
 - 错误/原因码补 `cancelled` / `already_matched` / `not_queued` / `not_enough_players`。
+- `docs/API.md:377` 那条「logic 确保 `REDB#1` 背包与 `REDB#2` 钱包存在」补上 `REDB#3:<accountID>:0` 档案与 `playerhist:<accountID>` 历史。
+
+- [ ] **Step 2b: 把新键补进每一处键清单**
+
+`REDB#3:<accountID>:0`（玩家档案）与 `playerhist:<accountID>`（最近 20 场历史）必须出现在仓库里**每一处**枚举玩家 Redis 键的地方，否则按 AGENTS.md 自己的「改动代码时同步更新对应文档」就是在制造过期文档。逐处改：
+
+- `AGENTS.md:96`（§3.10 持久化与分布式锁边界）、`AGENTS.md:147`（§5 持久化模型）、`AGENTS.md:257`
+- `README.md:203`
+- `docs/BUILD.md:91` 与 `docs/BUILD.md:189`（这两处按 namespace 讲键格式，要写清 profile namespace = 3）
+- `docs/ARCHITECTURE.md:497`
+- `joltgo/deploy/README.md:159`（这一处还承担「redis-data 不要清空」的说明：档案与历史同样存在 Redis 里，清掉会连战绩一起删）
+
+顺带在 `joltgo/deploy/README.md` 写明：历史是 List（不是 Hash 行），键名不套 `REDB#` 前缀。
 
 - [ ] **Step 3: `docs/ARCHITECTURE.md`**
 
