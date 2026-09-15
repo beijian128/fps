@@ -38,6 +38,7 @@ var _last_result := {}
 var _status := {}
 var _username := ""
 var _account_id := ""
+var _my_slot := 0
 
 ## setup 绑定客户端并接上信号。可重复调用（测试会换成假客户端再调一次）。
 func setup(client: Node, main: Node) -> void:
@@ -70,6 +71,9 @@ func match_status() -> Dictionary: return _status
 func username() -> String: return _username
 ## account_id 同理来自 LoginReply（十进制字符串）。
 func account_id() -> String: return _account_id
+## my_slot 本机在局内的槽位（0/1），来自 onMatched —— 结算层靠它判断自己是胜是负、
+## 该读哪一侧的比分。
+func my_slot() -> int: return _my_slot
 
 # ---- 意图（屏幕只调这些）----
 
@@ -148,7 +152,8 @@ func on_match_status(status: Dictionary) -> void:
 	_status = status
 	data_changed.emit()
 
-func on_matched(_result: Dictionary) -> void:
+func on_matched(result: Dictionary) -> void:
+	_my_slot = int(result.get("player_idx", 0))
 	_set_state(State.IN_MATCH)
 
 func on_match_ended(result: Dictionary) -> void:
@@ -187,6 +192,8 @@ func _build_screens() -> void:
 	# 屏幕自己不认识彼此，仅持有 manager 的引用（渲染 + 发意图）。
 	login_screen.bind(self)
 	shell.bind(self)
+	match_bar.bind(self)
+	result_overlay.bind(self)
 
 func _set_state(next: State) -> void:
 	if _state == next:

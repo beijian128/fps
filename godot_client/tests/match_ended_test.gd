@@ -100,6 +100,13 @@ func _run() -> void:
 	_check(_main.ui.result_overlay.visible, "结算层应可见")
 	_check(not _main.ui.shell.visible, "结算时大厅应隐藏")
 	_check(not _main.ui.hud.visible, "结算时 HUD 应隐藏")
+	# 胜负与比分必须读**自己槽位**（自己 10 杀、对手 3 杀 → 你 10 : 3）
+	_check(_main.ui.result_overlay.headline() == "胜 利",
+		"胜者槽位是自己时应显示胜利，得到 %s" % _main.ui.result_overlay.headline())
+	_check(_main.ui.result_overlay.score_text() == "你 10 : 3 对手",
+		"比分应读自己槽位，得到 %s" % _main.ui.result_overlay.score_text())
+	_check(_main.ui.result_overlay.duration_text() == "用时 84 秒",
+		"时长文案不对，得到 %s" % _main.ui.result_overlay.duration_text())
 	_check(not _fake.calls.has("join"), "结算不得自动重新入队，得到 %s" % str(_fake.calls))
 	_check(not _fake.calls.has("profile"), "结算瞬间不该额外拉档案（回大厅时再拉）")
 
@@ -112,6 +119,18 @@ func _run() -> void:
 	_main.ui.intent_back_to_lobby()
 	_check(_main.ui.state() == ScreenManager.State.LOBBY, "回大厅后应处于大厅")
 	_check(_fake.calls.has("profile"), "回大厅应重拉一次档案")
+
+	# 底部状态条：搜索中显示队列人数与等待时长，并把主按钮换成取消
+	_main.ui.intent_start_match()
+	_fake.match_status_received.emit({"queued_players": 3, "waited_seconds": 12})
+	_check(_main.ui.match_bar.queue_text() == "● 搜索中 · 队列 3 人 · 已等待 12s",
+		"队列文案不对，得到 %s" % _main.ui.match_bar.queue_text())
+	_check(_main.ui.match_bar.cancel_visible() and not _main.ui.match_bar.start_visible(),
+		"搜索中应显示取消、隐藏开始匹配")
+	_fake.match_cancel_received.emit({"ok": true, "reason": "cancelled"})
+	_check(_main.ui.match_bar.start_visible(), "取消后应恢复「开始匹配」")
+	_check(_main.ui.match_bar.last_result_text().begins_with("上一局：胜 10 : 3"),
+		"空闲时应显示上一局摘要，得到 %s" % _main.ui.match_bar.last_result_text())
 
 	_done["ended"] = true
 	_finish()
