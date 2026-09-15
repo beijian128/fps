@@ -9,6 +9,7 @@ extends SceneTree
 ## 运行：先起 etcd + nats + redis + gate/account/match/game 四进程，再：
 ##   godot --headless --path <项目> --script res://tests/ws_smoke.gd
 
+const PairHelper := preload("res://tests/pair_helper.gd")
 const PASSWORD := "smokepass"
 
 var _client: Node = null
@@ -18,6 +19,8 @@ var _max_step := -1
 var _matched := false
 var _username := ""
 var _auth := {}
+var _peer = null   # PairHelper 实例（未用 := ，null 无法推断类型）
+var _match_result := {}
 
 func _initialize() -> void:
 	# 从「本地没有凭证」开始：残留 token 会让客户端 resume 成上一轮的账号，
@@ -49,6 +52,7 @@ func _on_login(result: Dictionary) -> void:
 
 func _on_matched(_r: Dictionary) -> void:
 	_matched = true
+	_match_result = _r
 
 func _on_frame(f: Dictionary) -> void:
 	var step := int(f.get("step", -1))
@@ -82,19 +86,39 @@ func _run() -> void:
 		return
 	print("SMOKE logged in user=", _username)
 
-	# 等匹配完成（单人兜底 10s 内会 onMatched）。
-	deadline = Time.get_ticks_msec() + 15000
-	while not _matched and Time.get_ticks_msec() < deadline:
+	# 单人兜底已删除：必须再有第二个真实玩家入队才可能配对，所以这里起一个对等客户端。
+	_peer = PairHelper.new(root, "wssmokepeer")
+	print("SMOKE peer registering user=", _peer.username)
+
+	# 等双方都匹配上。
+	deadline = Time.get_ticks_msec() + 25000
+	while not (_matched and _peer.matched) and Time.get_ticks_msec() < deadline:
 		if not _client.connected:
 			print("SMOKE ws closed before match")
 			quit(1)
 			return
+		if not _peer.playing():
+			print("SMOKE peer failed reason=", _peer.failed_reason)
+			quit(1)
+			return
 		await process_frame
-	if not _matched:
-		print("SMOKE match failed")
+	if not _matched or not _peer.matched:
+		print("SMOKE match failed: self=", _matched, " peer=", _peer.matched,
+			" peer_registered=", _peer.registered, " peer_joined=", _peer.joined)
 		quit(1)
 		return
-	print("SMOKE matched")
+	# 两个人必须进同一局、且槽位不同（0/1）。
+	if String(_match_result.get("match_id", "")) != String(_peer.match_result.get("match_id", "")):
+		print("SMOKE matched into different matches: ", _match_result.get("match_id"),
+			" vs ", _peer.match_result.get("match_id"))
+		quit(1)
+		return
+	if int(_match_result.get("player_idx", -1)) == int(_peer.match_result.get("player_idx", -1)):
+		print("SMOKE both players got the same slot: ", _match_result.get("player_idx"))
+		quit(1)
+		return
+	print("SMOKE matched match_id=", _match_result.get("match_id"),
+		" my_slot=", _match_result.get("player_idx"), " peer_slot=", _peer.match_result.get("player_idx"))
 
 	var t0 := Time.get_ticks_msec()
 	while Time.get_ticks_msec() - t0 < 4000:

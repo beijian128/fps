@@ -12,6 +12,7 @@ extends SceneTree
 ## 看起来就跟通过一样。所以每一步都往 _done 里打完成标记，收尾时逐个核对 ——
 ## 缺任何一步都判失败，哪怕一条 FAIL 都没打印出来。
 
+const PairHelper := preload("res://tests/pair_helper.gd")
 const TIMEOUT_MS := 40000
 const PASSWORD := "smokepass"
 
@@ -22,6 +23,8 @@ var _username := ""
 var _phase := 0        # 0=等注册 1=等 resume 2=已登录，等 onMatched
 var _token_first := "" # 注册时签发的凭证
 var _token_resumed := ""
+var _peer = null       # 对等客户端（单人兜底已删除，必须两人才能开局）
+var _peer_match := {}
 
 func _initialize() -> void:
 	# 每次跑都从「本地没有凭证」开始。残留的 token 会让客户端在握手后直接 resume
@@ -89,20 +92,33 @@ func _on_login(result: Dictionary) -> void:
 		# 到这里会话才真正绑定了账号。match.join 必须在绑定之后发：
 		# 未绑定的 join 会被 match 静默忽略（见 match.Component.Join）。
 		_c.send_match_join()
+		# 单人兜底已删除：再起一个真实客户端，否则永远配不上对。
+		_peer = PairHelper.new(root, "loginpeer")
+		_peer.client.matched_received.connect(_on_peer_matched)
 	else:
 		_fail("phase=%d 时不应再收到成功的 LoginReply" % _phase)
+
+func _on_peer_matched(result: Dictionary) -> void:
+	_peer_match = result
 
 func _on_matched(result: Dictionary) -> void:
 	_done["matched"] = true
 	_check(String(result.get("match_id", "")) != "", "onMatched 应带 match_id")
 	_check(int(result.get("player_idx", -1)) >= 0, "onMatched 应带 player_idx")
+	_match_result = result
+
+var _match_result := {}
 
 func _run() -> void:
 	var deadline := Time.get_ticks_msec() + TIMEOUT_MS
 	while Time.get_ticks_msec() < deadline:
 		if _done.has("aborted"):
 			break
-		if _phase >= 2 and _done.has("matched"):
+		if _phase >= 2 and _done.has("matched") and not _peer_match.is_empty():
+			break
+		if _peer != null and not _peer.playing():
+			_fail("对等客户端注册失败 reason=%s" % _peer.failed_reason)
+			_done["aborted"] = true
 			break
 		await process_frame
 	_finish()
@@ -113,6 +129,11 @@ func _finish() -> void:
 	_check(_done.has("registered"), "应完成注册并拿到 token")
 	_check(_done.has("resumed"), "断线重连后应 resume 成功")
 	_check(_done.has("matched"), "resume 之后应收到 onMatched（进入对局）")
+	_check(not _peer_match.is_empty(), "对等客户端也必须收到 onMatched（单人兜底已删除）")
+	_check(String(_match_result.get("match_id", "")) == String(_peer_match.get("match_id", "")),
+		"两个客户端必须配进同一局")
+	_check(int(_match_result.get("player_idx", -1)) != int(_peer_match.get("player_idx", -1)),
+		"两个客户端的 player_idx 必须不同（0/1）")
 	_check(not _done.has("aborted"), "链路中途失败（见上方 FAIL）")
 
 	if _failures > 0:

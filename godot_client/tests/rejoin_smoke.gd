@@ -12,6 +12,7 @@ extends SceneTree
 ## （未绑定的 join 会被静默忽略）。所以两次连接都必须先认证：第一次注册一个
 ## 新账号，第二次靠落盘的 token 走 resume —— 后者正是真实的断线重连路径。
 
+const PairHelper := preload("res://tests/pair_helper.gd")
 const PASSWORD := "rejoinpass"
 
 var _first_match_id := ""
@@ -21,6 +22,7 @@ var _second_idx := -1
 var _frames := 0
 var _full_frames := 0
 var _username := ""
+var _peer = null       # 对等客户端：单人兜底已删除，回局也需要对手留在局里
 
 func _initialize() -> void:
 	_run()
@@ -50,6 +52,19 @@ func _new_client() -> Node:
 	var c: Node = load("res://scripts/fps_client.gd").new()
 	root.add_child(c)
 	return c
+
+## _persist_token 把凭证写回 user://auth_token.txt（与 FpsClient._save_token 同一路径），
+## 供下一个新建的客户端在握手后走 resume。测试里需要它是因为同一个进程里还有别的
+## 客户端会写同一个文件，最后写入者会盖掉先前的凭证。
+func _persist_token(token: String, name: String) -> void:
+	var f := FileAccess.open("user://auth_token.txt", FileAccess.WRITE)
+	if f != null:
+		f.store_string(token)
+		f.close()
+	var u := FileAccess.open("user://last_username.txt", FileAccess.WRITE)
+	if u != null:
+		u.store_string(name)
+		u.close()
 
 ## _on_auth 是两次连接共用的认证回调：本地无凭证就注册，认证成功就进匹配。
 ##
@@ -86,6 +101,9 @@ func _run() -> void:
 		_first_idx = int(r.get("player_idx", -1))
 		got1[0] = true
 		c1.send_resync())
+
+	# 单人兜底已删除：必须有第二个真实玩家入队才可能配对成功。
+	_peer = PairHelper.new(root, "rejoinpeer")
 
 	if not await _wait_connected(c1, 5000):
 		print("REJOIN first ws open failed")
@@ -124,6 +142,10 @@ func _run() -> void:
 	# token 存在 user://auth_token.txt，第一个客户端注册成功时写下的。新客户端
 	# 握手后会自动带它发 account.resume，服务端据此把会话绑回同一个账号 ——
 	# 而 match 的回局查询正是按账号 uid 定址的（见 match.tryRejoin）。
+	# 关键：对等客户端注册时把 auth_token.txt 覆盖成了它自己的 token，而 c2 要靠
+	# 「落盘的 token」走 resume。所以断线前先把 c1 的凭证写回文件，否则 c2 会 resume
+	# 成对等账号（顶号），回局就测不成了。
+	_persist_token(c1.client_token, _username)
 	c1.queue_free()
 	await process_frame
 
