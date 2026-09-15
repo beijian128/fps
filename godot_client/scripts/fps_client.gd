@@ -27,6 +27,10 @@ signal matched_received(result: Dictionary)
 signal connection_changed(connected: bool)
 signal login_result(result: Dictionary)   # LoginReply：{ok, token, username, account_id, reason}
 signal logic_state_received(result: Dictionary)
+signal profile_received(result: Dictionary)        # PlayerProfileReply（个人档案 + 最近对局）
+signal match_cancel_received(result: Dictionary)   # MatchCancelReply
+signal match_status_received(result: Dictionary)   # onMatchStatus 推送（匹配期队列状态）
+signal match_ended_received(result: Dictionary)    # onMatchEnded 推送（本局结束的权威信号）
 
 const WS_URL := "ws://localhost:8080/"
 const RETRY_SECS := 1.0
@@ -210,6 +214,15 @@ func send_match_join() -> void:
 	_send_notify("match.match.join", PackedByteArray())
 	_match_retry_at = Time.get_ticks_msec() / 1000.0 + MATCH_RETRY_SECS
 
+## send_cancel_match 取消匹配（Request/Response）。
+## 应答里 ok=false + reason=already_matched 表示已经进局，此时 onMatched 马上就到。
+func send_cancel_match() -> void:
+	_send_tracked("match.match.cancel", PackedByteArray())
+
+## send_profile 拉取个人档案（Request/Response；身份来自会话，客户端不自报 uid）。
+func send_profile() -> void:
+	_send_tracked("logic.logic.profile", PackedByteArray())
+
 ## send_register 注册新账号；结果经 login_result 信号回来。
 func send_register(username: String, password: String) -> void:
 	_send_login_request("account.account.register", username, password)
@@ -249,10 +262,14 @@ func _logic_failure(reason: String) -> Dictionary:
 	return {"ok": false, "reason": reason, "coins": 0, "items": [], "equipped_primary_weapon": ""}
 
 func _is_known_request_route(route: String) -> bool:
-	return route.begins_with("account.") or route.begins_with("logic.")
+	return route.begins_with("account.") or route.begins_with("logic.") or route.begins_with("match.")
 
 func _emit_request_failure(route: String, reason: String) -> void:
-	if route.begins_with("logic."):
+	if route == "logic.logic.profile":
+		profile_received.emit({"_failed": true, "reason": reason})
+	elif route == "match.match.cancel":
+		match_cancel_received.emit({"ok": false, "reason": reason, "_failed": true})
+	elif route.begins_with("logic."):
 		logic_state_received.emit(_logic_failure(reason))
 	else:
 		login_result.emit({"ok": false, "reason": reason})
@@ -269,16 +286,16 @@ func _send_tracked(route: String, payload: PackedByteArray) -> void:
 		_emit_request_failure(route, "no_connection")
 
 ## CommandMsg：把一帧的上行命令合并成一条消息发送（帧是最小发送单位）。
-## 编码拆成 _encode_command 是为了能脱离 WebSocket 单测字段号 —— `reset` 在服务端
-## 生成码里叫 Reset_（与生成方法重名），线上字段号仍是 7，是最容易写错的一处。
+## 编码拆成 _encode_command 是为了能脱离 WebSocket 单测字段号。
 func send_command(move: Vector2, yaw: float, jump: bool, shoot: bool,
-		origin: Vector3, dir: Vector3, reset: bool) -> void:
-	_send_notify("game.game.cmd", _encode_command(move, yaw, jump, shoot, origin, dir, reset))
+		origin: Vector3, dir: Vector3) -> void:
+	_send_notify("game.game.cmd", _encode_command(move, yaw, jump, shoot, origin, dir))
 
 ## _encode_command 生成 CommandMsg 的 protobuf 载荷。
-## 字段号取自 game/protos/game.proto：move=1 yaw=2 jump=3 shoot=4 origin=5 dir=6 reset=7。
+## 字段号取自 game/protos/game.proto：move=1 yaw=2 jump=3 shoot=4 origin=5 dir=6；
+## 字段 7（曾是 reset）已随场景重置一起删除并 reserved，客户端不得再发。
 func _encode_command(move: Vector2, yaw: float, jump: bool, shoot: bool,
-		origin: Vector3, dir: Vector3, reset: bool) -> PackedByteArray:
+		origin: Vector3, dir: Vector3) -> PackedByteArray:
 	var msg := _packed_floats(1, [move.x, move.y])
 	msg.append_array(_field_fixed32(2, yaw))
 	if jump:
@@ -287,8 +304,6 @@ func _encode_command(move: Vector2, yaw: float, jump: bool, shoot: bool,
 		msg.append_array(_field_varint(4, 1))
 		msg.append_array(_packed_floats(5, [origin.x, origin.y, origin.z]))
 		msg.append_array(_packed_floats(6, [dir.x, dir.y, dir.z]))
-	if reset:
-		msg.append_array(_field_varint(7, 1))
 	return msg
 
 ## 请求服务端下一帧下发全量（full 帧自带 schema）。收到 full 之前忽略一切增量。
@@ -690,6 +705,14 @@ func _on_push(data: PackedByteArray) -> void:
 			matched_received.emit(_decode_match_result(payload))
 		"onFrame":
 			frame_received.emit(_decode_frame(payload))
+		"onMatchStatus":
+			match_status_received.emit(_decode_match_status(payload))
+		"onMatchEnded":
+			# 本局结束是权威信号：服务端实例已经终结、帧流不会再来，必须停掉接收看门狗
+			# （否则 2.5 秒后会被误判成掉线，触发重连 + 重新入队）。
+			_matched = false
+			_match_retry_at = 0.0
+			match_ended_received.emit(_decode_match_ended(payload))
 
 ## Response 帧：mid（LEB128 变长）+ payload —— **没有 route 字段**。
 ## is_err 为真时 payload 是 pitaya 的错误字符串，不是 LoginReply。
@@ -713,6 +736,20 @@ func _on_response(data: PackedByteArray, is_err: bool) -> void:
 	if is_err:
 		printerr("请求失败（服务端错误）: route=%s payload=%s" % [route, payload.get_string_from_utf8()])
 		_emit_request_failure(route, "internal")
+		return
+	if route == "logic.logic.profile":
+		var profile := _decode_profile(payload)
+		if bool(profile.get("_malformed", false)):
+			_emit_request_failure(route, "internal")
+		else:
+			profile_received.emit(profile)
+		return
+	if route == "match.match.cancel":
+		var cancel := _decode_match_cancel_reply(payload)
+		if bool(cancel.get("_malformed", false)):
+			_emit_request_failure(route, "internal")
+		else:
+			match_cancel_received.emit(cancel)
 		return
 	if route.begins_with("logic."):
 		var result := _decode_logic_state(payload)
@@ -860,6 +897,249 @@ func _decode_login_reply(buf: PackedByteArray) -> Dictionary:
 				3: d["username"] = sub.get_string_from_utf8()
 				4: d["account_id"] = sub.get_string_from_utf8()
 				5: d["reason"] = sub.get_string_from_utf8()
+		else:
+			break
+	return d
+
+## PlayerProfileReply：ok=1 reason=2 level=3 xp=4 xp_into_level=5 xp_for_next_level=6
+## kills=7 deaths=8 matches=9 wins=10 losses=11 recent_matches=12(MatchRecord)。
+func _decode_profile(buf: PackedByteArray) -> Dictionary:
+	var d := {
+		"ok": false,
+		"reason": "",
+		"level": 0,
+		"xp": 0,
+		"xp_into_level": 0,
+		"xp_for_next_level": 0,
+		"kills": 0,
+		"deaths": 0,
+		"matches": 0,
+		"wins": 0,
+		"losses": 0,
+		"recent_matches": [],
+	}
+	var i := 0
+	while i < buf.size():
+		var tag: Array = _read_varint_checked(buf, i)
+		if not bool(tag[2]):
+			return {"_malformed": true}
+		i = int(tag[1])
+		var field := int(tag[0]) >> 3
+		var wire := int(tag[0]) & 7
+		if wire == WIRE_VARINT:
+			var r: Array = _read_varint_checked(buf, i)
+			if not bool(r[2]):
+				return {"_malformed": true}
+			i = int(r[1])
+			match field:
+				1: d["ok"] = int(r[0]) != 0
+				3: d["level"] = int(r[0])
+				4: d["xp"] = int(r[0])
+				5: d["xp_into_level"] = int(r[0])
+				6: d["xp_for_next_level"] = int(r[0])
+				7: d["kills"] = int(r[0])
+				8: d["deaths"] = int(r[0])
+				9: d["matches"] = int(r[0])
+				10: d["wins"] = int(r[0])
+				11: d["losses"] = int(r[0])
+		elif wire == WIRE_LEN:
+			var rl: Array = _read_varint_checked(buf, i)
+			if not bool(rl[2]):
+				return {"_malformed": true}
+			i = int(rl[1])
+			var size := int(rl[0])
+			if size < 0 or i + size > buf.size():
+				return {"_malformed": true}
+			var sub: PackedByteArray = buf.slice(i, i + size)
+			i += size
+			match field:
+				2: d["reason"] = sub.get_string_from_utf8()
+				12:
+					var rec: Dictionary = _decode_match_record(sub)
+					if bool(rec.get("_malformed", false)):
+						return {"_malformed": true}
+					d["recent_matches"].append(rec)
+		else:
+			break
+	return d
+
+## MatchRecord：match_id=1 won=2 kills=3 deaths=4 opponent_kills=5
+## duration_seconds=6 opponent_name=7 ended_at=8。
+func _decode_match_record(buf: PackedByteArray) -> Dictionary:
+	var d := {
+		"match_id": "",
+		"won": false,
+		"kills": 0,
+		"deaths": 0,
+		"opponent_kills": 0,
+		"duration_seconds": 0,
+		"opponent_name": "",
+		"ended_at": 0,
+	}
+	var i := 0
+	while i < buf.size():
+		var tag: Array = _read_varint_checked(buf, i)
+		if not bool(tag[2]):
+			return {"_malformed": true}
+		i = int(tag[1])
+		var field := int(tag[0]) >> 3
+		var wire := int(tag[0]) & 7
+		if wire == WIRE_VARINT:
+			var r: Array = _read_varint_checked(buf, i)
+			if not bool(r[2]):
+				return {"_malformed": true}
+			i = int(r[1])
+			match field:
+				2: d["won"] = int(r[0]) != 0
+				3: d["kills"] = int(r[0])
+				4: d["deaths"] = int(r[0])
+				5: d["opponent_kills"] = int(r[0])
+				6: d["duration_seconds"] = int(r[0])
+				8: d["ended_at"] = int(r[0])
+		elif wire == WIRE_LEN:
+			var rl: Array = _read_varint_checked(buf, i)
+			if not bool(rl[2]):
+				return {"_malformed": true}
+			i = int(rl[1])
+			var size := int(rl[0])
+			if size < 0 or i + size > buf.size():
+				return {"_malformed": true}
+			var sub: PackedByteArray = buf.slice(i, i + size)
+			i += size
+			match field:
+				1: d["match_id"] = sub.get_string_from_utf8()
+				7: d["opponent_name"] = sub.get_string_from_utf8()
+		else:
+			break
+	return d
+
+## MatchCancelReply：ok=1 reason=2。
+func _decode_match_cancel_reply(buf: PackedByteArray) -> Dictionary:
+	var d := {"ok": false, "reason": ""}
+	var i := 0
+	while i < buf.size():
+		var tag: Array = _read_varint_checked(buf, i)
+		if not bool(tag[2]):
+			return {"_malformed": true}
+		i = int(tag[1])
+		var field := int(tag[0]) >> 3
+		var wire := int(tag[0]) & 7
+		if wire == WIRE_VARINT:
+			var r: Array = _read_varint_checked(buf, i)
+			if not bool(r[2]):
+				return {"_malformed": true}
+			i = int(r[1])
+			if field == 1:
+				d["ok"] = int(r[0]) != 0
+		elif wire == WIRE_LEN:
+			var rl: Array = _read_varint_checked(buf, i)
+			if not bool(rl[2]):
+				return {"_malformed": true}
+			i = int(rl[1])
+			var size := int(rl[0])
+			if size < 0 or i + size > buf.size():
+				return {"_malformed": true}
+			var sub: PackedByteArray = buf.slice(i, i + size)
+			i += size
+			if field == 2:
+				d["reason"] = sub.get_string_from_utf8()
+		else:
+			break
+	return d
+
+## MatchStatus（onMatchStatus 推送载荷）：queued_players=1 waited_seconds=2。
+func _decode_match_status(buf: PackedByteArray) -> Dictionary:
+	var d := {"queued_players": 0, "waited_seconds": 0}
+	var i := 0
+	while i < buf.size():
+		var tag: Array = _read_varint_checked(buf, i)
+		if not bool(tag[2]):
+			return {"_malformed": true}
+		i = int(tag[1])
+		var field := int(tag[0]) >> 3
+		if (int(tag[0]) & 7) != WIRE_VARINT:
+			break
+		var r: Array = _read_varint_checked(buf, i)
+		if not bool(r[2]):
+			return {"_malformed": true}
+		i = int(r[1])
+		match field:
+			1: d["queued_players"] = int(r[0])
+			2: d["waited_seconds"] = int(r[0])
+	return d
+
+## MatchEnded（onMatchEnded 推送载荷）：
+## match_id=1 winner_slot=2 slots=3(SlotResult) duration_seconds=4。
+func _decode_match_ended(buf: PackedByteArray) -> Dictionary:
+	var d := {"match_id": "", "winner_slot": -1, "duration_seconds": 0, "slots": []}
+	var i := 0
+	while i < buf.size():
+		var tag: Array = _read_varint_checked(buf, i)
+		if not bool(tag[2]):
+			return {"_malformed": true}
+		i = int(tag[1])
+		var field := int(tag[0]) >> 3
+		var wire := int(tag[0]) & 7
+		if wire == WIRE_VARINT:
+			var r: Array = _read_varint_checked(buf, i)
+			if not bool(r[2]):
+				return {"_malformed": true}
+			i = int(r[1])
+			match field:
+				2: d["winner_slot"] = int(r[0])
+				4: d["duration_seconds"] = int(r[0])
+		elif wire == WIRE_LEN:
+			var rl: Array = _read_varint_checked(buf, i)
+			if not bool(rl[2]):
+				return {"_malformed": true}
+			i = int(rl[1])
+			var size := int(rl[0])
+			if size < 0 or i + size > buf.size():
+				return {"_malformed": true}
+			var sub: PackedByteArray = buf.slice(i, i + size)
+			i += size
+			if field == 1:
+				d["match_id"] = sub.get_string_from_utf8()
+			elif field == 3:
+				var slot := _decode_slot_result(sub)
+				if bool(slot.get("_malformed", false)):
+					return {"_malformed": true}
+				d["slots"].append(slot)
+		else:
+			break
+	return d
+
+## SlotResult：uid=1 kills=2 deaths=3。
+func _decode_slot_result(buf: PackedByteArray) -> Dictionary:
+	var d := {"uid": "", "kills": 0, "deaths": 0}
+	var i := 0
+	while i < buf.size():
+		var tag: Array = _read_varint_checked(buf, i)
+		if not bool(tag[2]):
+			return {"_malformed": true}
+		i = int(tag[1])
+		var field := int(tag[0]) >> 3
+		var wire := int(tag[0]) & 7
+		if wire == WIRE_VARINT:
+			var r: Array = _read_varint_checked(buf, i)
+			if not bool(r[2]):
+				return {"_malformed": true}
+			i = int(r[1])
+			match field:
+				2: d["kills"] = int(r[0])
+				3: d["deaths"] = int(r[0])
+		elif wire == WIRE_LEN:
+			var rl: Array = _read_varint_checked(buf, i)
+			if not bool(rl[2]):
+				return {"_malformed": true}
+			i = int(rl[1])
+			var size := int(rl[0])
+			if size < 0 or i + size > buf.size():
+				return {"_malformed": true}
+			var sub: PackedByteArray = buf.slice(i, i + size)
+			i += size
+			if field == 1:
+				d["uid"] = sub.get_string_from_utf8()
 		else:
 			break
 	return d

@@ -252,10 +252,8 @@ func _process(delta: float) -> void:
 		origin = _pending_shot["origin"]
 		dir = _pending_shot["dir"]
 		_pending_shot = {}
-	var reset := _pending_reset
-	_pending_reset = false
 	if _matched:
-		fps_client.send_command(move, _yaw, jump, shoot, origin, dir, reset)
+		fps_client.send_command(move, _yaw, jump, shoot, origin, dir)
 
 func _input(event: InputEvent) -> void:
 	if _logic_panel != null and _logic_panel.visible:
