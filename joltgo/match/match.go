@@ -16,6 +16,7 @@ import (
 	pitaya "github.com/topfreegames/pitaya/v3/pkg"
 	"github.com/topfreegames/pitaya/v3/pkg/cluster"
 	"github.com/topfreegames/pitaya/v3/pkg/component"
+	"joltgo/bot"
 	"joltgo/game/protos"
 	"joltgo/online"
 )
@@ -193,6 +194,12 @@ func (c *Component) pushMatchStatus(ctx context.Context) {
 		return
 	}
 	for _, entry := range entries {
+		if bot.Is(entry.UID) {
+			// 机器人不在任何 gate 上，推送必然失败 —— 每 tick 一条错误日志，
+			// 队列里有几个机器人就刷几倍。人数仍算它（total 不过滤）：
+			// 对等待中的真人来说，队列里有几个机器人确实是「排队人数」。
+			continue
+		}
 		status := &protos.MatchStatus{
 			QueuedPlayers: int32(total),
 			WaitedSeconds: entry.WaitedSeconds,
@@ -302,15 +309,21 @@ func (c *Component) Cancel(ctx context.Context, _ *protos.MatchCancelMsg) (*prot
 // tryMatch 尝试配对：队列凑满 2 人即开局。多个 match 节点同时抢也只有一个
 // 能弹出（Lua 原子），不需要选主。
 func (c *Component) tryMatch(ctx context.Context) {
-	uids, err := c.queue.PopPair(ctx)
-	if err != nil {
-		log.Printf("match: pop pair failed: %v", err)
-		return
+	for {
+		uids, err := c.queue.PopPair(ctx)
+		if err != nil {
+			log.Printf("match: pop pair failed: %v", err)
+			return
+		}
+		if len(uids) == 0 {
+			return
+		}
+		if c.startMatch(ctx, uids) {
+			// 成功开局、或已把真人放回队列、或集群侧没节点：都交给下一轮 tick。
+			return
+		}
+		// 返回 false 只有一种情形：这一对全是机器人，已丢弃。继续弹下一对。
 	}
-	if len(uids) == 0 {
-		return
-	}
-	c.startMatch(ctx, uids)
 }
 
 // bindGameOn 请指定 gate 把对局归属写进玩家的会话数据。
@@ -356,7 +369,11 @@ func (c *Component) pushMatched(uid, matchID, gameServerID string, playerIdx int
 // 「占着槽位的幽灵玩家」，也不会出现客户端收到 onMatched 但 resync 路由不到的
 // 死局。槽位（player_idx）在剔除过程中就定下来，因为 game.create 的 uids
 // 下标就是 player_idx。
-func (c *Component) startMatch(ctx context.Context, uids []string) {
+//
+// 返回 false 表示「这一对全是机器人、已被丢弃」，调用方（tryMatch）应继续弹下一对；
+// 其余情形（建成、真人被 requeue、集群侧没节点、全机器人之外的任何处理）都返回
+// true，交回下一轮 tick。
+func (c *Component) startMatch(ctx context.Context, uids []string) bool {
 	servers, err := c.app.GetServersByType(gameServerType)
 	if err != nil || len(servers) == 0 {
 		// 没有可用的 game 节点是集群侧的瞬时状况，跟这几个人在不在线无关：
@@ -365,7 +382,7 @@ func (c *Component) startMatch(ctx context.Context, uids []string) {
 		for _, uid := range uids {
 			c.requeue(ctx, uid)
 		}
-		return
+		return true
 	}
 	// 简单挑选：取第一个 game 节点（demo 规模足够；生产可做负载均衡）。
 	var target *cluster.Server
@@ -376,10 +393,20 @@ func (c *Component) startMatch(ctx context.Context, uids []string) {
 
 	matchID := nuid.New().Next()
 
-	// 1) 定地址 + 探活：读不到在线登记、或对方的 gate 写不进去，就当这个人没了。
-	alive := make([]string, 0, len(uids))
-	gates := make([]string, 0, len(uids))
+	// 1) 定地址 + 探活。**槽位 = uid 在名单里的下标**，所以这里必须按位置推进，
+	//    而不能像旧实现那样「活下来几个就排几个」—— 机器人的位置要在建局时就固定，
+	//    否则机器人与真人的槽位会随探活结果漂移。
+	//
+	//    机器人走另一条路径：它没有 gate、没有会话、没有在线登记，照真人路径走会被
+	//    100% 当成掉线剔除（这正是必须改的地方）。真人的探活仍然照旧 ——
+	//    「排队者可能已经掉线」这条判断对真人一字未变。
+	slots := make([]string, 0, len(uids))
+	humanAlive := 0
 	for _, uid := range uids {
+		if bot.Is(uid) {
+			slots = append(slots, uid)
+			continue
+		}
 		gateID, err := c.online.Gate(ctx, uid)
 		if err != nil {
 			// 瞬时故障（Redis 抖动等）：人还在线，不能就这么丢掉 —— 他已经被
@@ -394,7 +421,7 @@ func (c *Component) startMatch(ctx context.Context, uids []string) {
 			log.Printf("match: dropping %s from match %s: offline", uid, matchID)
 			continue
 		}
-		slot := len(alive) // 槽位 = 在存活名单里的位置
+		slot := len(slots) // 槽位 = 在名单里的位置（含机器人）
 		if err := c.bindGameOn(ctx, gateID, uid, matchID, target.ID, slot); err != nil {
 			if errors.Is(err, errPlayerGone) {
 				// 那个 gate 上已经没有这个会话：人确实走了。
@@ -405,26 +432,66 @@ func (c *Component) startMatch(ctx context.Context, uids []string) {
 			}
 			continue
 		}
-		alive = append(alive, uid)
-		gates = append(gates, gateID)
-	}
-	if len(alive) == 0 {
-		return
+		slots = append(slots, uid)
+		humanAlive++
 	}
 
-	// 2) 建局。失败则回滚会话数据，否则客户端会拿着一个不存在的 game 节点去发
-	//    game.cmd，全部被静默丢弃（routeGame 找不到 gameServerId 对应节点）。
+	// 2) 探活之后一个真人都没有：这一局没有意义，不能建。
+	//
+	//    分两种情形处置，差别是「机器人该不该留着」：
+	//
+	//    - **这一对本来就是一个机器人 + 一个真人在排队**（真人在探活时被剔掉）：
+	//      把机器人放回队列，让他等下一个真人。机器人是 GM 特意塞进来凑人数的，
+	//      为一个掉线的真人把它一起丢掉，等于让这次 GM 操作白做。
+	//    - **这一对本来就是两个机器人**：直接丢弃、**不放回** —— 两个木头人对站
+	//      没有意义（谁都不动、谁都不开枪，只能空转到 30 分钟空闲回收），放回还会
+	//      让它们反复被弹出、每次都重置等待时间（与当初删除单人兜底时的取舍一致）。
+	if humanAlive == 0 {
+		if isAllBotPair(uids) {
+			log.Printf("match: discarding all-bot pair %v", uids)
+			return false
+		}
+		// 剩下的只可能是机器人：「机器人 + 掉线真人」这一对里真人已被剔掉，
+		// 机器人放回去等下一个真人 —— 它是 GM 特意塞进来凑人数的，为一个掉线的
+		// 真人把它一起丢掉等于让这次操作白做。（「两个真人都掉线」时 slots 为空，
+		// 他们各自已经 requeue 过了。）
+		for _, uid := range slots {
+			c.requeue(ctx, uid)
+		}
+		if len(slots) > 0 {
+			log.Printf("match: kept %d bot(s) queued after the paired human went offline", len(slots))
+		}
+		return false
+	}
+	if len(slots) == 0 {
+		// 这一对本来是真人，只是都被探活剔掉了 —— 幸存者已在上面各自 requeue。
+		return true
+	}
+
+	// 3) 建局。失败则回滚会话数据（**只对真人**：机器人没有会话可回滚，直接丢掉即可），
+	//    否则客户端会拿着一个不存在的 game 节点去发 game.cmd，全部被静默丢弃
+	//    （routeGame 找不到 gameServerId 对应节点）。
 	reply := &protos.CreateGameReply{}
 	if err := c.app.RPCTo(ctx, target.ID, gameCreateRoute, reply, &protos.CreateGameMsg{
 		MatchId: matchID,
-		Uids:    alive,
+		Uids:    slots,
 	}); err != nil {
 		log.Printf("match: create game on %s failed: %v", target.ID, err)
 		// 这些人几秒前刚被探活过（bindGameOn 应答 found=true），建局失败是
 		// 集群侧的问题，不是他们的问题 —— 回滚会话数据后重新入队，否则他们
 		// 已经被原子弹出、又收不到 onMatched，就此静默消失。
-		for i, uid := range alive {
-			if err := c.bindGameOn(ctx, gates[i], uid, "", "", i); err != nil {
+		for idx, uid := range slots {
+			if bot.Is(uid) {
+				// 机器人没有会话可回滚，也没有「收不到 onMatched」的问题。
+				continue
+			}
+			gateID, gateErr := c.online.Gate(ctx, uid)
+			if gateErr != nil || gateID == "" {
+				log.Printf("match: rollback for %s skipped: no online gate", uid)
+				c.requeue(ctx, uid)
+				continue
+			}
+			if err := c.bindGameOn(ctx, gateID, uid, "", "", idx); err != nil {
 				if errors.Is(err, errPlayerGone) {
 					// 回滚时人已经走了：会话本来就没了，无需回滚也无需重新入队。
 					log.Printf("match: rollback for %s skipped: already offline", uid)
@@ -436,14 +503,35 @@ func (c *Component) startMatch(ctx context.Context, uids []string) {
 			}
 			c.requeue(ctx, uid)
 		}
-		return
+		return true
 	}
 
-	// 3) 推结果。
-	for slot, uid := range alive {
+	// 4) 推结果。机器人没有客户端，pushMatched 对它就是一次无效推送，省掉它让日志干净些。
+	for slot, uid := range slots {
+		if bot.Is(uid) {
+			continue
+		}
 		c.pushMatched(uid, matchID, target.ID, slot)
 	}
-	log.Printf("match: started match %s on game %s with %d players", matchID, target.ID, len(alive))
+	log.Printf("match: started match %s on game %s with %d slots (%d humans)",
+		matchID, target.ID, len(slots), humanAlive)
+	return true
+}
+
+// isAllBotPair 报告这一对排队者是否**两个都是机器人**（全机器人配对没有意义）。
+//
+// 只看入队时的身份，不看探活结果：真人掉线必须走他们自己的 requeue 路径，
+// 不能被这条规则顺手吞掉。单元素列表（理论上不会出现）不视为全机器人。
+func isAllBotPair(uids []string) bool {
+	if len(uids) < 2 {
+		return false
+	}
+	for _, uid := range uids {
+		if !bot.Is(uid) {
+			return false
+		}
+	}
+	return true
 }
 
 // requeue 把因为瞬时故障没能进局的玩家放回队列。
