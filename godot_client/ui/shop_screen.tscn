@@ -3,10 +3,51 @@
 [ext_resource type="Theme" path="res://theme/tactical_theme.tres" id="1_4kj2c"]
 [ext_resource type="Script" path="res://ui/shop_screen.gd" id="2_gvg7f"]
 
-[node name="ShopScreen" type="Control" unique_id=1908234883]
+[node name="ShopScreen" type="Control" unique_id=1411196622]
 layout_mode = 3
 anchors_preset = 0
 size_flags_horizontal = 3
 size_flags_vertical = 3
 theme = ExtResource("1_4kj2c")
 script = ExtResource("2_gvg7f")
+
+[node name="@VBoxContainer@25" type="VBoxContainer" parent="." unique_id=2039793388]
+layout_mode = 0
+anchor_right = 1.0
+anchor_bottom = 1.0
+size_flags_horizontal = 3
+size_flags_vertical = 3
+theme_override_constants/separation = 12
+
+[node name="@HBoxContainer@26" type="HBoxContainer" parent="@VBoxContainer@25" unique_id=105587664]
+layout_mode = 2
+theme_override_constants/separation = 12
+
+[node name="Title" type="Label" parent="@VBoxContainer@25/@HBoxContainer@26" unique_id=511999622]
+unique_name_in_owner = true
+layout_mode = 2
+theme_type_variation = &"LabelTitle"
+text = "商城"
+
+[node name="Spacer" type="Control" parent="@VBoxContainer@25/@HBoxContainer@26" unique_id=1669027528]
+layout_mode = 2
+size_flags_horizontal = 3
+mouse_filter = 2
+
+[node name="Coins" type="Label" parent="@VBoxContainer@25/@HBoxContainer@26" unique_id=314933536]
+unique_name_in_owner = true
+layout_mode = 2
+theme_type_variation = &"LabelAccent"
+text = "⛁ 0"
+
+[node name="Scroll" type="ScrollContainer" parent="@VBoxContainer@25" unique_id=1187479042]
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="Grid" type="GridContainer" parent="@VBoxContainer@25/Scroll" unique_id=1903732696]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_constants/h_separation = 12
+theme_override_constants/v_separation = 12
+columns = 4

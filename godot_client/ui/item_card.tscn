@@ -3,9 +3,64 @@
 [ext_resource type="Theme" path="res://theme/tactical_theme.tres" id="1_wwa13"]
 [ext_resource type="Script" path="res://ui/item_card.gd" id="2_afnk7"]
 
-[node name="ItemCard" type="PanelContainer" unique_id=876425907]
+[node name="ItemCard" type="PanelContainer" unique_id=1818656057]
 custom_minimum_size = Vector2(170, 190)
 size_flags_horizontal = 3
 size_flags_vertical = 3
 theme = ExtResource("1_wwa13")
 script = ExtResource("2_afnk7")
+
+[node name="@VBoxContainer@33" type="VBoxContainer" parent="." unique_id=693340411]
+layout_mode = 2
+theme_override_constants/separation = 4
+
+[node name="Icon" type="ColorRect" parent="@VBoxContainer@33" unique_id=1017414824]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 52)
+layout_mode = 2
+color = Color(0.16470589, 0.18039216, 0.20784314, 1)
+
+[node name="Name" type="Label" parent="@VBoxContainer@33" unique_id=935133649]
+unique_name_in_owner = true
+layout_mode = 2
+text = "物品"
+
+[node name="Info" type="Label" parent="@VBoxContainer@33" unique_id=72081418]
+unique_name_in_owner = true
+layout_mode = 2
+theme_type_variation = &"LabelMuted"
+text = "—"
+
+[node name="@HBoxContainer@34" type="HBoxContainer" parent="@VBoxContainer@33" unique_id=943410794]
+layout_mode = 2
+theme_override_constants/separation = 4
+
+[node name="QtyMinus" type="Button" parent="@VBoxContainer@33/@HBoxContainer@34" unique_id=1698400231]
+unique_name_in_owner = true
+layout_mode = 2
+theme_type_variation = &"GhostButton"
+text = "−"
+
+[node name="Qty" type="Label" parent="@VBoxContainer@33/@HBoxContainer@34" unique_id=901954979]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+text = "1"
+horizontal_alignment = 1
+
+[node name="QtyPlus" type="Button" parent="@VBoxContainer@33/@HBoxContainer@34" unique_id=1901635355]
+unique_name_in_owner = true
+layout_mode = 2
+theme_type_variation = &"GhostButton"
+text = "+"
+
+[node name="Spacer" type="Control" parent="@VBoxContainer@33" unique_id=698985318]
+layout_mode = 2
+size_flags_vertical = 3
+mouse_filter = 2
+
+[node name="Action" type="Button" parent="@VBoxContainer@33" unique_id=1155331042]
+unique_name_in_owner = true
+layout_mode = 2
+theme_type_variation = &"PrimaryButton"
+text = "购买"

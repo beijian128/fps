@@ -3,7 +3,7 @@
 [ext_resource type="Theme" path="res://theme/tactical_theme.tres" id="1_276te"]
 [ext_resource type="Script" path="res://ui/hud.gd" id="2_546lt"]
 
-[node name="Hud" type="Control" unique_id=244544035]
+[node name="Hud" type="Control" unique_id=858816060]
 layout_mode = 3
 anchors_preset = 0
 size_flags_horizontal = 3
@@ -11,3 +11,151 @@ size_flags_vertical = 3
 mouse_filter = 2
 theme = ExtResource("1_276te")
 script = ExtResource("2_546lt")
+
+[node name="SelfPanel" type="PanelContainer" parent="." unique_id=1669439584]
+unique_name_in_owner = true
+layout_mode = 0
+anchor_top = 1.0
+anchor_bottom = 1.0
+offset_left = 16.0
+offset_top = -104.0
+offset_right = 260.0
+offset_bottom = -16.0
+theme_type_variation = &"BarPanel"
+
+[node name="@VBoxContainer@38" type="VBoxContainer" parent="SelfPanel" unique_id=1303341716]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="@HBoxContainer@39" type="HBoxContainer" parent="SelfPanel/@VBoxContainer@38" unique_id=919434158]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="SelfTitle" type="Label" parent="SelfPanel/@VBoxContainer@38/@HBoxContainer@39" unique_id=1498639296]
+unique_name_in_owner = true
+layout_mode = 2
+theme_type_variation = &"LabelMuted"
+text = "你"
+
+[node name="Spacer" type="Control" parent="SelfPanel/@VBoxContainer@38/@HBoxContainer@39" unique_id=131238727]
+layout_mode = 2
+size_flags_horizontal = 3
+mouse_filter = 2
+
+[node name="SelfKd" type="Label" parent="SelfPanel/@VBoxContainer@38/@HBoxContainer@39" unique_id=1320733964]
+unique_name_in_owner = true
+layout_mode = 2
+text = "0 / 0"
+
+[node name="HealthBar" type="ProgressBar" parent="SelfPanel/@VBoxContainer@38" unique_id=1922226648]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 10)
+layout_mode = 2
+show_percentage = false
+
+[node name="HealthText" type="Label" parent="SelfPanel/@VBoxContainer@38" unique_id=1004945783]
+unique_name_in_owner = true
+layout_mode = 2
+theme_type_variation = &"LabelMuted"
+text = "100"
+
+[node name="OppPanel" type="PanelContainer" parent="." unique_id=1209680857]
+unique_name_in_owner = true
+layout_mode = 0
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -260.0
+offset_top = 16.0
+offset_right = -16.0
+offset_bottom = 104.0
+theme_type_variation = &"BarPanel"
+
+[node name="@VBoxContainer@40" type="VBoxContainer" parent="OppPanel" unique_id=1815584077]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="@HBoxContainer@41" type="HBoxContainer" parent="OppPanel/@VBoxContainer@40" unique_id=66554613]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="OppTitle" type="Label" parent="OppPanel/@VBoxContainer@40/@HBoxContainer@41" unique_id=1825176960]
+unique_name_in_owner = true
+layout_mode = 2
+theme_type_variation = &"LabelMuted"
+text = "对手"
+
+[node name="Spacer" type="Control" parent="OppPanel/@VBoxContainer@40/@HBoxContainer@41" unique_id=76111292]
+layout_mode = 2
+size_flags_horizontal = 3
+mouse_filter = 2
+
+[node name="OppKd" type="Label" parent="OppPanel/@VBoxContainer@40/@HBoxContainer@41" unique_id=1592698549]
+unique_name_in_owner = true
+layout_mode = 2
+text = "0 / 0"
+
+[node name="OppHealthBar" type="ProgressBar" parent="OppPanel/@VBoxContainer@40" unique_id=702820751]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 10)
+layout_mode = 2
+show_percentage = false
+
+[node name="OppHealthText" type="Label" parent="OppPanel/@VBoxContainer@40" unique_id=848209643]
+unique_name_in_owner = true
+layout_mode = 2
+theme_type_variation = &"LabelMuted"
+text = "100"
+
+[node name="RoundPanel" type="PanelContainer" parent="." unique_id=1856514619]
+unique_name_in_owner = true
+layout_mode = 0
+anchor_left = 0.5
+anchor_right = 0.5
+offset_left = -140.0
+offset_top = 16.0
+offset_right = 140.0
+offset_bottom = 84.0
+theme_type_variation = &"BarPanel"
+
+[node name="@VBoxContainer@42" type="VBoxContainer" parent="RoundPanel" unique_id=1814999065]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="@CenterContainer@43" type="CenterContainer" parent="RoundPanel/@VBoxContainer@42" unique_id=55057452]
+layout_mode = 2
+size_flags_horizontal = 3
+
+[node name="RoundText" type="Label" parent="RoundPanel/@VBoxContainer@42/@CenterContainer@43" unique_id=795342620]
+unique_name_in_owner = true
+layout_mode = 2
+theme_type_variation = &"LabelMuted"
+text = "先到 10 杀"
+
+[node name="RoundBar" type="ProgressBar" parent="RoundPanel/@VBoxContainer@42" unique_id=1203263473]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 8)
+layout_mode = 2
+max_value = 10.0
+show_percentage = false
+
+[node name="KillFeed" type="VBoxContainer" parent="." unique_id=1268409902]
+unique_name_in_owner = true
+layout_mode = 0
+offset_left = 16.0
+offset_top = 16.0
+offset_right = 300.0
+offset_bottom = 120.0
+theme_override_constants/separation = 4
+
+[node name="FpsLabel" type="Label" parent="." unique_id=356894543]
+unique_name_in_owner = true
+layout_mode = 0
+anchor_left = 1.0
+anchor_top = 1.0
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = -140.0
+offset_top = -40.0
+offset_right = -16.0
+offset_bottom = -16.0
+theme_type_variation = &"LabelMuted"

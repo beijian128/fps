@@ -3,10 +3,55 @@
 [ext_resource type="Theme" path="res://theme/tactical_theme.tres" id="1_3aqih"]
 [ext_resource type="Script" path="res://ui/bag_screen.gd" id="2_2kuwv"]
 
-[node name="BagScreen" type="Control" unique_id=1615158045]
+[node name="BagScreen" type="Control" unique_id=956499308]
 layout_mode = 3
 anchors_preset = 0
 size_flags_horizontal = 3
 size_flags_vertical = 3
 theme = ExtResource("1_3aqih")
 script = ExtResource("2_2kuwv")
+
+[node name="@VBoxContainer@29" type="VBoxContainer" parent="." unique_id=1712546482]
+layout_mode = 0
+anchor_right = 1.0
+anchor_bottom = 1.0
+size_flags_horizontal = 3
+size_flags_vertical = 3
+theme_override_constants/separation = 12
+
+[node name="Title" type="Label" parent="@VBoxContainer@29" unique_id=739102518]
+unique_name_in_owner = true
+layout_mode = 2
+theme_type_variation = &"LabelTitle"
+text = "背包"
+
+[node name="Scroll" type="ScrollContainer" parent="@VBoxContainer@29" unique_id=155482242]
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="Grid" type="GridContainer" parent="@VBoxContainer@29/Scroll" unique_id=117379587]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_constants/h_separation = 12
+theme_override_constants/v_separation = 12
+columns = 4
+
+[node name="EmptyState" type="VBoxContainer" parent="." unique_id=684355544]
+unique_name_in_owner = true
+visible = false
+layout_mode = 0
+theme_override_constants/separation = 12
+
+[node name="EmptyText" type="Label" parent="EmptyState" unique_id=282049437]
+unique_name_in_owner = true
+layout_mode = 2
+theme_type_variation = &"LabelMuted"
+text = "背包还是空的，去商城看看"
+
+[node name="ToShop" type="Button" parent="EmptyState" unique_id=854537026]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 0
+theme_type_variation = &"GhostButton"
+text = "去商城"

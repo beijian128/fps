@@ -93,15 +93,53 @@ func _run() -> void:
 	_main.ui.intent_register("u1", "p1")
 	_check(_fake.calls == ["register"], "注册意图应调 send_register，得到 %s" % str(_fake.calls))
 
+	# 2b) 登录页自己的职责：空字段拦在本地、在途单飞、错误码翻中文
+	_main.ui.login_screen.submit(false)
+	_check(_fake.calls.size() == 1, "空字段不该发请求，得到 %s" % str(_fake.calls))
+	_check(_main.ui.login_screen.error_text() == "请填写用户名和密码", "空字段应给本地提示")
+	_main.ui.login_screen.set_username_for_test("u1")
+	_main.ui.login_screen.set_password_for_test("p1")
+	_main.ui.login_screen.submit(false)
+	_check(_fake.calls.size() == 2 and _fake.calls[1] == "login", "填好后应发 login，得到 %s" % str(_fake.calls))
+	_check(_main.ui.login_screen.is_busy(), "请求在途时登录页应处于 busy（按钮禁用、单飞）")
+	_main.ui.login_screen.submit(false)
+	_check(_fake.calls.size() == 2, "在途时重复提交不应再发请求，得到 %s" % str(_fake.calls))
+	_fake.login_result.emit({"ok": false, "reason": "bad_credentials"})
+	_check(not _main.ui.login_screen.is_busy(), "失败后应解除 busy")
+	_check(_main.ui.login_screen.error_text() == "用户名或密码错误",
+		"错误码应翻成中文，得到 %s" % _main.ui.login_screen.error_text())
+	_check(_main.ui.state() == ScreenManager.State.LOGIN, "登录失败应留在登录页")
+
 	# 3) 登录成功 → 进大厅；拉一次 logic.state 与 profile；**不自动匹配**
 	_fake.calls.clear()
-	_fake.login_result.emit({"ok": true, "username": "u1", "account_id": "7"})
+	_fake.login_result.emit({"ok": true, "username": "VETERAN_99", "account_id": "7"})
 	_check(_main.ui.state() == ScreenManager.State.LOBBY, "登录成功后应进大厅")
 	_check(_main.ui.shell.visible, "大厅应可见")
 	_check(not _main.ui.login_screen.visible, "登录页应隐藏")
 	_check(_fake.calls.has("logic_state"), "进大厅应拉一次商城状态")
 	_check(_fake.calls.has("profile"), "进大厅应拉一次个人档案")
 	_check(not _fake.calls.has("join"), "登录成功后**不该**自动匹配，得到 %s" % str(_fake.calls))
+
+	# 3b) 顶栏三个数据源都要到位：用户名（LoginReply）、等级（档案）、金币（商城状态）
+	_fake.profile_received.emit({"ok": true, "level": 7, "xp": 420,
+		"xp_into_level": 20, "xp_for_next_level": 200})
+	_fake.logic_state_received.emit({"ok": true, "coins": 1000, "items": [],
+		"equipped_primary_weapon": ""})
+	_check(_main.ui.shell.top_text() == "VETERAN_99 · LV.7 · ⛁ 1000",
+		"顶栏应显示用户名/等级/金币，得到 %s" % _main.ui.shell.top_text())
+
+	# 3c) 导航：切页只换渲染 + 高亮，不发任何请求；内容插槽挂上对应页面
+	_check(_main.ui.shell.nav_active() == "profile", "初始应高亮个人信息页")
+	_check(_main.ui.shell.page_node_name() == "ProfileScreen",
+		"内容插槽应挂 ProfileScreen，得到 %s" % _main.ui.shell.page_node_name())
+	var calls_before: int = _fake.calls.size()
+	_main.ui.intent_show_page("shop")
+	await process_frame
+	_check(_main.ui.shell.nav_active() == "shop", "切到商城后应高亮商城")
+	_check(_main.ui.shell.page_node_name() == "ShopScreen",
+		"内容插槽应换成 ShopScreen，得到 %s" % _main.ui.shell.page_node_name())
+	_check(_fake.calls.size() == calls_before, "切页面不该产生请求，得到 %s" % str(_fake.calls))
+	_main.ui.intent_show_page("profile")
 
 	# 4) 开始匹配 → MATCHING + join
 	_fake.calls.clear()

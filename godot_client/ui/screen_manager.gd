@@ -36,6 +36,7 @@ var _logic := {}
 var _profile := {}
 var _last_result := {}
 var _status := {}
+var _username := ""
 
 ## setup 绑定客户端并接上信号。可重复调用（测试会换成假客户端再调一次）。
 func setup(client: Node, main: Node) -> void:
@@ -63,6 +64,9 @@ func logic_state() -> Dictionary: return _logic
 func profile() -> Dictionary: return _profile
 func last_result() -> Dictionary: return _last_result
 func match_status() -> Dictionary: return _status
+## username 顶栏要显示用户名，而档案回复里没有它（自己的用户名只在 LoginReply 里，
+## 避免两个数据源）—— 登录成功时记在这里。
+func username() -> String: return _username
 
 # ---- 意图（屏幕只调这些）----
 
@@ -109,14 +113,20 @@ func intent_resync() -> void:
 
 func on_login_result(result: Dictionary) -> void:
 	if bool(result.get("ok", false)):
+		_username = String(result.get("username", ""))
 		_set_state(State.LOBBY)
 		_client.send_logic_state()
 		_client.send_profile()
 		return
 	# no_token 不是错误：本地没有凭证而已，安静显示登录页。
 	_set_state(State.LOGIN)
-	if login_screen != null and String(result.get("reason", "")) != "no_token":
-		login_screen.show_failure(String(result.get("reason", "")))
+	if login_screen == null:
+		return
+	var reason := String(result.get("reason", ""))
+	if reason == "no_token":
+		login_screen.show_silently()
+	else:
+		login_screen.show_failure(reason)
 
 func on_logic_state(result: Dictionary) -> void:
 	if bool(result.get("ok", false)):
@@ -170,6 +180,9 @@ func _build_screens() -> void:
 	var slot: Node = shell.get_node_or_null("%StatusSlot")
 	if slot != null:
 		slot.add_child(match_bar)
+	# 屏幕自己不认识彼此，仅持有 manager 的引用（渲染 + 发意图）。
+	login_screen.bind(self)
+	shell.bind(self)
 
 func _set_state(next: State) -> void:
 	if _state == next:

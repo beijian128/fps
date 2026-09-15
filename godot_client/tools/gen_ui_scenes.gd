@@ -374,6 +374,7 @@ func _margin(parent: Node, m: int) -> MarginContainer:
 func _panel(node_name: String, variation: String) -> PanelContainer:
 	var panel := PanelContainer.new()
 	panel.name = node_name
+	panel.unique_name_in_owner = true
 	panel.theme_type_variation = variation
 	return panel
 
@@ -381,6 +382,9 @@ func _label(node_name: String, text: String, variation: String) -> Label:
 	var label := Label.new()
 	label.name = node_name
 	label.text = text
+	# 名字都是场景内唯一的，统一标成 unique：脚本里用 %Name 取节点最稳，
+	# 漏标一个就会在运行时拿到 null（这类错在无头测试里表现为一堆 null 访问错误）。
+	label.unique_name_in_owner = true
 	if variation != "":
 		label.theme_type_variation = variation
 	return label
@@ -391,7 +395,7 @@ func _button(node_name: String, text: String, variation: String, unique: bool) -
 	button.text = text
 	if variation != "":
 		button.theme_type_variation = variation
-	button.unique_name_in_owner = unique
+	button.unique_name_in_owner = unique or true
 	return button
 
 func _nav_button(node_name: String, text: String, active: bool) -> Button:
@@ -419,6 +423,9 @@ func _spacer(expand_vertical: bool = false) -> Control:
 	return spacer
 
 func _save(root: Node, file_name: String) -> void:
+	# 关键一步：PackedScene.pack() 只打包 owner == 根节点的子节点，而**不会**替你设 owner
+	# （编辑器里是自动设的，运行时不会）。漏了这一步，存出来的场景只有根节点 —— 子节点全丢。
+	_assign_owners(root, root)
 	var packed := PackedScene.new()
 	if packed.pack(root) != OK:
 		printerr("pack failed: ", file_name)
@@ -431,3 +438,11 @@ func _save(root: Node, file_name: String) -> void:
 		return
 	print("scene written: ", path)
 	root.free()
+
+## _assign_owners 把整棵树的 owner 指向**场景根**（根自身保持 owner = null）。
+## 注意 owner 必须是场景根，不是直接父节点 —— 设成父节点的话只有第一层能存下来，
+## 更深的后代会被 pack() 丢掉。
+func _assign_owners(node: Node, scene_root: Node) -> void:
+	for child in node.get_children():
+		child.owner = scene_root
+		_assign_owners(child, scene_root)
