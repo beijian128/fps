@@ -14,6 +14,7 @@ import (
 
 	pitaya "github.com/topfreegames/pitaya/v3/pkg"
 	"github.com/topfreegames/pitaya/v3/pkg/component"
+	"joltgo/bot"
 	"joltgo/game/protos"
 	"joltgo/replication"
 	"joltgo/sim"
@@ -91,6 +92,11 @@ func (c *Component) Create(ctx context.Context, msg *protos.CreateGameMsg) (*pro
 	c.mu.Lock()
 	c.instances[msg.MatchId] = inst
 	for idx, uid := range msg.Uids {
+		if bot.Is(uid) {
+			// 机器人不是账号，也不会有 game.cmd / 回局查询。写进注册表只会让
+			// game.rejoin 与 match.findInstance 的 fan-out 多一次无意义的往返。
+			continue
+		}
 		c.uidToInst[uid] = inst
 		c.uidToIndex[uid] = idx
 	}
@@ -147,6 +153,10 @@ func (c *Component) Rejoin(ctx context.Context, msg *protos.RejoinMsg) (*protos.
 //
 // 判据偏严是刻意的：将来若有后端改走带会话的路径，会在这里被明确拒绝（调用方拿到
 // RPC 错误），而不是静默把入口留给客户端。
+//
+// 同一个判据在 match（auth.go）与 logic（component.go）各有一份副本：GM 的两条管理
+// route 会被 gate 按前缀转发，客户端也能发到，所以那两处也必须拒「带会话的调用」。
+// 三份实现的判据必须一致，改这里要一起看。
 func isClientCall(ctx context.Context, app pitaya.Pitaya) bool {
 	return app != nil && app.GetSessionFromCtx(ctx) != nil
 }

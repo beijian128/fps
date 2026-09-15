@@ -20,6 +20,7 @@ import (
 	"time"
 
 	pitaya "github.com/topfreegames/pitaya/v3/pkg"
+	"joltgo/bot"
 	"joltgo/game/protos"
 	"joltgo/physics"
 	"joltgo/sim"
@@ -48,6 +49,15 @@ type Instance struct {
 	// 结算。对局本身照常推进 —— 对手那一局不因为有人放弃而中断。
 	left [sim.MaxPlayers]bool
 
+	// bots 标记「这个槽位是机器人」。它与 left 是两件事：left 的语义是「本来有这个
+	// 人，他中途放弃了」（logic 靠它区分「放弃」与「空槽位」），把机器人标成 left
+	// 会让结算日志出现「机器人在中途放弃」这种假话。
+	//
+	// 机器人的效果是：不收帧、不在推送目标里、不进实例注册表、不参与回局 ——
+	// 也就是「没有客户端的槽位」。结算侧不需要特殊处理：它的 SlotResult.Uid 本来就是
+	// 空串，logic 的 RecordMatch 已经会跳过空槽位。
+	bots [sim.MaxPlayers]bool
+
 	lastSeen [sim.MaxPlayers]time.Time // 各槽位最近一次上行时间（仅 run goroutine 读写）
 	onExit   func()                    // 实例自行退出时的回调（由 game 组件设置）
 	stopOnce sync.Once
@@ -58,7 +68,7 @@ type Instance struct {
 
 // NewInstance 构造对局实例（物理世界在 Start 时创建）。
 func NewInstance(app pitaya.Pitaya, matchID string, uids []string) *Instance {
-	return &Instance{
+	inst := &Instance{
 		app:     app,
 		sim:     sim.New(physics.New()),
 		matchID: matchID,
@@ -66,6 +76,15 @@ func NewInstance(app pitaya.Pitaya, matchID string, uids []string) *Instance {
 		cmds:    make(chan func(), 128),
 		stop:    make(chan struct{}),
 	}
+	// 机器人 uid 前缀是唯一的判据（见 joltgo/bot）：match 也是用它决定
+	// 「跳过在线探活」的，两边的认识必须一致 —— 前缀一旦不一致，这里就会给
+	// 一个真人不收帧、或者给机器人推帧。
+	for slot, uid := range inst.uids {
+		if slot < sim.MaxPlayers {
+			inst.bots[slot] = bot.Is(uid)
+		}
+	}
+	return inst
 }
 
 // Start 创建物理世界并启动对局 goroutine。
@@ -159,7 +178,7 @@ func (i *Instance) finishMatch(out sim.MatchOutcome) {
 func (i *Instance) presentUIDs() []string {
 	out := make([]string, 0, len(i.uids))
 	for slot, uid := range i.uids {
-		if uid != "" && !i.left[slot] {
+		if uid != "" && !i.left[slot] && !i.bots[slot] {
 			out = append(out, uid)
 		}
 	}
@@ -264,9 +283,10 @@ func (i *Instance) broadcast() {
 
 	var deltaUIDs, fullUIDs []string
 	for slot, uid := range i.uids {
-		if uid == "" || i.left[slot] {
+		if uid == "" || i.left[slot] || i.bots[slot] {
 			// 空槽位与「已放弃对局」的玩家都不收帧：前者没人，后者已经从这个对局里
-			// 释放出去了（给他推帧等于把他继续留在这一局里）。
+			// 释放出去了（给他推帧等于把他继续留在这一局里）。机器人也没有客户端，
+			// 给它推帧既没人收，也白走一趟 NATS 用户频道。
 			continue
 		}
 		if i.pendingFull[slot] {
