@@ -160,6 +160,23 @@ func (s *PlayerStore) DeleteWallet(ctx context.Context, id uint64) error {
 	return err
 }
 
+// AccountExists 报告账号 Hash 是否存在（`EXISTS acct:1:<id>:0`，不读字段）。
+//
+// logic 对账号数据是**只读**的，它对账号的唯一兴趣是「这个人真的存在吗」——
+// GM 发钱的前置校验靠它：目标不存在时报 account_not_found，而不是凭空造一个
+// 只有金币、没有账号行的孤儿钱包。
+//
+// 放在 PlayerStore 上是因为 logic 手里只有这一个池；账号模型与生成物
+// （account.redis.go / player.redis.go）都不受影响。
+func (s *PlayerStore) AccountExists(ctx context.Context, id uint64) (bool, error) {
+	conn, err := s.pool.GetContext(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer conn.Close()
+	return redis.Bool(conn.Do("EXISTS", AccountKey(id)))
+}
+
 func (s *PlayerStore) SaveBag(ctx context.Context, id uint64, bag PlayerBag) error {
 	conn, err := s.pool.GetContext(ctx)
 	if err != nil {

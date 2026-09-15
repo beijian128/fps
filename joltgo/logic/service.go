@@ -23,6 +23,10 @@ const (
 	// ReasonNotEnoughPlayers 表示结算上报收到了，但槽位不齐（没有两名真实玩家），
 	// 按规则不入账。兜底单人局已删除，这条是防御。
 	ReasonNotEnoughPlayers = "not_enough_players"
+	// ReasonAccountNotFound 表示目标账号不存在（GM 发钱时不再隐式建档）。
+	ReasonAccountNotFound = "account_not_found"
+	// ReasonForbidden 表示管理入口拒绝：调用方带了会话，或密钥不匹配。
+	ReasonForbidden = "forbidden"
 )
 
 type ReasonError struct {
@@ -59,6 +63,8 @@ type Store interface {
 	AppendMatchRecord(context.Context, uint64, persist.PlayerMatchRecord) error
 	ListMatchRecords(context.Context, uint64, int) ([]persist.PlayerMatchRecord, error)
 	UsernameByID(context.Context, uint64) (string, bool, error)
+	// AccountExists 报告该账号是否真实存在（GM 发钱的前置校验，不隐式建档）。
+	AccountExists(context.Context, uint64) (bool, error)
 }
 
 type Lock interface {
@@ -293,6 +299,42 @@ func (s *Service) Purchase(ctx context.Context, accountID, itemID string, quanti
 		return State{}, err
 	}
 	return out, nil
+}
+
+// GrantCoins 给账号加（delta>0）或扣（delta<0）金币，返回变更后的余额。
+//
+// 与 Purchase 的区别：发钱不涉及商品、背包与装备，**没有跨命令的读-改-写不变量**，
+// 所以不需要账号级分布式锁（user:lock:<accountID>）与补偿路径 —— 那套锁是为
+// 「扣钱包 + 写背包」这个多命令提交准备的。单条 HINCRBY 本身原子，加锁等于把
+// 原子操作降级（见 AGENTS.md §3.10）。
+//
+// 目标账号不存在时报错而不是建档：给不存在的账号发钱应该是「地址写错了」，
+// 而不是顺手造一个只有金币、没有账号行的孤儿钱包。
+func (s *Service) GrantCoins(ctx context.Context, accountID string, delta int64) (int64, error) {
+	id, err := parseAccountID(accountID)
+	if err != nil {
+		return 0, err
+	}
+	exists, err := s.store.AccountExists(ctx, id)
+	if err != nil {
+		return 0, err
+	}
+	if !exists {
+		return 0, reason(ReasonAccountNotFound)
+	}
+	if err := s.store.AddCoins(ctx, id, delta); err != nil {
+		return 0, err
+	}
+	wallet, ok, err := s.store.GetWallet(ctx, id)
+	if err != nil {
+		return 0, err
+	}
+	if !ok {
+		// 账号存在却没有钱包行：AddCoins 的 HINCRBY 会顺带建出这个 Hash，
+		// 正常路径到不了这里。防御性返回，让调用方知道「读不回结果」。
+		return 0, reason(ReasonProfileMissing)
+	}
+	return wallet.Coins, nil
 }
 
 func (s *Service) State(ctx context.Context, accountID string) (State, error) {
