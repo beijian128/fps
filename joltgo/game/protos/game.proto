@@ -189,3 +189,74 @@ message Frame {
   repeated EntityDelta entities = 3;
   Schema schema = 4;
 }
+
+// 单个槽位的结算数据。下标即 player_idx；uid 为空串表示该槽位没有真实玩家。
+message SlotResult {
+  string uid = 1;
+  int32 kills = 2;
+  int32 deaths = 3;
+}
+
+// game → logic：一局分出胜负时的结算上报（remote route logic.logic.recordmatch）。
+message RecordMatchMsg {
+  string match_id = 1;
+  repeated SlotResult slots = 2;
+  int32 winner_slot = 3;
+  int32 duration_seconds = 4;
+}
+
+message RecordMatchReply {
+  bool ok = 1;
+  bool applied = 2; // false = 收到但按规则未入账
+  string reason = 3;
+}
+
+// 历史里的单场战绩（下发结构，与持久化结构分开）。
+message MatchRecord {
+  string match_id = 1;
+  bool won = 2;
+  int32 kills = 3;
+  int32 deaths = 4;
+  int32 opponent_kills = 5;
+  int32 duration_seconds = 6;
+  string opponent_name = 7;
+  int64 ended_at = 8;
+}
+
+message PlayerProfileMsg {}
+
+message PlayerProfileReply {
+  bool ok = 1;
+  string reason = 2;
+  int32 level = 3;
+  int64 xp = 4;
+  int64 xp_into_level = 5;
+  int64 xp_for_next_level = 6;
+  int32 kills = 7;
+  int32 deaths = 8;
+  int32 matches = 9;
+  int32 wins = 10;
+  int32 losses = 11;
+  repeated MatchRecord recent_matches = 12;
+}
+
+message MatchCancelMsg {}
+
+message MatchCancelReply {
+  bool ok = 1;
+  string reason = 2; // cancelled | already_matched | not_queued | unauthenticated
+}
+
+// onMatchStatus 推送载荷：匹配期每秒一次。
+message MatchStatus {
+  int32 queued_players = 1;
+  int32 waited_seconds = 2;
+}
+
+// onMatchEnded 推送载荷：一局结束的权威信号。
+message MatchEnded {
+  string match_id = 1;
+  int32 winner_slot = 2;
+  repeated SlotResult slots = 3;
+  int32 duration_seconds = 4;
+}
