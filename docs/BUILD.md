@@ -88,7 +88,7 @@ cd joltgo
 ```
 
 生成物必须提交。持久化 proto 与 `game/protos/game.proto` 分开，生成码也放在独立 Go
-包，避免消息/枚举与 wire 契约重复声明。账号 key 为 `acct:1:<accountID>:0`，玩家钱包/背包 key 为 `REDB#2:<accountID>:0` / `REDB#1:<accountID>:0`；
+包，避免消息/枚举与 wire 契约重复声明。账号 key 为 `acct:1:<accountID>:0`，玩家钱包/背包/档案 key 为 `REDB#2:<accountID>:0` / `REDB#1:<accountID>:0` / `REDB#3:<accountID>:0`，最近对局历史为 List `playerhist:<accountID>`；
 `distlock` 同样按固定 commit 内置在
 `third_party/distlock/`，只修正其 module path，根模块通过本地 `replace` 使用，构建不依赖 GitHub 可达。
 
@@ -186,7 +186,7 @@ Copy-Item build\libjolt_c.dll -Destination . -Force
 
 ## Logic 持久化与测试
 
-账号和玩家数据使用两套独立的 `protoc-gen-redis` 生成包：账号模型在 `persist/protos/account.proto`，玩家模型在 `persist/protos/player/player.proto`。玩家生成码包名为 `playerpb`，钱包 key 格式为 `REDB#%d:%d:%d`（当前钱包 namespace 为 2，背包 namespace 为 1），例如 `REDB#2:17:0`。
+账号和玩家数据使用两套独立的 `protoc-gen-redis` 生成包：账号模型在 `persist/protos/account.proto`，玩家模型在 `persist/protos/player/player.proto`。玩家生成码包名为 `playerpb`，Hash key 格式为 `REDB#%d:%d:%d`（当前钱包 namespace 为 2、背包为 1、玩家档案为 3），例如 `REDB#2:17:0` / `REDB#3:17:0`。最近对局历史是 List（不是 Hash 行），键名固定为 `playerhist:<accountID>`，所以不套 `REDB#` 前缀。
 
 玩家 proto 变更后在 `joltgo` 目录运行 `.\gen-redis.ps1`。生成的 `player.redis.go` 必须与 proto 一起提交，不要手改生成文件。
 

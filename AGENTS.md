@@ -92,8 +92,8 @@ fps/
    - **两个角色都必须忽略两个命中盒**（`CharacterIgnoreBody` → Jolt `OnContactValidate` 返回 false）。注意**共位**的静态刚体本身并不挡人（CharacterVirtual 的扫掠忽略 fraction = 0 的初始重叠，实测见 `physics/pvp_hit_integration_test.go`）；真正需要忽略的是命中盒**落在角色前方**的情形 —— 对方玩家的命中盒对本地角色就是一堵隐形墙，自己的命中盒每 tick 才跟随一次、会被角色甩到身前（跑动 0.7 m/tick，下落更快）。
    - **死亡复活时命中盒要一起搬回出生点**（`respawn`）：它要到下一 tick 的 `hitboxFollowSystem` 才跟随角色，留在旧位置会让之后飞来的弹丸打中一个「已经复活在别处的人」。
    - **枪口不能落在自己的命中盒里**：命中盒是实体刚体、会挡住弹丸，而第三人称的枪口正好在角色中轴上。`shoot` 会把出生点沿射向推到盒外（`pushOutsideOwnHitbox`），并且「弹丸 vs 自己的命中盒」的接触被忽略（不扣血、也不吃掉弹丸）。
-   - **每个对局各建一份**：命中盒在 `init()` 里随场景创建（**排在场景几何之后**，让场景刚体 id 仍从 1 开始），`reset()` 走 `physics.Destroy()` + 重建，`CharacterIgnoreBody` 的忽略表也随之重建。
-10. **持久化与分布式锁边界**：`persist/` 是结构化持久化层，账号与玩家模型由固定版本 `protoc-gen-redis` 分包生成（`account.proto` → `account.redis.go`；`player/player.proto` → `player.redis.go`），同一账号 Hash key 为 `acct:1:<accountID>:0`，玩家钱包/背包 Hash 为 `REDB#2:<accountID>:0` / `REDB#1:<accountID>:0`。`distlock` 只包住「占名 → 分配 ID → 写 Hash → 落名字映射」这类多命令业务临界区；凭证轮换、匹配队列已经由 Redis Lua 原子脚本保证，**不要**再用锁替换那些更强的原子操作。
+   - **每个对局各建一份**：命中盒在 `init()` 里随场景创建（**排在场景几何之后**，让场景刚体 id 仍从 1 开始）。**世界生命周期 = 实例生命周期**：`Init()` 只在实例创建时调用一次，**场景重置功能已删除**（连同 `Simulation.Reset` / `Instance.Reset` / `replication.Store.Reset` 与 `CommandMsg.reset`），因此同一实例内刚体 id 不会复用。
+10. **持久化与分布式锁边界**：`persist/` 是结构化持久化层，账号与玩家模型由固定版本 `protoc-gen-redis` 分包生成（`account.proto` → `account.redis.go`；`player/player.proto` → `player.redis.go`），同一账号 Hash key 为 `acct:1:<accountID>:0`，玩家钱包/背包 Hash 为 `REDB#2:<accountID>:0` / `REDB#1:<accountID>:0`，**玩家档案（累计战绩）为 `REDB#3:<accountID>:0`，最近 20 场历史为 List `playerhist:<accountID>`**（历史是 List 不是 Hash 行，所以不套 `REDB#` 前缀）。`distlock` 只包住「占名 → 分配 ID → 写 Hash → 落名字映射」这类多命令业务临界区；凭证轮换、匹配队列已经由 Redis Lua 原子脚本保证，战绩计数累加是一条 `MULTI/EXEC` + `HINCRBY`（纯计数不需要锁），**不要**再用锁替换那些更强的原子操作。
 
 ## 4. 数据流（分布式链路）
 
@@ -103,8 +103,10 @@ fps/
    account 校验用户名/密码（bcrypt）→ distlock 串行同名注册 → 写账号 Hash + SETNX 名字映射 → RPC logic.logic.online（随机 logic）→ logic 确保钱包/背包 Hash → 签发 token 存 Redis → Bind(accountID) → 回 LoginReply
    gate → logic.logic.*（随机 logic 节点）→ logic 读写 Redis 钱包/背包 Hash
    gate 绑定成功后写 online:{accountID} → 本 gate（会话归属登记）
-   match 从 Redis 队列（match:queue，ZSET）配对 2 人（或 10s 兜底单人）→ GetServersByType("game") 挑节点 → RPCTo "game.game.create"
+   match 从 Redis 队列（match:queue，ZSET，**入队用 ZADD NX**）配对 2 人 —— **没有单人兜底**：凑不满就一直等，玩家可发 `match.match.cancel` 取消 → GetServersByType("game") 挑节点 → RPCTo "game.game.create"
    game 节点创建 Instance（每条 goroutine）→ 每 tick SendPushToUsers("onFrame", …, uids, "gate")
+   game 判出胜负 → 推 onMatchEnded + RPC logic.logic.recordmatch（game → logic，不重试不去重）→ 终结实例并摘注册表 → 玩家回大厅重新匹配
+   match 每 tick 把 `onMatchStatus{queued_players, waited_seconds}` 推给队列里每个等待者
    gate 收到 push → 经 NATS 用户频道转发给客户端会话
 ```
 
@@ -114,10 +116,11 @@ fps/
   拿到 `LoginReply.ok=true` 之后才允许发 `match.match.join`（`JoinMsg` 是**空消息**，身份来自会话）。
 - 客户端本地存 token（`user://auth_token.txt`），下次启动直接 `.resume` 免登录；token 7 天过期、每次 resume 续期，
   一次 `.login` 会**轮换** token 并删掉旧的（同一账号只允许一个活跃会话，顶号）。
-- 上行：输入 + 射击 + 重置**合并成一条** `game.game.cmd`（Notify，帧是最小发送单位）；不再有单独的 `input`/`shoot`/`reset` 消息，重置等即时操作也不额外补推，统一等下一 tick 的帧。
+- 上行：输入 + 射击**合并成一条** `game.game.cmd`（Notify，帧是最小发送单位）；不再有单独的 `input`/`shoot` 消息，射击等即时操作也不额外补推，统一等下一 tick 的帧。（场景重置已整体删除，字段 7 在 `CommandMsg` 里 `reserved`。）
 - **增量帧**每 tick 推 `onFrame`，只含本帧变化的 `(实体, 属性, 终值)`；同一属性一帧内改多次只发终值，值没变的写入不产生流量（连静态几何也每 tick 写、但不下发）。
 - **重连回局**：会话 UID（accountID）就是回局的钥匙 → `match.join` 先向所有 game 节点 fan-out RPC `game.game.rejoin` → 命中则走 `bindGameOn`（RPC 请持有该会话的 gate 把 `gameServerId` 写进会话数据）+ `pushMatched`（推 `onMatched`），与首次匹配同一条收尾路径 → 客户端收到 `onMatched` 后先清空本地世界、再主动发 `game.game.resync` → 服务端把该槽位的**下一帧**标为全量，单独下发 full 帧（含 Schema）。因为 full 帧是**先清空再整体覆盖**，即使中间先到了几帧增量也会被整帧盖掉——不存在「onMatched 与 full 帧谁先到」的竞态。
-- 断线：客户端 1s 重连；**接收看门狗 2.5s 只在匹配后生效**（匹配等待期无帧流，10s 兜底属正常）。
+- **一局结束**：`matchSystem` 判出胜负即产出结算快照（`sim.DrainOutcome`，取走即清），`game` 先广播本 tick 增量帧、再推 `onMatchEnded`、再异步上报战绩，最后终结实例。客户端收到 `onMatchEnded` 必须离开对局态 —— 实例一终结帧流就断，否则 2.5s 接收看门狗会把「本局结束」误判成掉线。
+- 断线：客户端 1s 重连；**接收看门狗 2.5s 只在匹配后生效**（匹配等待期无帧流属正常）。实例的空闲回收超时是 **30 分钟**，同时也是掉线回局窗口。
 - 服务间通信走 etcd（服务发现）+ NATS（RPC）+ Redis（共享状态：账号、凭证、会话归属、匹配队列、钱包、背包），见 `joltgo/deploy/`。
 
 ## 5. 约定与坑
@@ -144,7 +147,7 @@ fps/
   **会话 UID = accountID**，所以 `game.rejoin` / 实例注册表 / 推送目标这些按 uid 索引的地方一行没改。
   限流是**按用户名**（`rl:user:{name}`，1 分钟 10 次）而不是按 IP —— account 是 backend，pitaya 的 `Remote` agent 的
   `RemoteAddr()` 返回 nil，它看不见客户端 IP。
-- **持久化模型（`persist/protos/`）**：账号 `DBAccount`、玩家 `DBUserWallet` / `DBUserBag` 都由 `protoc-gen-redis` 生成独立包；账号 key 为 `acct:1:<accountID>:0`，钱包/背包 key 为 `REDB#2:<accountID>:0` / `REDB#1:<accountID>:0`。生成物必须提交，改字段后跑 `joltgo/gen-redis.ps1`，不要手改 `.redis.go`；生成包与 `game/protos` 分开，避免枚举/消息类型重复声明。
+- **持久化模型（`persist/protos/`）**：账号 `DBAccount`、玩家 `DBUserWallet` / `DBUserBag` / `DBUserProfile` / `DBMatchRecord` 都由 `protoc-gen-redis` 生成独立包；账号 key 为 `acct:1:<accountID>:0`，钱包/背包/档案 key 为 `REDB#2:<accountID>:0` / `REDB#1:<accountID>:0` / `REDB#3:<accountID>:0`，历史 key 为 `playerhist:<accountID>`。生成物必须提交，改字段后跑 `joltgo/gen-redis.ps1`，不要手改 `.redis.go`；生成包与 `game/protos` 分开，避免枚举/消息类型重复声明。
 - **分布式锁（`distlock`）**：源码按固定 commit 内置在 `third_party/distlock/`；唯一本地补丁是把其 `go.mod` 的短 module path `distlock` 改成 `github.com/beijian128/distlock`，根模块再用本地 `replace` 引入（离线可构建且 `go mod verify` 通过）。锁只用于多命令业务提交；单条脚本能原子完成的事继续走 Lua，避免把强原子性降级成锁。
 - **Redis 数据目录不清空**：`deploy/start-infra.ps1` 每次都清 `etcd-data`（见下条），但 `redis-data` **永不清空** ——
   里面是账号、密码哈希、凭证、钱包与背包；清掉就是把所有账号和局外进度删光。两者对待方式相反，别把 etcd 的习惯套过去。
@@ -163,7 +166,7 @@ fps/
 - **同步属性（`sim/replicate.go`）**：加同步字段 = `declareAttributes` 加一行 `Declare` + 在每个变更点 `rep.Set`。**属性表必须在 `Simulation.New()` 里一次声明完整**——`Set`/`Remove`/`Get` 遇到未声明属性直接 panic（`Declare` 重复同名也 panic）；客户端在 full 帧里一次拿到完整属性表，之后靠它解码所有增量，所以不能等首次 `Set` 才登记。
 - **就近 `rep.Set` 漏写不会在运行时暴露**：Store 不反查 ECS 世界，漏写只会让客户端**静默停在旧值**（没有报错、没有日志）。唯一能抓住它的是 `sim/replicate_test.go` 的 oracle 测试（`expectedAttrs` 从 ECS 世界独立推期望值，与 store 全量逐项比对）。所以加同步字段时**先补 `rep.Set`、再在 `expectedAttrs` 里补断言**——这是「变更点显式 Set」这套设计的固有代价。
 - **full 帧不得修改增量基线**：`Store.Full()` 刻意不碰 `sent`（已下发基线）——全量是发给**单个**客户端（重连 / resync）的消息，其他在线客户端的基线不受影响；又因为所有 op 携带的是**终值**而非相对增量，无论基线如何，客户端都会收敛到同一状态。
-- **实体 id 会被复用**：`Store.Destroy` / `Reset` 必须一并清掉已下发基线（`sent`），否则重建后刚体 id 从头复用、新实体的 `Set` 会因「与旧实体值相同」被静默抑制——客户端只收到 destroy、再也收不到重建（`Body.*` 这类只在创建时 Set 一次的属性就永久丢了）。
+- **实体 id 在同一实例内不再复用**（场景重置已删除，世界随实例创建一次）：`replication.Store` 不再有 `Reset`，`Store.Destroy` 仍会清掉该实体自己的已下发基线（`sent`）。
 - **服务端 20Hz tick 无条件运行**（实例创建后无论客户端是否在线都推进）。
 - **Git 流程：本仓库直接提交到 `main`**，不要开 feature branch、不要走 PR——`main` 就是集成分支，历史保持线性（`git push origin main` 即可）。提交信息用 `<type>: <subject>` 前缀（`feat` / `fix` / `docs` / `refactor` / `test`），AI 提交在结尾加 `Co-Authored-By` 尾注；提交前先把 §6 里对应的测试跑绿。
 
@@ -215,18 +218,22 @@ Godot_..._console.exe --headless --path godot_client --script res://tests/reconn
 Godot_..._console.exe --headless --path godot_client --script res://tests/login_reply_decode_test.gd # Response 帧（无 route）+ LoginReply / errorMask 解码
 Godot_..._console.exe --headless --path godot_client --script res://tests/logic_state_decode_test.gd # LogicStateReply / 商城状态解码
 Godot_..._console.exe --headless --path godot_client --script res://tests/logic_panel_test.gd # Logic 面板 UI
+Godot_..._console.exe --headless --path godot_client --script res://tests/match_ended_test.gd # 对局结束（onMatchEnded）：停看门狗 / 清世界 / 不自动重排
 
 # 冒烟：需要活集群（etcd + NATS + redis + gate/account/logic/match/game 五进程）
-Godot_..._console.exe --headless --path godot_client --script res://tests/login_smoke.gd            # 注册 → LoginReply → 断线 → resume → onMatched
+Godot_..._console.exe --headless --path godot_client --script res://tests/login_smoke.gd            # 注册 → LoginReply → 断线 → resume → onMatched（两客户端配对）
 Godot_..._console.exe --headless --path godot_client --script res://tests/ws_smoke.gd               # 登录 + 匹配 + 20Hz 增量帧
 Godot_..._console.exe --headless --path godot_client --script res://tests/rejoin_smoke.gd           # 登录 + 断线回同一局
 Godot_..._console.exe --headless --path godot_client --script res://tests/logic_smoke.gd            # 注册 + Logic 状态 / 购买 / 装备
+Godot_..._console.exe --headless --path godot_client --script res://tests/profile_smoke.gd          # logic.logic.profile 端到端（档案查询）
 ```
 
 > `rejoin_smoke.gd` 是新协议下**唯一**端到端验证「重连回到同一对局」的测试（同一
 > match_id + 同一 player_idx + 重连后收到 full 帧），改匹配 / 回局 / resync 链路后必跑；
-> 它的断言在载荷解析失败时显式判失败（不会假通过）。`ws_smoke.gd` / `rejoin_smoke.gd`
-> 现在都要**先登录再 join**（各自随机注册一个账号）。其余七个回归测试互相独立、无需服务端。
+> 它的断言在载荷解析失败时显式判失败（不会假通过）。冒烟测试里 `login_smoke` / `ws_smoke` /
+> `rejoin_smoke` 都要**先登录再 join**，而且**各自都需要两个客户端真配对**（`tests/pair_helper.gd`
+> 起第二个真实客户端）—— 单人兜底删除后，一个客户端永远匹配不上。其余八个回归测试互相独立、
+> 无需服务端。
 
 ## 7. 变更 runbook（改什么就动哪里）
 
@@ -254,5 +261,7 @@ Godot_..._console.exe --headless --path godot_client --script res://tests/logic_
 ## Logic 局外数据边界
 
 - `logic` 是无状态 backend：客户端经 gate 随机路由到任意 logic 节点，节点只把钱包/背包写入 Redis；账号登录成功后由 account 通过 `logic.logic.online` 确保档案存在。
-- 钱包与背包分别使用 `REDB#2:<accountID>:0` 与 `REDB#1:<accountID>:0`；新账号初始金币 1000，默认商城为 rifle/pistol/shotgun/medkit。
+- 钱包与背包分别使用 `REDB#2:<accountID>:0` 与 `REDB#1:<accountID>:0`，玩家档案（xp/击杀/死亡/场次/胜负）使用 `REDB#3:<accountID>:0`，最近 20 场历史使用 List `playerhist:<accountID>`；新账号初始金币 1000，默认商城为 rifle/pistol/shotgun/medkit。
+- **战绩上报不重试、不去重**（`game` 用 `app.RPC` 单发一条 `logic.logic.recordmatch`，2 秒超时，失败只记日志）：logic 不可达时那一场会静默少记一条，这是 spec 明确接受的取舍；载荷带 `match_id`，将来要加幂等键不用改协议。
+- **`logic` 只读 account Hash 的 username**（`persist.UsernameByID`）用于给历史记对手名：只读、不写别人的键，缺失就当空串。
 - 购买不是请求幂等接口，客户端不得自动重试；余额预检查、账号锁内复查与钱包/背包补偿共同保证并发一致性。game 不读取局外背包或装备。

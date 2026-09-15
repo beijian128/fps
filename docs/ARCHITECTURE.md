@@ -73,7 +73,7 @@ account ── logic.logic.online（随机） ──▶ logic ──EnsureProfil
 - 一个匹配（matchId）对应一个 `Instance`，构造时 `sim.New(physics.New())` 各建一个
   独立 Jolt 世界（互不共享）。
 - `Instance.run()` 是唯一访问 sim 的 goroutine：一个 select 循环消费
-  - **命令 channel**（`cmds`）：输入/射击/重置，由 RPC handler 经 `enqueue` 投递；
+  - **命令 channel**（`cmds`）：输入/射击，由 RPC handler 经 `enqueue` 投递；
   - **20 Hz ticker**：`sim.Step()` + 广播同步帧（多数槽位发增量，待全量槽位发 full）；
   - **stop**：退出并释放物理世界。
 - 因为只有这一条 goroutine 访问 sim，`sim.Simulation` **去掉了 `sync.Mutex`**——并发
@@ -148,7 +148,9 @@ sim/ 各系统（变更点）──rep.Set(实体, 属性, 终值)──▶ repl
   压缩成终值表一次性下发。`Full()` **刻意不修改增量基线**（全量只发给单个客户端）。
 - **属性存在性**：缺省即不存在。标记属性（`Projectile`）就是值恒为
   `Bool(true)` 的属性 —— 存在即有该组件；`removed` / `destroy` 是属性存在性的终点。
-- **实体 id 会被复用**：`Destroy` / `Reset` 必须把已下发基线（`sent`）一并清掉，否则重建后
+- **实体 id 不会被复用**（场景重置已删除，世界随实例创建一次）：`Destroy` 仍把自己那条
+  已下发基线（`sent`）清掉；历史上那条「重建后 id 从头复用、必须清基线」的雷随 `Store.Reset`
+  的删除一起消失。
   刚体 id 从头复用、新实体的 `Set` 会因「与旧实体值相同」被静默抑制 —— 客户端只收到
   destroy、再也收不到重建（`Body.*` 这类只在创建时 Set 一次的属性就永久丢了）。
 - **就近 `Set` 的风险**：漏写一处 `rep.Set` 不会报错、没有日志，客户端只会静默停在旧值
@@ -210,18 +212,18 @@ Go 侧（sim）；包装层内部只保留两个物理层自身的状态：刚�
 1. 客户端连接 gate（WS）→ pomelo 握手 → **先登录**：发 `account.account.register` /
    `.login` / `.resume`（Request/Response）拿到 `LoginReply`，会话被 `Bind` 到账号 ID；
    然后才发 `match.match.join`（`JoinMsg` 是空消息，身份取自会话）进入匹配。
-2. match 服务配对（2 人，或 10s 兜底单人）→ `GetServersByType("game")` 挑一个 game
+2. match 服务配对（**2 名真实玩家；没有单人兜底**）→ `GetServersByType("game")` 挑一个 game
    节点 → `RPCTo("game.game.create")` 让该节点创建对局实例。
 3. game 节点的实例 goroutine 以固定 **20 Hz** tick 推进：消费最新输入 → 更新两个
    角色控制器 → 命中盒跟随 → 步进物理 → 处理弹丸命中与对局结算。
 4. 每个 tick 结束，实例把本帧**增量**（route `onFrame`，只含变化的 (实体, 属性, 终值)）
    经 `SendPushToUsers` 通过 NATS 转发给 gate，gate 再推给局内客户端；被标记为待全量的
-   槽位（重连 / resync）这一 tick 改推 **full 帧**（终值表整表 + Schema）。射击 / 重置
+   槽位（重连 / resync）这一 tick 改推 **full 帧**（终值表整表 + Schema）。射击
    不再单独补推，统一等下一 tick 的帧。
 5. 客户端把增量累积进本地 `WorldStore`，60 Hz 渲染时对运动刚体和玩家位置做**影子跟随
    插值**（位置 lerp、四元数 slerp、玩家朝向 lerp_angle），让 20 Hz 数据在 60 Hz 屏幕上
    平滑。服务端不会重复推送同一 tick，客户端也不再靠快照 diff 推断「谁消失了」。
-6. 客户端每渲染帧上报一条 `game.game.cmd`（输入 + 射击 + 重置**合并成一条**），
+6. 客户端每渲染帧上报一条 `game.game.cmd`（输入 + 射击**合并成一条**），
    由 gate 定点路由到托管该对局的 game 节点。
 7. 连接断开后客户端每秒自动重连：重新握手 → 用本地保存的凭证 `account.account.resume`
    （会话重新 `Bind` 到**同一个账号 ID**）→ 发 `match.match.join`；
@@ -277,7 +279,7 @@ resume(token)                ─▶ 解析 token（Redis sess:{token}）──�
 | --- | --- | --- | --- |
 | gate | pitaya session / agent（就是那条 TCP 连接，天然本地） | `online:{accountID}` → 本节点 id | 连接在哪就是哪；别人要找它靠在线登记 |
 | account | 无 | `acct:*`、`sess:*`、`rl:user:*` | 完全无状态，随便扩 |
-| match | 只有 10s 兜底的 ticker | `match:queue`（ZSET + Lua 原子脚本） | 队列在 Redis，两个 match 节点能互相配对 |
+| match | 配对 ticker + 状态推送（**无单人兜底**） | `match:queue`（ZSET，`ZADD NX` + Lua 原子弹出） | 队列在 Redis，两个 match 节点能互相配对 |
 | game | **对局实例**（`uid→Instance`、`matchId→Instance`），有状态且不可迁移 | 无（game 不连 Redis） | 靠 gate 会话数据里的 `gameServerId` 定点路由 |
 
 三个机制把它们串起来：
@@ -414,8 +416,10 @@ resume(token)                ─▶ 解析 token（Redis sess:{token}）──�
 ### 对局结算
 
 - 击杀数先到 `killTarget`（10）即分出胜负，写入全局单例的 `Game.Winner`
-- 分出胜负 5 秒后 `matchSystem` 直接调 `Reset()` 重开一局 —— 整张场景（被推乱的
-  箱子、还在飞的弹丸）都要复位，重建比「只清计数」多不了几行，但不会留下残局
+- 判出胜负后**不重开**：`matchSystem` 填一份一次性的结算快照（`sim.DrainOutcome`，取走
+  即清），game 侧先广播本 tick 增量帧、再推 `onMatchEnded`、再异步上报
+  `logic.logic.recordmatch`，最后终结实例并摘掉 uid→实例映射。要再打一局必须回大厅重新
+  匹配（每个实例只打一局，因此同一实例内刚体 id 不会复用）
 - 被击杀者**立即**满血回己方出生点：血量、位置、命中盒三者都在同一个 tick 内写齐。
   命中盒尤其不能漏 —— 它要到下一 tick 的 `hitboxFollowSystem` 才跟随角色，留在
   死亡点的话，之后飞来的弹丸还会打中一个「已经复活在别处的人」
@@ -448,7 +452,7 @@ Jolt 的 Release 构建定义 `NDEBUG`、`JPH_DEBUG_RENDERER`、`JPH_PROFILE_ENA
 ### 服务端锁与广播（分布式模型）
 
 - `sim.Simulation` **无锁**：由对局实例 goroutine（`game/instance.go`）独占驱动。
-  输入/射击/重置经命令 channel 投递，同一 goroutine 顺序消费；20 Hz tick 也在同一
+  输入/射击经命令 channel 投递，同一 goroutine 顺序消费；20 Hz tick 也在同一
   goroutine 里，因此不需要任何互斥。并发安全由「单线程所有」模型保证。
 - `ecs.World` 自身不加锁，由实例 goroutine 串行化。
 - `game.Component` 的实例注册表（`uid → Instance`、`matchId → Instance`）跨 RPC
@@ -492,9 +496,11 @@ Jolt 的 Release 构建定义 `NDEBUG`、`JPH_DEBUG_RENDERER`、`JPH_PROFILE_ENA
 
 ## 局外数据与 logic
 
-`logic` 是无状态 backend。gate 对 `logic.logic.state`、`logic.logic.purchase` 与 `logic.logic.equip` 做随机节点路由，因此任意 logic 节点都可以处理同一账号；真实状态只在 Redis。账号登录/注册/resume 进入成功路径时，account 先通过 `logic.logic.online` 向随机 logic 节点发送上线事件，logic 确保钱包和背包档案存在；该 RPC 失败会中止登录并返回 `internal`，此后才轮换 token、绑定会话，所以旧 token 和已有会话不会被破坏。
+`logic` 是无状态 backend。gate 对 `logic.logic.state` / `.purchase` / `.equip` / `.profile` 做随机节点路由，因此任意 logic 节点都可以处理同一账号；真实状态只在 Redis。账号登录/注册/resume 进入成功路径时，account 先通过 `logic.logic.online` 向随机 logic 节点发送上线事件，logic 确保钱包、背包与玩家档案存在；该 RPC 失败会中止登录并返回 `internal`，此后才轮换 token、绑定会话，所以旧 token 和已有会话不会被破坏。
 
-钱包和背包分别由 `persist/protos/player/player.proto` 生成的独立包持久化为 `REDB#2:<accountID>:0` 与 `REDB#1:<accountID>:0`。新账号档案的初始钱包为 1000 金币，商城目录由 logic 内置，当前包含 rifle、pistol、shotgun 与 medkit。
+战绩由 `game` 在对局结束时**主动**上报：`logic.logic.recordmatch`（remote 注册，`app.RPC` 单发，不重试不去重，失败只记日志）。logic 侧只认「两个槽位都是真实玩家」才入账，并把对局写进累计统计与最近 20 场历史。等级不落库，由 XP 现算（`logic/level.go`）。
+
+钱包、背包与玩家档案分别由 `persist/protos/player/player.proto` 生成的独立包持久化为 `REDB#2:<accountID>:0`、`REDB#1:<accountID>:0` 与 `REDB#3:<accountID>:0`；最近 20 场历史是 List `playerhist:<accountID>`（`LPUSH` + `LTRIM 0 19`，新的在前）。新账号档案的初始钱包为 1000 金币，商城目录由 logic 内置，当前包含 rifle、pistol、shotgun 与 medkit。
 
 购买流程先做余额与商品的快速检查，再在账号级 Redis 分布式锁（`user:lock:<accountID>`）内重新读取钱包和背包并提交；余额不足在锁外返回，不获取账号写锁。钱包扣款成功而背包写入失败时，logic 使用补偿写回钱包；锁丢失也走补偿路径。购买接口没有请求幂等键，客户端不得自动重试，否则可能重复购买。装备/卸下只允许已拥有且可装备的物品；medkit 只能购买和叠加，不能装备。
 

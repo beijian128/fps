@@ -133,8 +133,8 @@ message LoginReply {
 
 ## 匹配结果（Push，route `onMatched`）
 
-match 服务配对成功后（2 人，或 10s 无第二人则单人兜底）推给客户端，payload 是
-`MatchResult`：
+match 服务配对成功后（**必须凑满 2 名真实玩家；单人兜底已删除**）推给客户端，payload
+是 `MatchResult`：
 
 ```proto
 message MatchResult {
@@ -148,6 +148,40 @@ message MatchResult {
 再发 `match.join`；match 服务向各 game 节点 fan-out `game.rejoin`，命中存量实例时用同一条
 收尾路径（写会话数据 + 推 `onMatched`），客户端回到**同一对局、同一 `player_idx`**、
 不再进匹配队列；收到 `onMatched` 后客户端主动发 `game.resync` 请求全量帧（见下）。
+
+## 匹配状态（Push，route `onMatchStatus`）
+
+匹配等待期，match 服务每秒把队列状态推给**每个正在排队的人**（逐个推，因为等待时长因人
+而异）。payload 是 `MatchStatus`：
+
+```proto
+message MatchStatus {
+  int32 queued_players = 1; // 当前队列人数（ZCARD）
+  int32 waited_seconds = 2; // 自己已等待的秒数（Redis 服务端时钟）
+}
+```
+
+入队用 `ZADD NX`：客户端在等待期每 15 秒静默重发一次 `match.join` 不会刷新入队时间，
+所以 `waited_seconds` 是真实等待时长。玩家取消匹配（`match.cancel`）后就收不到这条推送。
+
+## 对局结束（Push，route `onMatchEnded`）
+
+一局分出胜负（先到 10 杀）时，game 节点在**广播完本 tick 的增量帧之后**推这条，
+然后立刻终结实例、摘掉 uid→实例映射。payload 是 `MatchEnded`：
+
+```proto
+message MatchEnded {
+  string match_id = 1;
+  int32 winner_slot = 2;             // 0/1
+  repeated SlotResult slots = 3;     // 每个槽位的 {uid, kills, deaths}
+  int32 duration_seconds = 4;        // 从实例开始到判出胜负
+}
+```
+
+**客户端必须把它当成「本局结束」的权威信号**：实例一终结帧流就断，若客户端仍自认在对局
+中，2.5 秒的接收看门狗会把「本局结束」误判成掉线（重连 → resume → 重新入队）。正确动作
+是离开对局态、清空本地世界，再**由玩家主动**点「开始匹配」重新入队 —— 服务端不会自动重开
+（历史上的「胜负后 5 秒自动重开」已随场景重置一起删除）。
 
 ## 服务端 → 客户端：同步帧（Push，route `onFrame`）
 
@@ -263,8 +297,8 @@ message JoinMsg {}
 
 ### game.game.cmd —— 一帧上行命令（约 60 Hz）
 
-输入、射击、重置**合并成一条消息**（帧是最小发送单位）。`shoot` / `reset` 是边沿
-触发，未触发时为 `false`：
+输入与射击**合并成一条消息**（帧是最小发送单位）。`shoot` 是边沿触发，未触发时为
+`false`：
 
 ```proto
 message CommandMsg {
@@ -274,22 +308,47 @@ message CommandMsg {
   bool shoot = 4;            // 射击边沿触发
   repeated float origin = 5; // [x, y, z] 枪口位置（shoot 为 true 时有效）
   repeated float dir = 6;    // [x, y, z] 射击方向（服务端会归一化，零向量忽略）
-  bool reset = 7;            // 重建场景边沿触发
+  reserved 7;                // 曾是 bool reset（场景重置），功能已删除，字段号不再复用
+  reserved "reset";
 }
 ```
 
 - `move`：世界空间水平期望速度（m/s），由客户端按相机朝向算出
-- `jump` / `shoot` / `reset`：**边沿触发**——服务端仅在收到后的下一个 tick 消费，
+- `jump` / `shoot`：**边沿触发**——服务端仅在收到后的下一个 tick 消费，
   客户端只需在按下瞬间置 `true` 一次
-- `reset`：销毁并重建整个场景（运输船地图的甲板/船体/集装箱/走道/舷梯/桅杆、木箱、
-  靶球、敌人、金币），重置分数、血量、步数、波次、输入状态
-- 射击 / 重置**不再单独补推**，统一等下一 tick 的同步帧
+- 射击**不再单独补推**，统一等下一 tick 的同步帧
+- **场景重置已整体删除**（字段 7 保留号）：一局分出胜负即终结实例，要再打一局必须回
+  大厅重新匹配
 
 ### game.game.resync —— 请求全量帧
 
 payload 空（Notify）。客户端在重连拿到 `onMatched` 后发一次：服务端把该槽位的
 **下一帧**标为全量，用 `onFrame` 单独下发一份 full 帧（含 Schema），客户端据此整体
 重建本地世界。
+
+### match.match.cancel —— 取消匹配（Request/Response）
+
+payload 空（`MatchCancelMsg`），身份来自会话。应答 `MatchCancelReply{ok, reason}`：
+
+| reason | ok | 含义与客户端动作 |
+|---|---|---|
+| `cancelled` | true | 已从 `match:queue` 移除。留在匹配前的位置、停掉状态展示 |
+| `already_matched` | false | 已经进局（服务端同时会补推 `onMatched`）。什么都不用做 |
+| `not_queued` | false | 不在队列也不在任何对局（可能是 tick 刚把你弹出去、实例还没建好）。同样什么都不做，`onMatched` 马上会到 |
+| `unauthenticated` | false | 会话未绑定账号（没登录）。忽略 |
+| `internal` | false | Redis 出错。可提示玩家重试 |
+
+**不做冷却**：取消后可以立刻重新 `match.join`（重新排队会拿到新的入队时间戳）。
+
+### logic.logic.profile —— 个人档案（Request/Response）
+
+payload 空（`PlayerProfileMsg`），身份来自会话。应答 `PlayerProfileReply{ok, reason,
+level, xp, xp_into_level, xp_for_next_level, kills, deaths, matches, wins, losses,
+recent_matches[]}`；`recent_matches` 最多 20 条，新的在前，每条 `MatchRecord{match_id,
+won, kills, deaths, opponent_kills, duration_seconds, opponent_name, ended_at}`。
+
+等级由服务端从 `xp` 现算（`level = 1 + xp/200`，曲线见 `joltgo/logic/level.go`），**不落库**；
+客户端只需展示下发的三个字段。存量账号没有档案行时服务端会**就地补建零值档案**再返回。
 
 ## 服务端内部 RPC（客户端不可见）
 
@@ -319,6 +378,18 @@ message BindGameMsg {
   int32  player_idx = 4;
 }
 message BindGameReply { bool found = 1; } // false = 这个 gate 上已经没有该会话（顺带探活）
+
+// game → logic，一局结束时的战绩上报（route "logic.logic.recordmatch"）
+// 用 app.RPC（不是 RPCTo）：RPCType_User 走 router 的 default route，任意 logic 节点都能处理。
+// **不重试、不去重**：失败只记日志（spec 明确取舍）。载荷带 match_id，将来要加幂等键不用改协议。
+message SlotResult { string uid = 1; int32 kills = 2; int32 deaths = 3; } // uid 为空串 = 空槽位
+message RecordMatchMsg {
+  string match_id = 1;
+  repeated SlotResult slots = 2; // 下标即槽位 0/1
+  int32 winner_slot = 3;
+  int32 duration_seconds = 4;
+}
+message RecordMatchReply { bool ok = 1; bool applied = 2; string reason = 3; }
 ```
 
 `gate.gate.bindgame` 之所以必须由 gate 来做：会话数据（`gameServerId`）是 gate 的 AddRoute
@@ -374,6 +445,10 @@ message LogicStateReply {
 }
 ```
 
-Logic 错误码为：`bad_quantity`（数量不在 1–99）、`item_not_found`、`insufficient_funds`、`not_owned`、`not_equippable`、`busy`、`unauthenticated`、`profile_missing`、`internal`。登录/注册/resume 的成功顺序是：account 验证身份或创建账号 → RPC `logic.logic.online` → logic 确保 `REDB#1` 背包与 `REDB#2` 钱包存在 → account 轮换 token → 绑定会话 → 返回 `LoginReply.ok=true`。上线 RPC 失败时 account 返回 `reason=internal`，不轮换 token、不绑定会话；已有会话和旧 token 保持不变。
+Logic 错误码为：`bad_quantity`（数量不在 1–99）、`item_not_found`、`insufficient_funds`、`not_owned`、`not_equippable`、`busy`、`unauthenticated`、`profile_missing`、`internal`、`not_enough_players`（战绩上报里槽位不齐，未入账）。登录/注册/resume 的成功顺序是：account 验证身份或创建账号 → RPC `logic.logic.online` → logic 确保 `REDB#1` 背包、`REDB#2` 钱包与 `REDB#3` 玩家档案存在 → account 轮换 token → 绑定会话 → 返回 `LoginReply.ok=true`。上线 RPC 失败时 account 返回 `reason=internal`，不轮换 token、不绑定会话；已有会话和旧 token 保持不变。
+
+战绩与历史：`REDB#3:<accountID>:0` 是累计统计（xp/kills/deaths/matches/wins/losses），
+最近 20 场历史是 List `playerhist:<accountID>`（`LPUSH` + `LTRIM 0 19`，新的在前）。
+`redis-data` 保留账号时这两处也一起保留；清掉它会连战绩一起删。
 
 `logic.logic.purchase` 没有请求幂等键。客户端**不得自动重试购买请求**；网络超时不能区分“未执行”和“已提交”，应由用户显式决定是否再次购买。

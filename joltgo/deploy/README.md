@@ -147,8 +147,9 @@ etcd 的租约倒计时**只在 etcd 进程运行期间走**：重启时它把�
 所以「进程被强杀后 ~60s 才过期」只在 **etcd 不重启** 时成立。而 `stop-infra.ps1` →
 `start-all.ps1` 这种整套重启，残留会一直活到 etcd 回来之后再满一个 TTL；在 TTL 内反复重启
 还会反复续命。这是有实际危害的：`match.startMatch` 从 `GetServersByType("game")` 取 map 的
-第一个元素且不校验可达性，选中残留节点时 RPC 失败，而玩家此刻**已经被移出队列**（配对与
-10s 兜底两条路径都是先出队），于是既不在队列里也收不到 `onMatched`，客户端永久卡在匹配等待。
+第一个元素且不校验可达性，选中残留节点时 RPC 失败，而玩家此刻**已经被移出队列**（配对
+是先出队再开局），于是既不在队列里也收不到 `onMatched`，客户端永久卡在匹配等待
+（单人兜底已删除，不会再有第二条兜底路径；玩家可以自己取消后重新排队）。
 
 etcd 里只有服务注册这类临时数据，所以本地每次启动直接推倒重来，`start-infra.ps1` 会先停掉
 旧 etcd（不停掉的话新 etcd 会因端口被占而静默退出，清空就白做了）再清目录。生产环境请改用
@@ -156,6 +157,6 @@ etcd 里只有服务注册这类临时数据，所以本地每次启动直接推
 
 ## Redis 中的玩家局外数据
 
-除账号与会话数据外，logic 使用 `persist/protos/player/` 生成的独立 Redis Hash：`REDB#1:<accountID>:0` 保存背包与装备，`REDB#2:<accountID>:0` 保存钱包金币。`redis-data` **不要清空**；删除它不仅会删除账号，也会删除玩家的金币、物品与装备进度。
+除账号与会话数据外，logic 使用 `persist/protos/player/` 生成的独立 Redis Hash：`REDB#1:<accountID>:0` 保存背包与装备，`REDB#2:<accountID>:0` 保存钱包金币，`REDB#3:<accountID>:0` 保存玩家档案（xp / 击杀 / 死亡 / 场次 / 胜负）。最近 20 场对局历史是 Redis List `playerhist:<accountID>`（新的在前，`LPUSH` + `LTRIM 0 19`）—— 它是 List 不是 Hash 行，所以键名不套 `REDB#` 前缀。`redis-data` **不要清空**；删除它不仅会删除账号，也会删除玩家的金币、物品、装备进度与战绩历史。
 
 `logic` 是无状态节点。客户端经 gate 随机访问 logic；account 在登录/注册/resume 的成功路径中先通过 `logic.logic.online` 确保新账号拥有初始 1000 金币的钱包和空背包，RPC 失败则中止登录且不轮换 token、不绑定会话。购买不是请求幂等操作，客户端不得自动重试；具体错误码和并发/补偿边界见 `../../docs/API.md` 与 `../../docs/ARCHITECTURE.md`。

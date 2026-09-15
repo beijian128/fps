@@ -30,7 +30,7 @@
   - **gate**（前端接入，WS 直连客户端，路由业务消息，登记会话归属）
   - **account**（注册/登录/凭证恢复，签发与轮换 token）
   - **logic**（玩家档案、钱包、背包、商城购买与装备）
-  - **match**（对局匹配，配对 2 人 / 超时单人兜底，分配 game 节点；队列在 Redis）
+  - **match**（对局匹配，配对 2 名真实玩家、可取消、状态主动推送，分配 game 节点；队列在 Redis）
   - **game**（对局逻辑，每个对局一个 goroutine 顺序执行、无锁）
   - 五服务经 etcd（服务发现）+ NATS（RPC）通信，共享状态（账号/凭证/会话归属/匹配队列/钱包/背包）
     放 Redis；协议为 pomelo 帧 + protobuf payload
@@ -145,7 +145,7 @@ Godot_v4.7.2-stable_win64_console.exe --headless --path godot_client --script re
 | Space | 跳跃 |
 | Shift | 奔跑 |
 | V | 切换第一/第三人称 |
-| ESC | 释放鼠标（可点 Reset 重开） |
+| ESC | 释放鼠标 |
 
 规则：双人对枪，每发命中扣 34 血（满血 100），击杀数先到 10 者获胜；被击杀后立即
 在己方出生点满血复活。分出胜负 5 秒后服务端自动重开一局。
@@ -200,7 +200,7 @@ fps/
 
 ## 局外 Logic
 
-登录成功路径中，account 会先向随机 logic 节点发送上线事件，确保 Redis 中存在玩家档案；该 RPC 失败时登录返回 `internal`，token 不轮换、会话不绑定。客户端通过 `logic.logic.state` 读取金币、商城目录、拥有数量与当前主武器。购买使用 `logic.logic.purchase`，装备/卸下使用 `logic.logic.equip`。玩家数据独立持久化在 `REDB#1:<accountID>:0` 背包 Hash 与 `REDB#2:<accountID>:0` 钱包 Hash；game 对局只消费会话与输入，不读取背包和装备。
+登录成功路径中，account 会先向随机 logic 节点发送上线事件，确保 Redis 中存在玩家钱包/背包/档案；该 RPC 失败时登录返回 `internal`，token 不轮换、会话不绑定。客户端通过 `logic.logic.state` 读取金币、商城目录、拥有数量与当前主武器，通过 `logic.logic.profile` 读取个人档案（等级/经验/累计战绩 + 最近 20 场）。购买使用 `logic.logic.purchase`，装备/卸下使用 `logic.logic.equip`。玩家数据独立持久化在 `REDB#1:<accountID>:0` 背包、`REDB#2:<accountID>:0` 钱包与 `REDB#3:<accountID>:0` 档案 Hash，最近对局历史是 List `playerhist:<accountID>`；game 对局只消费会话与输入，不读取背包与装备，但会在**每局结束时**把战绩上报给 logic（`logic.logic.recordmatch`，不重试不去重）。
 
 无头 Logic 冒烟（集群运行时）：
 
