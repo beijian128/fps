@@ -5,11 +5,11 @@ const Tokens := preload("res://theme/tokens.gd")
 
 const STAT_KEYS := ["kills", "deaths", "kd", "matches", "wins", "losses"]
 
-var _manager: Node = null
+var _manager = null
 var _profile := {}
 var _rows: Array = []
 
-func bind(manager: Node) -> void:
+func bind(manager) -> void:
 	_manager = manager
 
 ## render 用一份 PlayerProfileReply 刷新整页。派生值（K/D、胜率）在这里算，

@@ -21,7 +21,7 @@ font_names = PackedStringArray("Consolas", "DejaVu Sans Mono", "Monospace")
 [sub_resource type="SystemFont" id="SystemFont_htdit"]
 font_names = PackedStringArray("Consolas", "DejaVu Sans Mono", "Monospace")
 
-[node name="ProfileScreen" type="Control" unique_id=58419960]
+[node name="ProfileScreen" type="Control" unique_id=2026938112]
 layout_mode = 3
 anchors_preset = 0
 size_flags_horizontal = 3
@@ -29,7 +29,7 @@ size_flags_vertical = 3
 theme = ExtResource("1_dfqpq")
 script = ExtResource("2_8vp46")
 
-[node name="@HBoxContainer@9" type="HBoxContainer" parent="." unique_id=1519734058]
+[node name="@HBoxContainer@9" type="HBoxContainer" parent="." unique_id=1140748034]
 layout_mode = 0
 anchor_right = 1.0
 anchor_bottom = 1.0
@@ -37,226 +37,226 @@ size_flags_horizontal = 3
 size_flags_vertical = 3
 theme_override_constants/separation = 16
 
-[node name="Identity" type="PanelContainer" parent="@HBoxContainer@9" unique_id=1040544313]
+[node name="Identity" type="PanelContainer" parent="@HBoxContainer@9" unique_id=1983983460]
 unique_name_in_owner = true
 custom_minimum_size = Vector2(220, 0)
 layout_mode = 2
 theme_type_variation = &"BarPanel"
 
-[node name="@VBoxContainer@10" type="VBoxContainer" parent="@HBoxContainer@9/Identity" unique_id=1318496516]
+[node name="@VBoxContainer@10" type="VBoxContainer" parent="@HBoxContainer@9/Identity" unique_id=570307635]
 layout_mode = 2
 theme_override_constants/separation = 8
 
-[node name="Avatar" type="ColorRect" parent="@HBoxContainer@9/Identity/@VBoxContainer@10" unique_id=863975075]
+[node name="Avatar" type="ColorRect" parent="@HBoxContainer@9/Identity/@VBoxContainer@10" unique_id=1978823420]
 unique_name_in_owner = true
 custom_minimum_size = Vector2(64, 64)
 layout_mode = 2
 size_flags_horizontal = 4
 color = Color(0.105882354, 0.11764706, 0.13725491, 1)
 
-[node name="@CenterContainer@11" type="CenterContainer" parent="@HBoxContainer@9/Identity/@VBoxContainer@10" unique_id=1362467804]
+[node name="@CenterContainer@11" type="CenterContainer" parent="@HBoxContainer@9/Identity/@VBoxContainer@10" unique_id=139336177]
 layout_mode = 2
 size_flags_horizontal = 3
 
-[node name="Username" type="Label" parent="@HBoxContainer@9/Identity/@VBoxContainer@10/@CenterContainer@11" unique_id=590230357]
+[node name="Username" type="Label" parent="@HBoxContainer@9/Identity/@VBoxContainer@10/@CenterContainer@11" unique_id=688478768]
 unique_name_in_owner = true
 layout_mode = 2
 text = "—"
 
-[node name="@CenterContainer@12" type="CenterContainer" parent="@HBoxContainer@9/Identity/@VBoxContainer@10" unique_id=1517654961]
+[node name="@CenterContainer@12" type="CenterContainer" parent="@HBoxContainer@9/Identity/@VBoxContainer@10" unique_id=804690252]
 layout_mode = 2
 size_flags_horizontal = 3
 
-[node name="Level" type="Label" parent="@HBoxContainer@9/Identity/@VBoxContainer@10/@CenterContainer@12" unique_id=241424946]
+[node name="Level" type="Label" parent="@HBoxContainer@9/Identity/@VBoxContainer@10/@CenterContainer@12" unique_id=416095702]
 unique_name_in_owner = true
 layout_mode = 2
 theme_type_variation = &"LabelAccent"
 text = "LV.1"
 
-[node name="XP" type="ProgressBar" parent="@HBoxContainer@9/Identity/@VBoxContainer@10" unique_id=816791267]
+[node name="XP" type="ProgressBar" parent="@HBoxContainer@9/Identity/@VBoxContainer@10" unique_id=1694377279]
 unique_name_in_owner = true
 custom_minimum_size = Vector2(0, 6)
 layout_mode = 2
 show_percentage = false
 
-[node name="XPText" type="Label" parent="@HBoxContainer@9/Identity/@VBoxContainer@10" unique_id=1921311848]
+[node name="XPText" type="Label" parent="@HBoxContainer@9/Identity/@VBoxContainer@10" unique_id=646955505]
 unique_name_in_owner = true
 layout_mode = 2
 theme_type_variation = &"LabelMuted"
 text = "0 / 200 XP"
 
-[node name="Spacer" type="Control" parent="@HBoxContainer@9/Identity/@VBoxContainer@10" unique_id=149587559]
+[node name="Spacer" type="Control" parent="@HBoxContainer@9/Identity/@VBoxContainer@10" unique_id=719863737]
 layout_mode = 2
 size_flags_vertical = 3
 mouse_filter = 2
 
-[node name="AccountId" type="Label" parent="@HBoxContainer@9/Identity/@VBoxContainer@10" unique_id=1450478319]
+[node name="AccountId" type="Label" parent="@HBoxContainer@9/Identity/@VBoxContainer@10" unique_id=1586277572]
 unique_name_in_owner = true
 layout_mode = 2
 theme_type_variation = &"LabelMuted"
 text = "账号 #—"
 
-[node name="@VBoxContainer@13" type="VBoxContainer" parent="@HBoxContainer@9" unique_id=1076724391]
+[node name="@VBoxContainer@13" type="VBoxContainer" parent="@HBoxContainer@9" unique_id=1372376662]
 layout_mode = 2
 size_flags_horizontal = 3
 theme_override_constants/separation = 12
 
-[node name="Stats" type="GridContainer" parent="@HBoxContainer@9/@VBoxContainer@13" unique_id=1620770839]
+[node name="Stats" type="GridContainer" parent="@HBoxContainer@9/@VBoxContainer@13" unique_id=368491217]
 unique_name_in_owner = true
 layout_mode = 2
 theme_override_constants/h_separation = 8
 theme_override_constants/v_separation = 8
 columns = 3
 
-[node name="Stat_kills" type="PanelContainer" parent="@HBoxContainer@9/@VBoxContainer@13/Stats" unique_id=748340126]
+[node name="Stat_kills" type="PanelContainer" parent="@HBoxContainer@9/@VBoxContainer@13/Stats" unique_id=373549339]
 unique_name_in_owner = true
 layout_mode = 2
 theme_type_variation = &"CardPanel"
 
-[node name="@VBoxContainer@14" type="VBoxContainer" parent="@HBoxContainer@9/@VBoxContainer@13/Stats/Stat_kills" unique_id=1388088158]
+[node name="StatBox" type="VBoxContainer" parent="@HBoxContainer@9/@VBoxContainer@13/Stats/Stat_kills" unique_id=679796688]
 layout_mode = 2
 theme_override_constants/separation = 0
 
-[node name="Stat_kills_Name" type="Label" parent="@HBoxContainer@9/@VBoxContainer@13/Stats/Stat_kills/@VBoxContainer@14" unique_id=1143703185]
+[node name="Stat_kills_Name" type="Label" parent="@HBoxContainer@9/@VBoxContainer@13/Stats/Stat_kills/StatBox" unique_id=696717225]
 unique_name_in_owner = true
 layout_mode = 2
 theme_type_variation = &"LabelMuted"
 text = "击杀"
 
-[node name="Stat_kills_Value" type="Label" parent="@HBoxContainer@9/@VBoxContainer@13/Stats/Stat_kills/@VBoxContainer@14" unique_id=595393594]
+[node name="Stat_kills_Value" type="Label" parent="@HBoxContainer@9/@VBoxContainer@13/Stats/Stat_kills/StatBox" unique_id=674414794]
 unique_name_in_owner = true
 layout_mode = 2
 theme_type_variation = &"LabelSub"
 theme_override_fonts/font = SubResource("SystemFont_dfqpq")
 text = "0"
 
-[node name="Stat_deaths" type="PanelContainer" parent="@HBoxContainer@9/@VBoxContainer@13/Stats" unique_id=376029384]
+[node name="Stat_deaths" type="PanelContainer" parent="@HBoxContainer@9/@VBoxContainer@13/Stats" unique_id=483612357]
 unique_name_in_owner = true
 layout_mode = 2
 theme_type_variation = &"CardPanel"
 
-[node name="@VBoxContainer@15" type="VBoxContainer" parent="@HBoxContainer@9/@VBoxContainer@13/Stats/Stat_deaths" unique_id=1095605783]
+[node name="StatBox" type="VBoxContainer" parent="@HBoxContainer@9/@VBoxContainer@13/Stats/Stat_deaths" unique_id=236659010]
 layout_mode = 2
 theme_override_constants/separation = 0
 
-[node name="Stat_deaths_Name" type="Label" parent="@HBoxContainer@9/@VBoxContainer@13/Stats/Stat_deaths/@VBoxContainer@15" unique_id=1663750574]
+[node name="Stat_deaths_Name" type="Label" parent="@HBoxContainer@9/@VBoxContainer@13/Stats/Stat_deaths/StatBox" unique_id=399098965]
 unique_name_in_owner = true
 layout_mode = 2
 theme_type_variation = &"LabelMuted"
 text = "死亡"
 
-[node name="Stat_deaths_Value" type="Label" parent="@HBoxContainer@9/@VBoxContainer@13/Stats/Stat_deaths/@VBoxContainer@15" unique_id=1990821151]
+[node name="Stat_deaths_Value" type="Label" parent="@HBoxContainer@9/@VBoxContainer@13/Stats/Stat_deaths/StatBox" unique_id=1260476895]
 unique_name_in_owner = true
 layout_mode = 2
 theme_type_variation = &"LabelSub"
 theme_override_fonts/font = SubResource("SystemFont_8vp46")
 text = "0"
 
-[node name="Stat_kd" type="PanelContainer" parent="@HBoxContainer@9/@VBoxContainer@13/Stats" unique_id=276383906]
+[node name="Stat_kd" type="PanelContainer" parent="@HBoxContainer@9/@VBoxContainer@13/Stats" unique_id=205324146]
 unique_name_in_owner = true
 layout_mode = 2
 theme_type_variation = &"CardPanel"
 
-[node name="@VBoxContainer@16" type="VBoxContainer" parent="@HBoxContainer@9/@VBoxContainer@13/Stats/Stat_kd" unique_id=1588512425]
+[node name="StatBox" type="VBoxContainer" parent="@HBoxContainer@9/@VBoxContainer@13/Stats/Stat_kd" unique_id=918706139]
 layout_mode = 2
 theme_override_constants/separation = 0
 
-[node name="Stat_kd_Name" type="Label" parent="@HBoxContainer@9/@VBoxContainer@13/Stats/Stat_kd/@VBoxContainer@16" unique_id=1889275722]
+[node name="Stat_kd_Name" type="Label" parent="@HBoxContainer@9/@VBoxContainer@13/Stats/Stat_kd/StatBox" unique_id=1418870554]
 unique_name_in_owner = true
 layout_mode = 2
 theme_type_variation = &"LabelMuted"
 text = "K/D"
 
-[node name="Stat_kd_Value" type="Label" parent="@HBoxContainer@9/@VBoxContainer@13/Stats/Stat_kd/@VBoxContainer@16" unique_id=718685205]
+[node name="Stat_kd_Value" type="Label" parent="@HBoxContainer@9/@VBoxContainer@13/Stats/Stat_kd/StatBox" unique_id=2077113263]
 unique_name_in_owner = true
 layout_mode = 2
 theme_type_variation = &"LabelSub"
 theme_override_fonts/font = SubResource("SystemFont_iec3w")
 text = "0"
 
-[node name="Stat_matches" type="PanelContainer" parent="@HBoxContainer@9/@VBoxContainer@13/Stats" unique_id=1670815368]
+[node name="Stat_matches" type="PanelContainer" parent="@HBoxContainer@9/@VBoxContainer@13/Stats" unique_id=442060395]
 unique_name_in_owner = true
 layout_mode = 2
 theme_type_variation = &"CardPanel"
 
-[node name="@VBoxContainer@17" type="VBoxContainer" parent="@HBoxContainer@9/@VBoxContainer@13/Stats/Stat_matches" unique_id=1024159327]
+[node name="StatBox" type="VBoxContainer" parent="@HBoxContainer@9/@VBoxContainer@13/Stats/Stat_matches" unique_id=1738253765]
 layout_mode = 2
 theme_override_constants/separation = 0
 
-[node name="Stat_matches_Name" type="Label" parent="@HBoxContainer@9/@VBoxContainer@13/Stats/Stat_matches/@VBoxContainer@17" unique_id=2141586362]
+[node name="Stat_matches_Name" type="Label" parent="@HBoxContainer@9/@VBoxContainer@13/Stats/Stat_matches/StatBox" unique_id=1133701765]
 unique_name_in_owner = true
 layout_mode = 2
 theme_type_variation = &"LabelMuted"
 text = "场次"
 
-[node name="Stat_matches_Value" type="Label" parent="@HBoxContainer@9/@VBoxContainer@13/Stats/Stat_matches/@VBoxContainer@17" unique_id=1710298579]
+[node name="Stat_matches_Value" type="Label" parent="@HBoxContainer@9/@VBoxContainer@13/Stats/Stat_matches/StatBox" unique_id=1788480340]
 unique_name_in_owner = true
 layout_mode = 2
 theme_type_variation = &"LabelSub"
 theme_override_fonts/font = SubResource("SystemFont_w18un")
 text = "0"
 
-[node name="Stat_wins" type="PanelContainer" parent="@HBoxContainer@9/@VBoxContainer@13/Stats" unique_id=748261724]
+[node name="Stat_wins" type="PanelContainer" parent="@HBoxContainer@9/@VBoxContainer@13/Stats" unique_id=538788773]
 unique_name_in_owner = true
 layout_mode = 2
 theme_type_variation = &"CardPanel"
 
-[node name="@VBoxContainer@18" type="VBoxContainer" parent="@HBoxContainer@9/@VBoxContainer@13/Stats/Stat_wins" unique_id=1744539268]
+[node name="StatBox" type="VBoxContainer" parent="@HBoxContainer@9/@VBoxContainer@13/Stats/Stat_wins" unique_id=591890065]
 layout_mode = 2
 theme_override_constants/separation = 0
 
-[node name="Stat_wins_Name" type="Label" parent="@HBoxContainer@9/@VBoxContainer@13/Stats/Stat_wins/@VBoxContainer@18" unique_id=440111644]
+[node name="Stat_wins_Name" type="Label" parent="@HBoxContainer@9/@VBoxContainer@13/Stats/Stat_wins/StatBox" unique_id=89404474]
 unique_name_in_owner = true
 layout_mode = 2
 theme_type_variation = &"LabelMuted"
 text = "胜"
 
-[node name="Stat_wins_Value" type="Label" parent="@HBoxContainer@9/@VBoxContainer@13/Stats/Stat_wins/@VBoxContainer@18" unique_id=718088196]
+[node name="Stat_wins_Value" type="Label" parent="@HBoxContainer@9/@VBoxContainer@13/Stats/Stat_wins/StatBox" unique_id=766478024]
 unique_name_in_owner = true
 layout_mode = 2
 theme_type_variation = &"LabelSub"
 theme_override_fonts/font = SubResource("SystemFont_2pt7m")
 text = "0"
 
-[node name="Stat_losses" type="PanelContainer" parent="@HBoxContainer@9/@VBoxContainer@13/Stats" unique_id=592630577]
+[node name="Stat_losses" type="PanelContainer" parent="@HBoxContainer@9/@VBoxContainer@13/Stats" unique_id=1052200616]
 unique_name_in_owner = true
 layout_mode = 2
 theme_type_variation = &"CardPanel"
 
-[node name="@VBoxContainer@19" type="VBoxContainer" parent="@HBoxContainer@9/@VBoxContainer@13/Stats/Stat_losses" unique_id=436832785]
+[node name="StatBox" type="VBoxContainer" parent="@HBoxContainer@9/@VBoxContainer@13/Stats/Stat_losses" unique_id=1330199501]
 layout_mode = 2
 theme_override_constants/separation = 0
 
-[node name="Stat_losses_Name" type="Label" parent="@HBoxContainer@9/@VBoxContainer@13/Stats/Stat_losses/@VBoxContainer@19" unique_id=1460657380]
+[node name="Stat_losses_Name" type="Label" parent="@HBoxContainer@9/@VBoxContainer@13/Stats/Stat_losses/StatBox" unique_id=1417217500]
 unique_name_in_owner = true
 layout_mode = 2
 theme_type_variation = &"LabelMuted"
 text = "负"
 
-[node name="Stat_losses_Value" type="Label" parent="@HBoxContainer@9/@VBoxContainer@13/Stats/Stat_losses/@VBoxContainer@19" unique_id=895417565]
+[node name="Stat_losses_Value" type="Label" parent="@HBoxContainer@9/@VBoxContainer@13/Stats/Stat_losses/StatBox" unique_id=589843555]
 unique_name_in_owner = true
 layout_mode = 2
 theme_type_variation = &"LabelSub"
 theme_override_fonts/font = SubResource("SystemFont_htdit")
 text = "0"
 
-[node name="RecordsTitle" type="Label" parent="@HBoxContainer@9/@VBoxContainer@13" unique_id=879906830]
+[node name="RecordsTitle" type="Label" parent="@HBoxContainer@9/@VBoxContainer@13" unique_id=959086877]
 unique_name_in_owner = true
 layout_mode = 2
 theme_type_variation = &"LabelSub"
 text = "最近 20 场"
 
-[node name="RecordsScroll" type="ScrollContainer" parent="@HBoxContainer@9/@VBoxContainer@13" unique_id=1082914444]
+[node name="RecordsScroll" type="ScrollContainer" parent="@HBoxContainer@9/@VBoxContainer@13" unique_id=251321008]
 layout_mode = 2
 size_flags_vertical = 3
 
-[node name="Records" type="VBoxContainer" parent="@HBoxContainer@9/@VBoxContainer@13/RecordsScroll" unique_id=1534805616]
+[node name="Records" type="VBoxContainer" parent="@HBoxContainer@9/@VBoxContainer@13/RecordsScroll" unique_id=1857982226]
 unique_name_in_owner = true
 layout_mode = 2
 size_flags_horizontal = 3
 theme_override_constants/separation = 4
 
-[node name="EmptyHint" type="Label" parent="@HBoxContainer@9/@VBoxContainer@13" unique_id=319191603]
+[node name="EmptyHint" type="Label" parent="@HBoxContainer@9/@VBoxContainer@13" unique_id=1909519353]
 unique_name_in_owner = true
 visible = false
 layout_mode = 2

@@ -3,7 +3,7 @@
 [ext_resource type="Theme" path="res://theme/tactical_theme.tres" id="1_j0f3g"]
 [ext_resource type="Script" path="res://ui/shell.gd" id="2_mg4gw"]
 
-[node name="Shell" type="Control" unique_id=1363000527]
+[node name="Shell" type="Control" unique_id=1711268264]
 layout_mode = 3
 anchors_preset = 0
 size_flags_horizontal = 3
@@ -11,7 +11,7 @@ size_flags_vertical = 3
 theme = ExtResource("1_j0f3g")
 script = ExtResource("2_mg4gw")
 
-[node name="@VBoxContainer@2" type="VBoxContainer" parent="." unique_id=933730741]
+[node name="@VBoxContainer@2" type="VBoxContainer" parent="." unique_id=1094164951]
 layout_mode = 0
 anchor_right = 1.0
 anchor_bottom = 1.0
@@ -19,48 +19,48 @@ size_flags_horizontal = 3
 size_flags_vertical = 3
 theme_override_constants/separation = 0
 
-[node name="TopBar" type="PanelContainer" parent="@VBoxContainer@2" unique_id=755981020]
+[node name="TopBar" type="PanelContainer" parent="@VBoxContainer@2" unique_id=1870607510]
 unique_name_in_owner = true
 layout_mode = 2
 theme_type_variation = &"BarPanel"
 
-[node name="@HBoxContainer@3" type="HBoxContainer" parent="@VBoxContainer@2/TopBar" unique_id=1612437650]
+[node name="@HBoxContainer@3" type="HBoxContainer" parent="@VBoxContainer@2/TopBar" unique_id=601758078]
 layout_mode = 2
 theme_override_constants/separation = 12
 
-[node name="Brand" type="Label" parent="@VBoxContainer@2/TopBar/@HBoxContainer@3" unique_id=2101770543]
+[node name="Brand" type="Label" parent="@VBoxContainer@2/TopBar/@HBoxContainer@3" unique_id=1110508149]
 unique_name_in_owner = true
 layout_mode = 2
 theme_type_variation = &"LabelAccent"
 text = "JOLT FPS"
 
-[node name="Spacer" type="Control" parent="@VBoxContainer@2/TopBar/@HBoxContainer@3" unique_id=1399866232]
+[node name="Spacer" type="Control" parent="@VBoxContainer@2/TopBar/@HBoxContainer@3" unique_id=1787326570]
 layout_mode = 2
 size_flags_horizontal = 3
 mouse_filter = 2
 
-[node name="TopText" type="Label" parent="@VBoxContainer@2/TopBar/@HBoxContainer@3" unique_id=979683952]
+[node name="TopText" type="Label" parent="@VBoxContainer@2/TopBar/@HBoxContainer@3" unique_id=450122706]
 unique_name_in_owner = true
 layout_mode = 2
 theme_type_variation = &"LabelMuted"
 text = "未登录"
 
-[node name="@HBoxContainer@4" type="HBoxContainer" parent="@VBoxContainer@2" unique_id=1402754811]
+[node name="@HBoxContainer@4" type="HBoxContainer" parent="@VBoxContainer@2" unique_id=535199702]
 layout_mode = 2
 size_flags_vertical = 3
 theme_override_constants/separation = 8
 
-[node name="NavPanel" type="PanelContainer" parent="@VBoxContainer@2/@HBoxContainer@4" unique_id=1986275570]
+[node name="NavPanel" type="PanelContainer" parent="@VBoxContainer@2/@HBoxContainer@4" unique_id=888934989]
 unique_name_in_owner = true
 custom_minimum_size = Vector2(180, 0)
 layout_mode = 2
 theme_type_variation = &"BarPanel"
 
-[node name="@VBoxContainer@5" type="VBoxContainer" parent="@VBoxContainer@2/@HBoxContainer@4/NavPanel" unique_id=967138380]
+[node name="@VBoxContainer@5" type="VBoxContainer" parent="@VBoxContainer@2/@HBoxContainer@4/NavPanel" unique_id=1791895156]
 layout_mode = 2
 theme_override_constants/separation = 4
 
-[node name="NavProfile" type="Button" parent="@VBoxContainer@2/@HBoxContainer@4/NavPanel/@VBoxContainer@5" unique_id=1305914456]
+[node name="NavProfile" type="Button" parent="@VBoxContainer@2/@HBoxContainer@4/NavPanel/@VBoxContainer@5" unique_id=25496348]
 unique_name_in_owner = true
 layout_mode = 2
 theme_type_variation = &"GhostButton"
@@ -68,26 +68,26 @@ theme_override_colors/font_color = Color(1, 0.627451, 0.15686275, 1)
 text = "个人信息"
 alignment = 0
 
-[node name="NavShop" type="Button" parent="@VBoxContainer@2/@HBoxContainer@4/NavPanel/@VBoxContainer@5" unique_id=877670267]
+[node name="NavShop" type="Button" parent="@VBoxContainer@2/@HBoxContainer@4/NavPanel/@VBoxContainer@5" unique_id=865780585]
 unique_name_in_owner = true
 layout_mode = 2
 theme_type_variation = &"GhostButton"
 text = "商城"
 alignment = 0
 
-[node name="NavBag" type="Button" parent="@VBoxContainer@2/@HBoxContainer@4/NavPanel/@VBoxContainer@5" unique_id=353710418]
+[node name="NavBag" type="Button" parent="@VBoxContainer@2/@HBoxContainer@4/NavPanel/@VBoxContainer@5" unique_id=2128094703]
 unique_name_in_owner = true
 layout_mode = 2
 theme_type_variation = &"GhostButton"
 text = "背包"
 alignment = 0
 
-[node name="Spacer" type="Control" parent="@VBoxContainer@2/@HBoxContainer@4/NavPanel/@VBoxContainer@5" unique_id=495369835]
+[node name="Spacer" type="Control" parent="@VBoxContainer@2/@HBoxContainer@4/NavPanel/@VBoxContainer@5" unique_id=699751489]
 layout_mode = 2
 size_flags_vertical = 3
 mouse_filter = 2
 
-[node name="@MarginContainer@6" type="MarginContainer" parent="@VBoxContainer@2/@HBoxContainer@4" unique_id=681321034]
+[node name="@MarginContainer@6" type="MarginContainer" parent="@VBoxContainer@2/@HBoxContainer@4" unique_id=1494422897]
 layout_mode = 2
 size_flags_horizontal = 3
 theme_override_constants/margin_left = 16
@@ -95,11 +95,11 @@ theme_override_constants/margin_top = 16
 theme_override_constants/margin_right = 16
 theme_override_constants/margin_bottom = 16
 
-[node name="Content" type="Control" parent="@VBoxContainer@2/@HBoxContainer@4/@MarginContainer@6" unique_id=1157897223]
+[node name="Content" type="Control" parent="@VBoxContainer@2/@HBoxContainer@4/@MarginContainer@6" unique_id=1179366243]
 unique_name_in_owner = true
 layout_mode = 2
 
-[node name="StatusSlot" type="Control" parent="@VBoxContainer@2" unique_id=1354912715]
+[node name="StatusSlot" type="Control" parent="@VBoxContainer@2" unique_id=251027743]
 unique_name_in_owner = true
 custom_minimum_size = Vector2(0, 44)
 layout_mode = 2

@@ -3,7 +3,7 @@
 [ext_resource type="Theme" path="res://theme/tactical_theme.tres" id="1_srhja"]
 [ext_resource type="Script" path="res://ui/login_screen.gd" id="2_7d8cg"]
 
-[node name="LoginScreen" type="Control" unique_id=200992595]
+[node name="LoginScreen" type="Control" unique_id=801237058]
 layout_mode = 3
 anchors_preset = 0
 size_flags_horizontal = 3
@@ -11,7 +11,7 @@ size_flags_vertical = 3
 theme = ExtResource("1_srhja")
 script = ExtResource("2_7d8cg")
 
-[node name="Backdrop" type="ColorRect" parent="." unique_id=2036054178]
+[node name="Backdrop" type="ColorRect" parent="." unique_id=2138137072]
 layout_mode = 0
 anchor_right = 1.0
 anchor_bottom = 1.0
@@ -20,63 +20,63 @@ size_flags_vertical = 3
 mouse_filter = 2
 color = Color(0.03, 0.035, 0.043, 0.86)
 
-[node name="Center" type="CenterContainer" parent="." unique_id=1071094167]
+[node name="Center" type="CenterContainer" parent="." unique_id=1460569443]
 layout_mode = 0
 anchor_right = 1.0
 anchor_bottom = 1.0
 size_flags_horizontal = 3
 size_flags_vertical = 3
 
-[node name="Card" type="PanelContainer" parent="Center" unique_id=748016550]
+[node name="Card" type="PanelContainer" parent="Center" unique_id=341790245]
 unique_name_in_owner = true
 custom_minimum_size = Vector2(420, 0)
 layout_mode = 2
 theme_type_variation = &"CardPanel"
 
-[node name="@VBoxContainer@7" type="VBoxContainer" parent="Center/Card" unique_id=1356342381]
+[node name="@VBoxContainer@7" type="VBoxContainer" parent="Center/Card" unique_id=1057439500]
 layout_mode = 2
 theme_override_constants/separation = 8
 
-[node name="Title" type="Label" parent="Center/Card/@VBoxContainer@7" unique_id=1568708255]
+[node name="Title" type="Label" parent="Center/Card/@VBoxContainer@7" unique_id=144774196]
 unique_name_in_owner = true
 layout_mode = 2
 theme_type_variation = &"LabelTitle"
 text = "JOLT FPS"
 
-[node name="Subtitle" type="Label" parent="Center/Card/@VBoxContainer@7" unique_id=572520604]
+[node name="Subtitle" type="Label" parent="Center/Card/@VBoxContainer@7" unique_id=1910280290]
 unique_name_in_owner = true
 layout_mode = 2
 theme_type_variation = &"LabelMuted"
 text = "登录后进入大厅：个人信息 · 商城 · 背包 · 匹配"
 
-[node name="User" type="LineEdit" parent="Center/Card/@VBoxContainer@7" unique_id=422697859]
+[node name="User" type="LineEdit" parent="Center/Card/@VBoxContainer@7" unique_id=1958263570]
 unique_name_in_owner = true
 layout_mode = 2
 placeholder_text = "用户名（3-16 位字母/数字/下划线）"
 
-[node name="Pass" type="LineEdit" parent="Center/Card/@VBoxContainer@7" unique_id=836969087]
+[node name="Pass" type="LineEdit" parent="Center/Card/@VBoxContainer@7" unique_id=1852849509]
 unique_name_in_owner = true
 layout_mode = 2
 placeholder_text = "密码（6-64 位）"
 secret = true
 
-[node name="Error" type="Label" parent="Center/Card/@VBoxContainer@7" unique_id=1473854336]
+[node name="Error" type="Label" parent="Center/Card/@VBoxContainer@7" unique_id=645924930]
 unique_name_in_owner = true
 layout_mode = 2
 theme_type_variation = &"LabelDanger"
 autowrap_mode = 3
 
-[node name="@HBoxContainer@8" type="HBoxContainer" parent="Center/Card/@VBoxContainer@7" unique_id=1475061103]
+[node name="@HBoxContainer@8" type="HBoxContainer" parent="Center/Card/@VBoxContainer@7" unique_id=1123623606]
 layout_mode = 2
 theme_override_constants/separation = 8
 
-[node name="Login" type="Button" parent="Center/Card/@VBoxContainer@7/@HBoxContainer@8" unique_id=13563392]
+[node name="Login" type="Button" parent="Center/Card/@VBoxContainer@7/@HBoxContainer@8" unique_id=1681212562]
 unique_name_in_owner = true
 layout_mode = 2
 theme_type_variation = &"PrimaryButton"
 text = "登录"
 
-[node name="Register" type="Button" parent="Center/Card/@VBoxContainer@7/@HBoxContainer@8" unique_id=1261598002]
+[node name="Register" type="Button" parent="Center/Card/@VBoxContainer@7/@HBoxContainer@8" unique_id=1778817048]
 unique_name_in_owner = true
 layout_mode = 2
 theme_type_variation = &"GhostButton"

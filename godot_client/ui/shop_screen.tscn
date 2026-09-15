@@ -3,7 +3,7 @@
 [ext_resource type="Theme" path="res://theme/tactical_theme.tres" id="1_4kj2c"]
 [ext_resource type="Script" path="res://ui/shop_screen.gd" id="2_gvg7f"]
 
-[node name="ShopScreen" type="Control" unique_id=1411196622]
+[node name="ShopScreen" type="Control" unique_id=1653082164]
 layout_mode = 3
 anchors_preset = 0
 size_flags_horizontal = 3
@@ -11,7 +11,7 @@ size_flags_vertical = 3
 theme = ExtResource("1_4kj2c")
 script = ExtResource("2_gvg7f")
 
-[node name="@VBoxContainer@25" type="VBoxContainer" parent="." unique_id=2039793388]
+[node name="@VBoxContainer@25" type="VBoxContainer" parent="." unique_id=1045554235]
 layout_mode = 0
 anchor_right = 1.0
 anchor_bottom = 1.0
@@ -19,32 +19,33 @@ size_flags_horizontal = 3
 size_flags_vertical = 3
 theme_override_constants/separation = 12
 
-[node name="@HBoxContainer@26" type="HBoxContainer" parent="@VBoxContainer@25" unique_id=105587664]
+[node name="@HBoxContainer@26" type="HBoxContainer" parent="@VBoxContainer@25" unique_id=1667947926]
 layout_mode = 2
 theme_override_constants/separation = 12
 
-[node name="Title" type="Label" parent="@VBoxContainer@25/@HBoxContainer@26" unique_id=511999622]
+[node name="Title" type="Label" parent="@VBoxContainer@25/@HBoxContainer@26" unique_id=1316109446]
 unique_name_in_owner = true
 layout_mode = 2
 theme_type_variation = &"LabelTitle"
 text = "商城"
 
-[node name="Spacer" type="Control" parent="@VBoxContainer@25/@HBoxContainer@26" unique_id=1669027528]
+[node name="Spacer" type="Control" parent="@VBoxContainer@25/@HBoxContainer@26" unique_id=576120021]
 layout_mode = 2
 size_flags_horizontal = 3
 mouse_filter = 2
 
-[node name="Coins" type="Label" parent="@VBoxContainer@25/@HBoxContainer@26" unique_id=314933536]
+[node name="Coins" type="Label" parent="@VBoxContainer@25/@HBoxContainer@26" unique_id=827493595]
 unique_name_in_owner = true
 layout_mode = 2
 theme_type_variation = &"LabelAccent"
 text = "⛁ 0"
 
-[node name="Scroll" type="ScrollContainer" parent="@VBoxContainer@25" unique_id=1187479042]
+[node name="Scroll" type="ScrollContainer" parent="@VBoxContainer@25" unique_id=534946471]
+unique_name_in_owner = true
 layout_mode = 2
 size_flags_vertical = 3
 
-[node name="Grid" type="GridContainer" parent="@VBoxContainer@25/Scroll" unique_id=1903732696]
+[node name="Grid" type="GridContainer" parent="@VBoxContainer@25/Scroll" unique_id=2004772446]
 unique_name_in_owner = true
 layout_mode = 2
 size_flags_horizontal = 3

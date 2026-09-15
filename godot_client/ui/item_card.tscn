@@ -3,63 +3,63 @@
 [ext_resource type="Theme" path="res://theme/tactical_theme.tres" id="1_wwa13"]
 [ext_resource type="Script" path="res://ui/item_card.gd" id="2_afnk7"]
 
-[node name="ItemCard" type="PanelContainer" unique_id=1818656057]
+[node name="ItemCard" type="PanelContainer" unique_id=648905090]
 custom_minimum_size = Vector2(170, 190)
 size_flags_horizontal = 3
 size_flags_vertical = 3
 theme = ExtResource("1_wwa13")
 script = ExtResource("2_afnk7")
 
-[node name="@VBoxContainer@33" type="VBoxContainer" parent="." unique_id=693340411]
+[node name="@VBoxContainer@33" type="VBoxContainer" parent="." unique_id=2050167548]
 layout_mode = 2
 theme_override_constants/separation = 4
 
-[node name="Icon" type="ColorRect" parent="@VBoxContainer@33" unique_id=1017414824]
+[node name="Icon" type="ColorRect" parent="@VBoxContainer@33" unique_id=697621205]
 unique_name_in_owner = true
 custom_minimum_size = Vector2(0, 52)
 layout_mode = 2
 color = Color(0.16470589, 0.18039216, 0.20784314, 1)
 
-[node name="Name" type="Label" parent="@VBoxContainer@33" unique_id=935133649]
+[node name="Name" type="Label" parent="@VBoxContainer@33" unique_id=2143184285]
 unique_name_in_owner = true
 layout_mode = 2
 text = "物品"
 
-[node name="Info" type="Label" parent="@VBoxContainer@33" unique_id=72081418]
+[node name="Info" type="Label" parent="@VBoxContainer@33" unique_id=590271564]
 unique_name_in_owner = true
 layout_mode = 2
 theme_type_variation = &"LabelMuted"
 text = "—"
 
-[node name="@HBoxContainer@34" type="HBoxContainer" parent="@VBoxContainer@33" unique_id=943410794]
+[node name="@HBoxContainer@34" type="HBoxContainer" parent="@VBoxContainer@33" unique_id=1888082108]
 layout_mode = 2
 theme_override_constants/separation = 4
 
-[node name="QtyMinus" type="Button" parent="@VBoxContainer@33/@HBoxContainer@34" unique_id=1698400231]
+[node name="QtyMinus" type="Button" parent="@VBoxContainer@33/@HBoxContainer@34" unique_id=218126203]
 unique_name_in_owner = true
 layout_mode = 2
 theme_type_variation = &"GhostButton"
 text = "−"
 
-[node name="Qty" type="Label" parent="@VBoxContainer@33/@HBoxContainer@34" unique_id=901954979]
+[node name="Qty" type="Label" parent="@VBoxContainer@33/@HBoxContainer@34" unique_id=622579471]
 unique_name_in_owner = true
 layout_mode = 2
 size_flags_horizontal = 3
 text = "1"
 horizontal_alignment = 1
 
-[node name="QtyPlus" type="Button" parent="@VBoxContainer@33/@HBoxContainer@34" unique_id=1901635355]
+[node name="QtyPlus" type="Button" parent="@VBoxContainer@33/@HBoxContainer@34" unique_id=38629433]
 unique_name_in_owner = true
 layout_mode = 2
 theme_type_variation = &"GhostButton"
 text = "+"
 
-[node name="Spacer" type="Control" parent="@VBoxContainer@33" unique_id=698985318]
+[node name="Spacer" type="Control" parent="@VBoxContainer@33" unique_id=1523064762]
 layout_mode = 2
 size_flags_vertical = 3
 mouse_filter = 2
 
-[node name="Action" type="Button" parent="@VBoxContainer@33" unique_id=1155331042]
+[node name="Action" type="Button" parent="@VBoxContainer@33" unique_id=1980570416]
 unique_name_in_owner = true
 layout_mode = 2
 theme_type_variation = &"PrimaryButton"

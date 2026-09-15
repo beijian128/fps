@@ -17,7 +17,7 @@ const REASON_TEXT := {
 	"internal": "服务暂时不可用",
 }
 
-var _manager: Node = null
+var _manager = null
 var _busy := false
 
 func _ready() -> void:
@@ -27,7 +27,7 @@ func _ready() -> void:
 	_clear_form()
 
 ## bind 由一个 manager 调用（screen_manager 建好场景后立刻绑定）。
-func bind(manager: Node) -> void:
+func bind(manager) -> void:
 	_manager = manager
 	manager.state_changed.connect(_on_state_changed)
 

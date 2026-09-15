@@ -15,7 +15,7 @@ const NAV := {
 	"bag": "NavBag",
 }
 
-var _manager: Node = null
+var _manager = null
 var _page_node: Control = null
 
 func _ready() -> void:
@@ -23,7 +23,7 @@ func _ready() -> void:
 	%NavShop.pressed.connect(func() -> void: _manager.intent_show_page("shop"))
 	%NavBag.pressed.connect(func() -> void: _manager.intent_show_page("bag"))
 
-func bind(manager: Node) -> void:
+func bind(manager) -> void:
 	_manager = manager
 	manager.page_changed.connect(_on_page_changed)
 	manager.data_changed.connect(_refresh_top)

@@ -152,8 +152,7 @@ func _build_shop() -> Node:
 	header.add_child(_label("Title", "商城", "LabelTitle"))
 	header.add_child(_spacer())
 	header.add_child(_unique(_label("Coins", "⛁ 0", "LabelAccent"), "Coins", true))
-	var scroll := ScrollContainer.new()
-	scroll.name = "Scroll"
+	var scroll := _unique(ScrollContainer.new(), "Scroll", true)
 	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	box.add_child(scroll)
 	var grid := _unique(GridContainer.new(), "Grid", true)
@@ -169,8 +168,7 @@ func _build_bag() -> Node:
 	var box := _vbox(root, Tokens.SP_3)
 	_full(box)
 	box.add_child(_label("Title", "背包", "LabelTitle"))
-	var scroll := ScrollContainer.new()
-	scroll.name = "Scroll"
+	var scroll := _unique(ScrollContainer.new(), "Scroll", true)
 	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	box.add_child(scroll)
 	var grid := _unique(GridContainer.new(), "Grid", true)

@@ -3,39 +3,39 @@
 [ext_resource type="Theme" path="res://theme/tactical_theme.tres" id="1_t3krr"]
 [ext_resource type="Script" path="res://ui/match_status_bar.gd" id="2_hw74d"]
 
-[node name="MatchStatusBar" type="PanelContainer" unique_id=249205924]
+[node name="MatchStatusBar" type="PanelContainer" unique_id=418984258]
 size_flags_horizontal = 3
 size_flags_vertical = 3
 theme = ExtResource("1_t3krr")
 theme_type_variation = &"BarPanel"
 script = ExtResource("2_hw74d")
 
-[node name="@HBoxContainer@35" type="HBoxContainer" parent="." unique_id=198766115]
+[node name="@HBoxContainer@35" type="HBoxContainer" parent="." unique_id=1823561795]
 layout_mode = 2
 theme_override_constants/separation = 12
 
-[node name="LastResult" type="Label" parent="@HBoxContainer@35" unique_id=817984246]
+[node name="LastResult" type="Label" parent="@HBoxContainer@35" unique_id=1939153932]
 unique_name_in_owner = true
 layout_mode = 2
 theme_type_variation = &"LabelMuted"
 
-[node name="Spacer" type="Control" parent="@HBoxContainer@35" unique_id=888254188]
+[node name="Spacer" type="Control" parent="@HBoxContainer@35" unique_id=667395156]
 layout_mode = 2
 size_flags_horizontal = 3
 mouse_filter = 2
 
-[node name="QueueText" type="Label" parent="@HBoxContainer@35" unique_id=711617303]
+[node name="QueueText" type="Label" parent="@HBoxContainer@35" unique_id=480419376]
 unique_name_in_owner = true
 layout_mode = 2
 theme_type_variation = &"LabelAccent"
 
-[node name="StartMatch" type="Button" parent="@HBoxContainer@35" unique_id=1194242422]
+[node name="StartMatch" type="Button" parent="@HBoxContainer@35" unique_id=1978252098]
 unique_name_in_owner = true
 layout_mode = 2
 theme_type_variation = &"PrimaryButton"
 text = "开始匹配"
 
-[node name="CancelMatch" type="Button" parent="@HBoxContainer@35" unique_id=1743606944]
+[node name="CancelMatch" type="Button" parent="@HBoxContainer@35" unique_id=1639590618]
 unique_name_in_owner = true
 visible = false
 layout_mode = 2
