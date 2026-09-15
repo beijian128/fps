@@ -14,6 +14,7 @@ package match
 
 import (
 	"context"
+	"log"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -134,4 +135,29 @@ func (q *Queue) Remove(ctx context.Context, uid string) (bool, error) {
 		return false, err
 	}
 	return n > 0, nil
+}
+
+// QueueBots 把 n 个机器人加入队列，返回实际成功入队的数量。
+//
+// 机器人与真人走**同一条**队列、同一个 Lua 脚本：它是队列里的普通成员，去重与
+// 按等待时长排序的语义完全一致。uid 由 newUID 提供（调用方决定怎么生成），
+// 本方法只负责「生成 + 入队 + 数成功了几个」。
+//
+// 单个入队失败只记日志、不中断：调用方（GM 页面）没有补偿机会，返回的数量必须
+// 诚实 —— 说入队了 3 个实际只有 2 个，比直接报错更难排查。
+// 入队时间戳仍由脚本里的 Redis 服务端时钟决定，机器人也不例外。
+func (q *Queue) QueueBots(ctx context.Context, n int, newUID func() string) (int, error) {
+	if n <= 0 || newUID == nil {
+		return 0, nil
+	}
+	queued := 0
+	for i := 0; i < n; i++ {
+		uid := newUID()
+		if err := q.Enqueue(ctx, uid); err != nil {
+			log.Printf("match: enqueue bot %s failed: %v", uid, err)
+			continue
+		}
+		queued++
+	}
+	return queued, nil
 }
