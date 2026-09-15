@@ -2765,7 +2765,6 @@ Expected: 失败 —— 信号 `match_ended_received` 无人连接（`_matched` 
 ## 必须由玩家主动发起（正式的大厅/结算界面属于 B 子项目，这里只留临时提示）。
 func _on_match_ended(result: Dictionary) -> void:
 	_matched = false
-	_reset_pending = false
 	_store.clear()
 	_reset_interp()
 	for id in _entities:
@@ -2774,6 +2773,9 @@ func _on_match_ended(result: Dictionary) -> void:
 	conn_label.text = _match_ended_text(result)
 	conn_label.visible = true
 
+## 注意：这里**不要**写 `_reset_pending`。Step 2 已经把这个变量连同它的闩锁语义一起删了
+## （场景重置功能已移除），写回去会直接编译不过。
+##
 ## _match_ended_text 结算提示的临时文案（B 子项目会用真正的结算界面替换它）。
 ## 注意读的是**自己槽位**的战绩，不是胜者槽位的 —— 两边的 k/d 是一对镜像数字，
 ## 读错了会把自己的战绩显示成对手的。
@@ -2788,8 +2790,6 @@ func _match_ended_text(result: Dictionary) -> String:
 	return "本局结束：%s（我方 %d 杀 %d 死，用时 %d 秒），按 Enter 重新匹配" % [
 		result_text, int(mine["kills"]), int(mine["deaths"]), duration]
 ```
-
-> 注意上面第三件事里删掉了 `_reset_pending` 一行：Step 2 已经把这个变量删了，**实现时不要写这一行**（这里保留说明是为了让你知道它曾经存在）。
 
 再加一个临时入口，让 A 阶段能手工开下一局（B 会用真界面替换）：在 `_unhandled_input` 的 `KEY_B` 分支后面加
 
@@ -2954,6 +2954,14 @@ func wait_for_pair(timeout_ms: int) -> Dictionary:
 - `login_smoke.gd` / `rejoin_smoke.gd` 需要更细的控制（一个客户端要单独断线重连），所以用 `add_client` + 各自的回调手动驱动；`ws_smoke.gd` 直接用 `register_both` + `join_both` + `wait_for_pair` 三步走最省事。
 
 - [ ] **Step 3: 起集群并跑三个冒烟**
+
+先重新构建服务端 —— 冒烟测试跑的是 `joltgo/joltgo.exe`，不重建就还是在测旧代码（旧代码有单人兜底、没有 `match.cancel`），测试会以完全误导的方式失败：
+
+```bash
+cd joltgo; .\build.ps1
+```
+
+然后重启本地集群（`start-infra.ps1` 每次启动都会清空 `etcd-data`，但**不会**动 `redis-data`，账号会保留）：
 
 ```bash
 cd joltgo/deploy && powershell -File start-all.ps1    # 或在 PowerShell 里 .\start-all.ps1
