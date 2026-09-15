@@ -37,12 +37,19 @@
    - **漏写一处 `rep.Set` 不会在运行时暴露**（没有报错、没有日志），客户端只会静默
      停在旧值；唯一能抓住它的是 `sim/replicate_test.go` 的 oracle 测试（`expectedAttrs`
      从 ECS 世界独立推期望值，与 store 全量逐项比对）。所以**先补 `rep.Set`、再补断言**
-3. **客户端** `godot_client/scripts/`
-   - 传输层：`fps_client.gd`（上行有 Notify 三条：`match.join`（空消息）/ `game.cmd`
-     （输入+射击+重置合并成一条）/ `game.resync`，以及 Request 六条：`account.register` /
-     `account.login` / `account.resume` 与 `logic.state` / `logic.purchase` / `logic.equip`；需要新消息时加一个 `send_xxx` 方法，注意 route
-     三段式 `server.service.method` 与服务端 handler 方法名小写对应；新消息要在 protobuf
-     编解码函数里读写。**Request 要自己记 mid**，Response 帧里没有 route）
+ 3. **客户端** —— 分三层，改动前先看 `godot_client/README.md` 的「界面结构」：
+    - 界面：`godot_client/ui/`（`screen_manager` 是唯一状态源，屏幕只渲染 + 发意图）+
+      `godot_client/theme/tokens.gd`（颜色/字号/间距的唯一真相，改完跑 `theme/build_theme.gd`
+      重生成主题）。界面**不得**绕过 `screen_manager` 改状态、也不得直接调 `fps_client`。
+      `.tscn` 由 `tools/gen_ui_scenes.gd` 生成，不要手写节点块。
+    - 渲染与输入：`godot_client/scripts/main.gd`（相机、插值、玩法反馈）
+    - 传输层：`godot_client/scripts/fps_client.gd`
+    - 传输层细节：`fps_client.gd`（上行有 Notify 三条：`match.join`（空消息）/ `game.cmd`
+      （输入+射击+重置合并成一条）/ `game.resync`，以及 Request 六条：`account.register` /
+      `account.login` / `account.resume` / `logic.state` / `logic.purchase` / `logic.equip` /
+      `logic.profile` / `match.cancel`；需要新消息时加一个 `send_xxx` 方法，注意 route
+      三段式 `server.service.method` 与服务端 handler 方法名小写对应；新消息要在 protobuf
+      编解码函数里读写。**Request 要自己记 mid**，Response 帧里没有 route）
    - 世界状态：`world_store.gd` 按**属性名**累积；渲染层 `main.gd` / `body_entity.gd`
      通过 `_store.attr(id, "属性名")` 取值 —— 新增同步属性时客户端取新值只需这一句
 

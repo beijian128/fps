@@ -496,6 +496,19 @@ Jolt 的 Release 构建定义 `NDEBUG`、`JPH_DEBUG_RENDERER`、`JPH_PROFILE_ENA
 
 ## 局外数据与 logic
 
+### 客户端界面层（`godot_client/ui/`）
+
+界面走「一个状态源 + 一群哑屏幕」：`ui/screen_manager.gd` 持有状态机
+（`boot → login → lobby → matching → in_match → result → lobby`）与数据快照
+（`logic_state()` / `profile()` / `last_result()` / `match_status()`），并订阅 `FpsClient` 的
+全部业务信号；`shell` / `login_screen` / `profile_screen` / `shop_screen` / `bag_screen` /
+`match_status_bar` / `result_overlay` / `hud` 只做两件事 —— 按 `state()` 渲染、向
+`intent_*` 发意图。`main.gd` 只剩输入/相机/世界渲染与「玩法反馈」（受击红闪、命中音、
+准星点亮），不再持有任何界面控件。协议细节仍然只在 `fps_client.gd` 里。
+
+界面用 `theme/tokens.gd`（颜色/字号/间距唯一真相）+ 生成的 `tactical_theme.tres`；字体是显式
+系统字体回退链，不打包字体文件。`.tscn` 由 `tools/gen_ui_scenes.gd` 生成。
+
 `logic` 是无状态 backend。gate 对 `logic.logic.state` / `.purchase` / `.equip` / `.profile` 做随机节点路由，因此任意 logic 节点都可以处理同一账号；真实状态只在 Redis。账号登录/注册/resume 进入成功路径时，account 先通过 `logic.logic.online` 向随机 logic 节点发送上线事件，logic 确保钱包、背包与玩家档案存在；该 RPC 失败会中止登录并返回 `internal`，此后才轮换 token、绑定会话，所以旧 token 和已有会话不会被破坏。
 
 战绩由 `game` 在对局结束时**主动**上报：`logic.logic.recordmatch`（remote 注册，`app.RPC` 单发，不重试不去重，失败只记日志）。logic 侧只认「两个槽位都是真实玩家」才入账，并把对局写进累计统计与最近 20 场历史。等级不落库，由 XP 现算（`logic/level.go`）。

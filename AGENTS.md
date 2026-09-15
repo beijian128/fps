@@ -51,8 +51,11 @@ fps/
 │   ├── CMakeLists.txt       # 把 Jolt 作为子项目编译 libjolt_c.dll
 │   └── build.ps1            # 一键构建（UCRT64 + go build + 拷贝 DLL）
 ├── godot_client/            # 客户端（Godot 4）
-│   ├── scenes/main.tscn     # Main(Node3D) + FpsClient + Sfx
-│   ├── scripts/main.gd      # 输入/相机/双玩家渲染/登录面板/商城背包面板/按属性名查询与插值/HUD/音效（核心）
+│   ├── scenes/main.tscn     # Main(Node3D) + FpsClient + Sfx + UI（CanvasLayer，挂 screen_manager）
+│   ├── theme/               # ★ 界面主题：tokens.gd（颜色/字号/间距唯一真相）+ build_theme.gd + tactical_theme.tres（生成物）
+│   ├── ui/                  # ★ 界面层：screen_manager（唯一状态源）+ shell/login/profile/shop/bag/item_card/match_status_bar/result_overlay/hud
+│   ├── tools/gen_ui_scenes.gd # 一次性生成 ui/*.tscn 骨架（改结构改这里再重跑，别手写 .tscn 节点块）
+│   ├── scripts/main.gd      # 输入/相机/双玩家渲染/插值/玩法反馈（受击红闪 + 命中音）+ 把 FpsClient 事件派发给 UI
 │   ├── scripts/world_store.gd # 本地世界状态：实体-属性增量累积成完整世界（按名字取值）
 │   ├── scripts/fps_client.gd  # 传输层（pomelo 握手/登录/匹配/心跳/Frame 编解码 + Logic Request/Response + 重连/看门狗）
 │   ├── scripts/body_entity.gd # 每个服务端刚体一个渲染节点（程序化模型）
@@ -155,6 +158,9 @@ fps/
 - **etcd 租约与残留**：租约只在 etcd 运行期间倒计时，etcd 重启会把上一轮的孤儿租约按 checkpoint 恢复并**重新计时**（v3.5.14 实测：进程已死 + etcd 停机 66s 后重启，注册项仍带 19s TTL 复活；TTL 内反复重启会反复续命）。所以本地 `start-infra.ps1` 每次启动都清空 `etcd-data`（详见 `deploy/README.md`），整套重启后服务列表一定干净；生产则要调小 TTL 并给选节点加健康检查/重试——`GetServersByType` 可能返回已死的旧节点，`match.startMatch` 选中它就会把玩家静默丢出队列。
 - **构建**：Jolt 必须经 CMake `add_subdirectory` 编译（保证 NDEBUG/指令集宏与静态库一致）；UCRT64 与 MINGW64 不能混用；`build.ps1` 硬编码 `C:\msys64`；运行需 `joltgo.exe` 与 `libjolt_c.dll` 同目录。
 - **Godot 4**：材质属性用 `metallic`（不是 Godot 3 的 `metalness`）；命令行运行用 `preload` 而非 `class_name`；typed for 循环需 4.2+。
+- **客户端界面分层**：`screen_manager` 是**唯一状态源**（`boot → login → lobby → matching → in_match → result → lobby`），界面只做「渲染 `state()` + 发意图（`intent_*`）」；协议在 `fps_client.gd`、世界渲染与输入在 `main.gd`。登录成功后**不自动匹配**，要玩家在大厅点「开始匹配」。
+- **颜色/字号/间距只能来自 `theme/tokens.gd`**：界面里禁止写死十六进制颜色或裸字号；改配色只改 tokens，然后跑 `godot --headless --path godot_client --script res://theme/build_theme.gd` 重生成 `tactical_theme.tres`（`tests/theme_test.gd` 会挡住「改了忘重跑」）。
+- **界面不许用固定像素定位**（`offset_*`）：用锚点 + Container 布局，窗口拉伸才不破版（HUD 的四个贴边面板是唯一例外）。`.tscn` 由 `tools/gen_ui_scenes.gd` 生成，**不要手写节点块**（`PackedScene.pack()` 不会自动设 `owner`，漏了就只有根节点）。
 - **多进程部署**：单二进制 `joltgo.exe -type gate|account|logic|match|game` 五角色（**只有 `-type` 与 `-redis` 两个 flag**，
   gate 的 WS 端口 8080 写死），先起 etcd + nats + redis（`deploy/start-all.ps1` 一把梭）；服务日志在
   `deploy/gate.log` / `account.log` / `logic.log` / `match.log` / `game.log`（pitaya 写 stderr，`*.out.log` 是 stdout 基本为空）。
@@ -219,6 +225,11 @@ Godot_..._console.exe --headless --path godot_client --script res://tests/login_
 Godot_..._console.exe --headless --path godot_client --script res://tests/logic_state_decode_test.gd # LogicStateReply / 商城状态解码
 Godot_..._console.exe --headless --path godot_client --script res://tests/logic_panel_test.gd # Logic 面板 UI
 Godot_..._console.exe --headless --path godot_client --script res://tests/match_ended_test.gd # 对局结束（onMatchEnded）：停看门狗 / 清世界 / 不自动重排
+Godot_..._console.exe --headless --path godot_client --script res://tests/theme_test.gd        # 主题与 tokens 一致（改了 tokens 必须重跑 build_theme.gd）
+Godot_..._console.exe --headless --path godot_client --script res://tests/screen_flow_test.gd  # 屏幕状态机：登录不自动匹配 / 匹配 / 取消 / 进局 / 结算
+Godot_..._console.exe --headless --path godot_client --script res://tests/profile_screen_test.gd # 个人信息页（等级/经验条/统计派生/战绩列表/空态）
+Godot_..._console.exe --headless --path godot_client --script res://tests/item_grid_test.gd    # 商城与背包卡片（数量 1–99、买不起禁用、装备/卸下、空态）
+Godot_..._console.exe --headless --path godot_client --script res://tests/hud_test.gd          # 对局内 HUD（血条 / K/D / 回合进度 / 击杀播报 / 准星命中）
 
 # 冒烟：需要活集群（etcd + NATS + redis + gate/account/logic/match/game 五进程）
 Godot_..._console.exe --headless --path godot_client --script res://tests/login_smoke.gd            # 注册 → LoginReply → 断线 → resume → onMatched（两客户端配对）
@@ -258,6 +269,7 @@ Godot_..._console.exe --headless --path godot_client --script res://tests/profil
 - 改**会话归属 / 多节点行为** → 动 `joltgo/online/` + `joltgo/gate/session.go`（+ 调用方 `account/` `match/`），
   跑 `go test ./online ./gate ./account ./match`。
 - 改客户端渲染/输入 → 只动 `godot_client/`，Godot 直接 F5。
+- **改客户端界面** → 只动 `godot_client/ui/`（结构与逻辑）与 `godot_client/theme/`（配色与字号）：改颜色先改 `tokens.gd` 再跑 `build_theme.gd` 重生成主题；改布局改 `tools/gen_ui_scenes.gd` 后重跑生成；跑 `theme_test` + `screen_flow_test` + 受影响屏幕自己的测试。界面**不得**绕过 `screen_manager` 直接改状态或直接调 `fps_client`。
 ## Logic 局外数据边界
 
 - `logic` 是无状态 backend：客户端经 gate 随机路由到任意 logic 节点，节点只把钱包/背包写入 Redis；账号登录成功后由 account 通过 `logic.logic.online` 确保档案存在。
