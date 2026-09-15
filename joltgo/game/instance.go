@@ -14,18 +14,26 @@ package game
 // 也会在**空闲自退**时由实例自己调用；stopOnce 保证两条路径都安全。
 
 import (
+	"context"
 	"log"
 	"sync"
 	"time"
 
 	pitaya "github.com/topfreegames/pitaya/v3/pkg"
+	"joltgo/game/protos"
 	"joltgo/physics"
 	"joltgo/sim"
 )
 
 // instanceIdleTimeout 是「所有槽位都无上行消息」多久之后结束实例。
-// 远大于客户端 1s 重连 + 2.5s 看门狗，正常重连不会误杀。
-const instanceIdleTimeout = 60 * time.Second
+//
+// 30 分钟同时是掉线回局窗口：服务端权威、对局不因掉线暂停，玩家在这段时间内 resume
+// 回来仍能通过 tryRejoin 接回原局。远大于客户端 1s 重连 + 2.5s 看门狗，正常重连不会
+// 误杀。这条超时只对「谁都没打死谁」的局生效 —— 判出胜负的局会在结算时立刻终结。
+const instanceIdleTimeout = 30 * time.Minute
+
+// recordMatchTimeout 是上报战绩的 RPC 超时（在独立 goroutine 里发送，不阻塞 tick）。
+const recordMatchTimeout = 2 * time.Second
 
 // Instance 对局实例。
 type Instance struct {
@@ -83,6 +91,11 @@ func (i *Instance) run() {
 		case <-ticker.C:
 			i.sim.Step()
 			i.broadcast()
+			if out, ok := i.sim.DrainOutcome(); ok {
+				// 上面那次 broadcast 很关键：含 Game.Winner 的帧必须在 onMatchEnded 之前出去。
+				i.finishMatch(out)
+				return
+			}
 			if i.idleExpired() {
 				log.Printf("instance %s: %v 无玩家上行，结束对局", i.matchID, instanceIdleTimeout)
 				// 关掉 stop：退出后没有 goroutine 再消费 cmds，正在并发的
@@ -116,6 +129,86 @@ func (i *Instance) idleExpired() bool {
 func (i *Instance) touch(slot int) {
 	if slot >= 0 && slot < len(i.lastSeen) {
 		i.lastSeen[slot] = time.Now()
+	}
+}
+
+// finishMatch 是一局结束后的收尾，只能由实例 goroutine 调用：先推送（此时本 tick 的
+// 增量帧已经 broadcast 过），再异步上报，最后停止实例并摘注册表。
+//
+// 与空闲回收那条退出路径等价（`defer i.Stop()` + `onExit()` + return）：两件事都做，
+// 少做一件都会留下问题 —— 不 Stop 则 goroutine 不退出，不 onExit 则 uid→实例表永久
+// 留着死实例，玩家点「再来一局」会被 pushMatched 塞回一个不再有帧的对局。
+func (i *Instance) finishMatch(out sim.MatchOutcome) {
+	if uids := i.presentUIDs(); len(uids) > 0 {
+		if _, err := i.app.SendPushToUsers(endedRoute, i.matchEnded(out), uids, frontendType); err != nil {
+			log.Printf("instance %s: push %s failed: %v", i.matchID, endedRoute, err)
+		}
+	}
+	go i.reportMatch(out)
+	i.Stop()
+	if i.onExit != nil {
+		i.onExit()
+	}
+}
+
+// presentUIDs 返回在座玩家的 uid（跳过空槽位）。
+func (i *Instance) presentUIDs() []string {
+	out := make([]string, 0, len(i.uids))
+	for _, uid := range i.uids {
+		if uid != "" {
+			out = append(out, uid)
+		}
+	}
+	return out
+}
+
+func (i *Instance) uidAt(slot int) string {
+	if slot < 0 || slot >= len(i.uids) {
+		return ""
+	}
+	return i.uids[slot]
+}
+
+func (i *Instance) matchEnded(out sim.MatchOutcome) *protos.MatchEnded {
+	msg := &protos.MatchEnded{
+		MatchId:         i.matchID,
+		WinnerSlot:      int32(out.WinnerSlot),
+		DurationSeconds: out.DurationSeconds,
+		Slots:           make([]*protos.SlotResult, 0, sim.MaxPlayers),
+	}
+	for slot := 0; slot < sim.MaxPlayers; slot++ {
+		msg.Slots = append(msg.Slots, &protos.SlotResult{
+			Uid:    i.uidAt(slot),
+			Kills:  out.Kills[slot],
+			Deaths: out.Deaths[slot],
+		})
+	}
+	return msg
+}
+
+// reportMatch 在独立 goroutine 里上报战绩：**绝不能在实例 goroutine 里同步发** ——
+// pitaya 的 RPC 默认 5 秒超时，卡住就是 100 个 tick 停摆、客户端看门狗立刻判定掉线。
+// 用 RPC（不是 RPCTo）：RPCType_User 走 router 的 default route，从 game 节点可直接
+// 选到一个 logic 节点，不需要额外 AddRoute。失败只记日志：不重试、不去重。
+func (i *Instance) reportMatch(out sim.MatchOutcome) {
+	ctx, cancel := context.WithTimeout(context.Background(), recordMatchTimeout)
+	defer cancel()
+	msg := &protos.RecordMatchMsg{
+		MatchId:         i.matchID,
+		WinnerSlot:      int32(out.WinnerSlot),
+		DurationSeconds: out.DurationSeconds,
+		Slots:           make([]*protos.SlotResult, 0, sim.MaxPlayers),
+	}
+	for slot := 0; slot < sim.MaxPlayers; slot++ {
+		msg.Slots = append(msg.Slots, &protos.SlotResult{
+			Uid:    i.uidAt(slot),
+			Kills:  out.Kills[slot],
+			Deaths: out.Deaths[slot],
+		})
+	}
+	reply := &protos.RecordMatchReply{}
+	if err := i.app.RPC(ctx, recordMatchRoute, reply, msg); err != nil {
+		log.Printf("instance %s: report match failed: %v", i.matchID, err)
 	}
 }
 

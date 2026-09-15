@@ -22,6 +22,12 @@ import (
 const (
 	frameRoute   = "onFrame" // game → 客户端同步帧 push 的 route
 	frontendType = "gate"    // 前端服务类型（与 gate 服务的 serverType 一致）
+
+	// endedRoute 是「本局结束」的权威信号：实例随即终结、帧流随之中断，客户端必须靠它
+	// 停下接收看门狗，否则每局打完都会被 2.5 秒看门狗误判成掉线。
+	endedRoute = "onMatchEnded"
+	// recordMatchRoute 是 game → logic 的战绩上报（logic 侧以 remote 注册）。
+	recordMatchRoute = "logic.logic.recordmatch"
 )
 
 // Component 是 game 服务的 pitaya 组件：持有实例注册表。
