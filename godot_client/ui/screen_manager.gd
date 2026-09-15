@@ -37,6 +37,7 @@ var _profile := {}
 var _last_result := {}
 var _status := {}
 var _username := ""
+var _account_id := ""
 
 ## setup 绑定客户端并接上信号。可重复调用（测试会换成假客户端再调一次）。
 func setup(client: Node, main: Node) -> void:
@@ -67,6 +68,8 @@ func match_status() -> Dictionary: return _status
 ## username 顶栏要显示用户名，而档案回复里没有它（自己的用户名只在 LoginReply 里，
 ## 避免两个数据源）—— 登录成功时记在这里。
 func username() -> String: return _username
+## account_id 同理来自 LoginReply（十进制字符串）。
+func account_id() -> String: return _account_id
 
 # ---- 意图（屏幕只调这些）----
 
@@ -114,6 +117,7 @@ func intent_resync() -> void:
 func on_login_result(result: Dictionary) -> void:
 	if bool(result.get("ok", false)):
 		_username = String(result.get("username", ""))
+		_account_id = String(result.get("account_id", ""))
 		_set_state(State.LOBBY)
 		_client.send_logic_state()
 		_client.send_profile()

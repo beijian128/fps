@@ -98,6 +98,8 @@ func _mount_page() -> void:
 	_page_node.name = String(page).capitalize() + "Screen"
 	host.add_child(_page_node)
 	_page_node.set_anchors_preset(Control.PRESET_FULL_RECT)
+	if _page_node.has_method("bind"):
+		_page_node.bind(_manager)
 	_feed_page()
 
 ## _feed_page 把快照喂给页面（页面自己决定怎么渲染）。

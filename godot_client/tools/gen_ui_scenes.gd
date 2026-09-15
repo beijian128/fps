@@ -304,6 +304,7 @@ func _build_hud() -> Node:
 func _stat_card(key: String) -> Control:
 	var card := _panel("Stat_" + key, "CardPanel")
 	var box := _vbox(card, 0)
+	box.name = "StatBox"
 	box.add_child(_label("Stat_" + key + "_Name", STAT_NAMES.get(key, key), "LabelMuted"))
 	var value := _label("Stat_" + key + "_Value", "0", "LabelSub")
 	value.add_theme_font_override("font", Tokens.mono_font())
