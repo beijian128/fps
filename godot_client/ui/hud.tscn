@@ -1,161 +1,239 @@
-[gd_scene format=3]
+[gd_scene load_steps=3 format=3]
 
-[ext_resource type="Theme" path="res://theme/tactical_theme.tres" id="1_276te"]
-[ext_resource type="Script" path="res://ui/hud.gd" id="2_546lt"]
+[ext_resource type="Theme" path="res://theme/tactical_theme.tres" id="1_theme"]
+[ext_resource type="Script" path="res://ui/hud.gd" id="2_hud"]
 
-[node name="Hud" type="Control" unique_id=1011575647]
+[node name="Hud" type="Control"]
 layout_mode = 3
-anchors_preset = 0
-size_flags_horizontal = 3
-size_flags_vertical = 3
-mouse_filter = 2
-theme = ExtResource("1_276te")
-script = ExtResource("2_546lt")
-
-[node name="SelfPanel" type="PanelContainer" parent="." unique_id=973844044]
-unique_name_in_owner = true
-layout_mode = 0
-anchor_top = 1.0
+anchors_preset = 15
+anchor_right = 1.0
 anchor_bottom = 1.0
-offset_left = 16.0
-offset_top = -104.0
-offset_right = 260.0
-offset_bottom = -16.0
-theme_type_variation = &"BarPanel"
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+theme = ExtResource("1_theme")
+script = ExtResource("2_hud")
 
-[node name="@VBoxContainer@38" type="VBoxContainer" parent="SelfPanel" unique_id=1709641490]
-layout_mode = 2
-theme_override_constants/separation = 8
+[node name="DamageLayer" type="Control" parent="."]
+unique_name_in_owner = true
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
 
-[node name="@HBoxContainer@39" type="HBoxContainer" parent="SelfPanel/@VBoxContainer@38" unique_id=357715050]
-layout_mode = 2
-theme_override_constants/separation = 8
+[node name="SafeArea" type="MarginContainer" parent="."]
+unique_name_in_owner = true
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
 
-[node name="SelfTitle" type="Label" parent="SelfPanel/@VBoxContainer@38/@HBoxContainer@39" unique_id=1833866400]
+[node name="Field" type="Control" parent="SafeArea"]
 unique_name_in_owner = true
 layout_mode = 2
-theme_type_variation = &"LabelMuted"
+mouse_filter = 2
+
+[node name="SelfPanel" type="PanelContainer" parent="SafeArea/Field"]
+unique_name_in_owner = true
+layout_mode = 1
+anchors_preset = 0
+offset_right = 276.0
+offset_bottom = 84.0
+grow_horizontal = 1
+grow_vertical = 1
+mouse_filter = 2
+theme_type_variation = &"HudPanel"
+
+[node name="Rows" type="VBoxContainer" parent="SafeArea/Field/SelfPanel"]
+layout_mode = 2
+mouse_filter = 2
+theme_override_constants/separation = 6
+
+[node name="Header" type="HBoxContainer" parent="SafeArea/Field/SelfPanel/Rows"]
+layout_mode = 2
+mouse_filter = 2
+theme_override_constants/separation = 8
+
+[node name="Who" type="Label" parent="SafeArea/Field/SelfPanel/Rows/Header"]
+layout_mode = 2
+mouse_filter = 2
+theme_type_variation = &"LabelMonoSmall"
 text = "你"
 
-[node name="Spacer" type="Control" parent="SelfPanel/@VBoxContainer@38/@HBoxContainer@39" unique_id=539289751]
+[node name="Spacer" type="Control" parent="SafeArea/Field/SelfPanel/Rows/Header"]
 layout_mode = 2
 size_flags_horizontal = 3
 mouse_filter = 2
 
-[node name="SelfKd" type="Label" parent="SelfPanel/@VBoxContainer@38/@HBoxContainer@39" unique_id=228433262]
+[node name="SelfKd" type="Label" parent="SafeArea/Field/SelfPanel/Rows/Header"]
 unique_name_in_owner = true
 layout_mode = 2
+mouse_filter = 2
+theme_type_variation = &"LabelMono"
 text = "0 / 0"
 
-[node name="HealthBar" type="ProgressBar" parent="SelfPanel/@VBoxContainer@38" unique_id=1514318462]
+[node name="HealthBar" type="ProgressBar" parent="SafeArea/Field/SelfPanel/Rows"]
 unique_name_in_owner = true
-custom_minimum_size = Vector2(0, 10)
+custom_minimum_size = Vector2(244, 14)
 layout_mode = 2
+mouse_filter = 2
+theme_type_variation = &"HealthBar"
+max_value = 100.0
+value = 100.0
 show_percentage = false
 
-[node name="HealthText" type="Label" parent="SelfPanel/@VBoxContainer@38" unique_id=319405024]
+[node name="HealthText" type="Label" parent="SafeArea/Field/SelfPanel/Rows"]
 unique_name_in_owner = true
 layout_mode = 2
-theme_type_variation = &"LabelMuted"
-text = "100"
+mouse_filter = 2
+theme_type_variation = &"LabelMonoSmall"
+text = "100 / 100"
 
-[node name="OppPanel" type="PanelContainer" parent="." unique_id=1684072803]
+[node name="OppPanel" type="PanelContainer" parent="SafeArea/Field"]
 unique_name_in_owner = true
-layout_mode = 0
+layout_mode = 1
+anchors_preset = 1
 anchor_left = 1.0
 anchor_right = 1.0
-offset_left = -260.0
-offset_top = 16.0
-offset_right = -16.0
-offset_bottom = 104.0
-theme_type_variation = &"BarPanel"
+offset_left = -276.0
+offset_bottom = 84.0
+grow_horizontal = 0
+grow_vertical = 1
+mouse_filter = 2
+theme_type_variation = &"HudPanel"
 
-[node name="@VBoxContainer@40" type="VBoxContainer" parent="OppPanel" unique_id=824860263]
+[node name="Rows" type="VBoxContainer" parent="SafeArea/Field/OppPanel"]
 layout_mode = 2
+mouse_filter = 2
+theme_override_constants/separation = 6
+
+[node name="Header" type="HBoxContainer" parent="SafeArea/Field/OppPanel/Rows"]
+layout_mode = 2
+mouse_filter = 2
 theme_override_constants/separation = 8
 
-[node name="@HBoxContainer@41" type="HBoxContainer" parent="OppPanel/@VBoxContainer@40" unique_id=2065798329]
+[node name="Who" type="Label" parent="SafeArea/Field/OppPanel/Rows/Header"]
 layout_mode = 2
-theme_override_constants/separation = 8
-
-[node name="OppTitle" type="Label" parent="OppPanel/@VBoxContainer@40/@HBoxContainer@41" unique_id=1560092304]
-unique_name_in_owner = true
-layout_mode = 2
-theme_type_variation = &"LabelMuted"
+mouse_filter = 2
+theme_type_variation = &"LabelMonoSmall"
 text = "对手"
 
-[node name="Spacer" type="Control" parent="OppPanel/@VBoxContainer@40/@HBoxContainer@41" unique_id=103309299]
+[node name="Spacer" type="Control" parent="SafeArea/Field/OppPanel/Rows/Header"]
 layout_mode = 2
 size_flags_horizontal = 3
 mouse_filter = 2
 
-[node name="OppKd" type="Label" parent="OppPanel/@VBoxContainer@40/@HBoxContainer@41" unique_id=185194716]
+[node name="OppKd" type="Label" parent="SafeArea/Field/OppPanel/Rows/Header"]
 unique_name_in_owner = true
 layout_mode = 2
+mouse_filter = 2
+theme_type_variation = &"LabelMono"
 text = "0 / 0"
 
-[node name="OppHealthBar" type="ProgressBar" parent="OppPanel/@VBoxContainer@40" unique_id=370228965]
+[node name="OppHealthBar" type="ProgressBar" parent="SafeArea/Field/OppPanel/Rows"]
 unique_name_in_owner = true
-custom_minimum_size = Vector2(0, 10)
+custom_minimum_size = Vector2(244, 14)
 layout_mode = 2
+mouse_filter = 2
+theme_type_variation = &"OppHealthBar"
+max_value = 100.0
+value = 100.0
 show_percentage = false
 
-[node name="OppHealthText" type="Label" parent="OppPanel/@VBoxContainer@40" unique_id=172772556]
+[node name="OppHealthText" type="Label" parent="SafeArea/Field/OppPanel/Rows"]
 unique_name_in_owner = true
 layout_mode = 2
-theme_type_variation = &"LabelMuted"
-text = "100"
+mouse_filter = 2
+theme_type_variation = &"LabelMonoSmall"
+text = "100 / 100"
 
-[node name="RoundPanel" type="PanelContainer" parent="." unique_id=97400349]
+[node name="RoundPanel" type="PanelContainer" parent="SafeArea/Field"]
 unique_name_in_owner = true
-layout_mode = 0
+layout_mode = 1
+anchors_preset = 7
 anchor_left = 0.5
+anchor_top = 1.0
 anchor_right = 0.5
-offset_left = -140.0
-offset_top = 16.0
-offset_right = 140.0
-offset_bottom = 84.0
-theme_type_variation = &"BarPanel"
+anchor_bottom = 1.0
+offset_left = -190.0
+offset_top = -62.0
+offset_right = 190.0
+grow_horizontal = 2
+grow_vertical = 0
+mouse_filter = 2
+theme_type_variation = &"HudPanel"
 
-[node name="@VBoxContainer@42" type="VBoxContainer" parent="RoundPanel" unique_id=547406706]
+[node name="Rows" type="VBoxContainer" parent="SafeArea/Field/RoundPanel"]
 layout_mode = 2
-theme_override_constants/separation = 8
+mouse_filter = 2
+theme_override_constants/separation = 6
 
-[node name="@CenterContainer@43" type="CenterContainer" parent="RoundPanel/@VBoxContainer@42" unique_id=1662720736]
-layout_mode = 2
-size_flags_horizontal = 3
-
-[node name="RoundText" type="Label" parent="RoundPanel/@VBoxContainer@42/@CenterContainer@43" unique_id=762492736]
+[node name="RoundText" type="Label" parent="SafeArea/Field/RoundPanel/Rows"]
 unique_name_in_owner = true
 layout_mode = 2
-theme_type_variation = &"LabelMuted"
-text = "先到 10 杀"
+mouse_filter = 2
+theme_type_variation = &"LabelMonoSmall"
+text = "先到 10 杀 · 0 : 0"
+horizontal_alignment = 1
 
-[node name="RoundBar" type="ProgressBar" parent="RoundPanel/@VBoxContainer@42" unique_id=288263474]
+[node name="RoundBar" type="ProgressBar" parent="SafeArea/Field/RoundPanel/Rows"]
 unique_name_in_owner = true
 custom_minimum_size = Vector2(0, 8)
 layout_mode = 2
+mouse_filter = 2
+theme_type_variation = &"RoundBar"
 max_value = 10.0
 show_percentage = false
 
-[node name="KillFeed" type="VBoxContainer" parent="." unique_id=1931459873]
+[node name="KillFeed" type="VBoxContainer" parent="SafeArea/Field"]
 unique_name_in_owner = true
-layout_mode = 0
-offset_left = 16.0
-offset_top = 16.0
-offset_right = 300.0
-offset_bottom = 120.0
+layout_mode = 1
+anchors_preset = 5
+anchor_left = 0.5
+anchor_right = 0.5
+offset_left = -220.0
+offset_right = 220.0
+grow_horizontal = 2
+mouse_filter = 2
 theme_override_constants/separation = 4
 
-[node name="FpsLabel" type="Label" parent="." unique_id=159899571]
+[node name="FpsLabel" type="Label" parent="SafeArea/Field"]
 unique_name_in_owner = true
-layout_mode = 0
+layout_mode = 1
+anchors_preset = 3
 anchor_left = 1.0
 anchor_top = 1.0
 anchor_right = 1.0
 anchor_bottom = 1.0
-offset_left = -140.0
-offset_top = -40.0
-offset_right = -16.0
-offset_bottom = -16.0
-theme_type_variation = &"LabelMuted"
+offset_left = -120.0
+offset_top = -24.0
+grow_horizontal = 0
+grow_vertical = 0
+mouse_filter = 2
+theme_type_variation = &"LabelMonoSmall"
+text = "0 FPS"
+horizontal_alignment = 2
+
+[node name="Hints" type="Label" parent="SafeArea/Field"]
+unique_name_in_owner = true
+layout_mode = 1
+anchors_preset = 2
+anchor_top = 1.0
+anchor_bottom = 1.0
+offset_top = -24.0
+offset_right = 460.0
+grow_vertical = 0
+mouse_filter = 2
+theme_type_variation = &"LabelDim"
+text = "WASD 移动 · 空格 跳跃 · 左键射击 · V 切换视角 · ESC 设置"
+
+[node name="FeedTimer" type="Timer" parent="."]
+unique_name_in_owner = true
+wait_time = 0.25
+autostart = true

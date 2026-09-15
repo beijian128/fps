@@ -28,6 +28,8 @@ class FakeClient:
 	signal match_cancel_received(result: Dictionary)
 	signal match_status_received(result: Dictionary)
 	signal match_ended_received(result: Dictionary)
+	signal pending_match_received(result: Dictionary)
+	signal abandon_match_received(result: Dictionary)
 
 	var client_token := ""
 	var calls: Array[String] = []
@@ -62,6 +64,12 @@ class FakeClient:
 
 	func send_cancel_match() -> void:
 		calls.append("cancel")
+
+	func send_pending_match() -> void:
+		calls.append("pending")
+
+	func send_abandon_match() -> void:
+		calls.append("abandon")
 
 	func send_resync() -> void:
 		calls.append("resync")
@@ -128,17 +136,25 @@ func _run() -> void:
 	_check(_main.ui.shell.top_text() == "VETERAN_99 · LV.7 · ⛁ 1000",
 		"顶栏应显示用户名/等级/金币，得到 %s" % _main.ui.shell.top_text())
 
-	# 3c) 导航：切页只换渲染 + 高亮，不发任何请求；内容插槽挂上对应页面
-	_check(_main.ui.shell.nav_active() == "profile", "初始应高亮个人信息页")
-	_check(_main.ui.shell.page_node_name() == "ProfileScreen",
-		"内容插槽应挂 ProfileScreen，得到 %s" % _main.ui.shell.page_node_name())
+	# 3c) 大厅是入口：点卡片开子界面（整屏铺开、与大厅互斥），切页不发任何请求
+	await process_frame
+	_check(_main.ui.current_page() == "", "登录后应停在入口页，得到 %s" % _main.ui.current_page())
+	_check(_main.ui.shell.entry_visible("profile"), "入口页应显示「个人信息」入口")
+	_check(_main.ui.shell.focus_active_entry() == "profile",
+		"回到大厅焦点应落在第一张入口卡，得到 %s" % _main.ui.shell.focus_active_entry())
 	var calls_before: int = _fake.calls.size()
 	_main.ui.intent_show_page("shop")
 	await process_frame
-	_check(_main.ui.shell.nav_active() == "shop", "切到商城后应高亮商城")
-	_check(_main.ui.shell.page_node_name() == "ShopScreen",
-		"内容插槽应换成 ShopScreen，得到 %s" % _main.ui.shell.page_node_name())
+	_check(_main.ui.current_page() == "shop", "打开商城后当前页应是 shop")
+	_check(_main.ui.page_node_name() == "ShopScreen",
+		"应显示 ShopScreen，得到 %s" % _main.ui.page_node_name())
+	_check(_main.ui.page_visible("shop") and not _main.ui.shell.visible,
+		"子界面整屏铺开时大厅应隐藏")
 	_check(_fake.calls.size() == calls_before, "切页面不该产生请求，得到 %s" % str(_fake.calls))
+	# 子界面上的「返回大厅」回到入口页（而不是回到某个子界面）
+	_main.ui.intent_close_page()
+	await process_frame
+	_check(_main.ui.current_page() == "" and _main.ui.shell.visible, "返回大厅应回到入口页")
 	_main.ui.intent_show_page("profile")
 
 	# 4) 开始匹配 → MATCHING + join

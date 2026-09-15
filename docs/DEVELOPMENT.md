@@ -39,9 +39,11 @@
      从 ECS 世界独立推期望值，与 store 全量逐项比对）。所以**先补 `rep.Set`、再补断言**
  3. **客户端** —— 分三层，改动前先看 `godot_client/README.md` 的「界面结构」：
     - 界面：`godot_client/ui/`（`screen_manager` 是唯一状态源，屏幕只渲染 + 发意图）+
-      `godot_client/theme/tokens.gd`（颜色/字号/间距的唯一真相，改完跑 `theme/build_theme.gd`
-      重生成主题）。界面**不得**绕过 `screen_manager` 改状态、也不得直接调 `fps_client`。
-      `.tscn` 由 `tools/gen_ui_scenes.gd` 生成，不要手写节点块。
+      `godot_client/theme/tokens.gd`（颜色/圆角/字号/间距的取值来源，改完跑
+      `theme/build_theme.gd` 重生成主题）。界面**不得**绕过 `screen_manager` 改状态、
+      也不得直接调 `fps_client`。`.tscn` 是手写的，结构与样式直接在编辑器里改。
+      界面规范以 godot-prompter 的 `godot-ui` / `responsive-ui` / `hud-system` 三个技能为准
+      （焦点导航、可点区域下限、锚点与安全区）。
     - 渲染与输入：`godot_client/scripts/main.gd`（相机、插值、玩法反馈）
     - 传输层：`godot_client/scripts/fps_client.gd`
     - 传输层细节：`fps_client.gd`（上行有 Notify 三条：`match.join`（空消息）/ `game.cmd`

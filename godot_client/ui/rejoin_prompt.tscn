@@ -1,0 +1,94 @@
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="Theme" path="res://theme/tactical_theme.tres" id="1_theme"]
+[ext_resource type="Script" path="res://ui/rejoin_prompt.gd" id="2_prompt"]
+
+[node name="RejoinPrompt" type="Control"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+theme = ExtResource("1_theme")
+script = ExtResource("2_prompt")
+
+[node name="Scrim" type="ColorRect" parent="."]
+unique_name_in_owner = true
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="Center" type="CenterContainer" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+
+[node name="Panel" type="PanelContainer" parent="Center"]
+custom_minimum_size = Vector2(520, 0)
+layout_mode = 2
+theme_type_variation = &"DialogPanel"
+
+[node name="Rows" type="VBoxContainer" parent="Center/Panel"]
+layout_mode = 2
+theme_override_constants/separation = 12
+
+[node name="Title" type="Label" parent="Center/Panel/Rows"]
+layout_mode = 2
+theme_type_variation = &"LabelTitle"
+text = "你有一场没打完的对局"
+
+[node name="MatchInfo" type="Label" parent="Center/Panel/Rows"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_type_variation = &"LabelMonoMuted"
+text = "对局进行中"
+
+[node name="Detail" type="Label" parent="Center/Panel/Rows"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_type_variation = &"LabelMuted"
+text = "回到对局：接着打这一局，比分与战绩都还在。
+放弃对局：只把你从这一局里释放出来 —— 本局不再计入你的战绩，对手那一局继续打完。"
+autowrap_mode = 2
+
+[node name="Divider" type="HSeparator" parent="Center/Panel/Rows"]
+layout_mode = 2
+
+[node name="Actions" type="HBoxContainer" parent="Center/Panel/Rows"]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="Abandon" type="Button" parent="Center/Panel/Rows/Actions"]
+mouse_default_cursor_shape = 2
+tooltip_text = "放弃这一局：你不再收帧、不再计入本局战绩；对手的对局不受影响"
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 44)
+layout_mode = 2
+size_flags_horizontal = 3
+theme_type_variation = &"GhostButton"
+text = "放弃对局"
+
+[node name="Reconnect" type="Button" parent="Center/Panel/Rows/Actions"]
+mouse_default_cursor_shape = 2
+tooltip_text = "回到原来那一局：同一个对局、同一个槽位，比分与战绩都还在"
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 44)
+layout_mode = 2
+size_flags_horizontal = 3
+theme_type_variation = &"PrimaryButton"
+text = "回到对局"
+
+[node name="Hint" type="Label" parent="Center/Panel/Rows"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_type_variation = &"LabelDim"
+text = "Enter 确认 · ESC 稍后决定（点「开始匹配」仍会回到这场对局）"
+autowrap_mode = 2

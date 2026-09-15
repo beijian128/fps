@@ -1,54 +1,80 @@
-[gd_scene format=3]
+[gd_scene load_steps=3 format=3]
 
-[ext_resource type="Theme" path="res://theme/tactical_theme.tres" id="1_4kj2c"]
-[ext_resource type="Script" path="res://ui/shop_screen.gd" id="2_gvg7f"]
+[ext_resource type="Theme" path="res://theme/tactical_theme.tres" id="1_theme"]
+[ext_resource type="Script" path="res://ui/shop_screen.gd" id="2_shop"]
 
-[node name="ShopScreen" type="Control" unique_id=1653082164]
+[node name="ShopScreen" type="Control"]
 layout_mode = 3
-anchors_preset = 0
-size_flags_horizontal = 3
-size_flags_vertical = 3
-theme = ExtResource("1_4kj2c")
-script = ExtResource("2_gvg7f")
-
-[node name="@VBoxContainer@25" type="VBoxContainer" parent="." unique_id=1045554235]
-layout_mode = 0
+anchors_preset = 15
 anchor_right = 1.0
 anchor_bottom = 1.0
-size_flags_horizontal = 3
-size_flags_vertical = 3
-theme_override_constants/separation = 12
+grow_horizontal = 2
+grow_vertical = 2
+theme = ExtResource("1_theme")
+script = ExtResource("2_shop")
 
-[node name="@HBoxContainer@26" type="HBoxContainer" parent="@VBoxContainer@25" unique_id=1667947926]
+[node name="Rows" type="VBoxContainer" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+theme_override_constants/separation = 16
+
+[node name="Header" type="HBoxContainer" parent="Rows"]
 layout_mode = 2
 theme_override_constants/separation = 12
 
-[node name="Title" type="Label" parent="@VBoxContainer@25/@HBoxContainer@26" unique_id=1316109446]
+[node name="Back" type="Button" parent="Rows/Header"]
+mouse_default_cursor_shape = 2
 unique_name_in_owner = true
+custom_minimum_size = Vector2(140, 44)
 layout_mode = 2
+theme_type_variation = &"GhostButton"
+text = "← 返回大厅"
+
+[node name="Title" type="Label" parent="Rows/Header"]
+layout_mode = 2
+size_flags_vertical = 4
 theme_type_variation = &"LabelTitle"
 text = "商城"
 
-[node name="Spacer" type="Control" parent="@VBoxContainer@25/@HBoxContainer@26" unique_id=576120021]
+[node name="Spacer" type="Control" parent="Rows/Header"]
 layout_mode = 2
 size_flags_horizontal = 3
 mouse_filter = 2
 
-[node name="Coins" type="Label" parent="@VBoxContainer@25/@HBoxContainer@26" unique_id=827493595]
+[node name="Coins" type="Label" parent="Rows/Header"]
 unique_name_in_owner = true
 layout_mode = 2
-theme_type_variation = &"LabelAccent"
+size_flags_vertical = 4
+theme_type_variation = &"LabelMonoSub"
 text = "⛁ 0"
 
-[node name="Scroll" type="ScrollContainer" parent="@VBoxContainer@25" unique_id=534946471]
-unique_name_in_owner = true
+[node name="EscHint" type="Label" parent="Rows/Header"]
+layout_mode = 2
+size_flags_vertical = 4
+mouse_filter = 2
+theme_type_variation = &"LabelDim"
+text = "ESC 返回大厅"
+
+[node name="Scroll" type="ScrollContainer" parent="Rows"]
 layout_mode = 2
 size_flags_vertical = 3
+horizontal_scroll_mode = 0
 
-[node name="Grid" type="GridContainer" parent="@VBoxContainer@25/Scroll" unique_id=2004772446]
+[node name="Pad" type="MarginContainer" parent="Rows/Scroll"]
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_constants/margin_top = 4
+theme_override_constants/margin_right = 4
+theme_override_constants/margin_bottom = 4
+
+[node name="Grid" type="GridContainer" parent="Rows/Scroll/Pad"]
 unique_name_in_owner = true
 layout_mode = 2
 size_flags_horizontal = 3
 theme_override_constants/h_separation = 12
 theme_override_constants/v_separation = 12
-columns = 4
+columns = 3

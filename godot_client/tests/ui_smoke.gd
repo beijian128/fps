@@ -74,10 +74,14 @@ func _run() -> void:
 	# 商城页挂上卡片（目录 4 件：rifle/pistol/shotgun/medkit）
 	_main.ui.intent_show_page("shop")
 	await process_frame
-	_check(_main.ui.shell.page_node_name() == "ShopScreen", "应挂上商城页")
-	var shop: Control = _main.ui.shell.get_node_or_null("%Content").get_child(0)
+	_check(_main.ui.page_node_name() == "ShopScreen", "应显示商城子界面")
+	_check(_main.ui.page_visible("shop") and not _main.ui.shell.visible,
+		"子界面应整屏铺开且大厅隐藏")
+	var shop: Control = _main.ui.shop_screen
 	_check(shop.cards().size() >= 4, "商城应至少有 4 件商品，得到 %d" % shop.cards().size())
-	_main.ui.intent_show_page("profile")
+	_main.ui.intent_close_page()
+	await process_frame
+	_check(_main.ui.current_page() == "" and _main.ui.shell.visible, "返回大厅应回到入口页")
 
 	# ---- 匹配：对等客户端 + 本机进队 ----
 	_peer = PairHelper.new(root, "uismokepeer")

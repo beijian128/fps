@@ -43,6 +43,10 @@ type Instance struct {
 	uids    []string // 玩家 uid，下标即 player_idx（槽位 0/1）
 
 	pendingFull [sim.MaxPlayers]bool // 本 tick 需要下发全量的槽位（重连 / resync）
+	// left 标记「这个槽位的玩家已经放弃了对局」（见 Release）。它与「空槽位」是两回事：
+	// uid 仍然是他的账号 ID（对局开始时就是两个人），只是这个人从此不再收帧、不再被
+	// 结算。对局本身照常推进 —— 对手那一局不因为有人放弃而中断。
+	left [sim.MaxPlayers]bool
 
 	lastSeen [sim.MaxPlayers]time.Time // 各槽位最近一次上行时间（仅 run goroutine 读写）
 	onExit   func()                    // 实例自行退出时的回调（由 game 组件设置）
@@ -151,15 +155,45 @@ func (i *Instance) finishMatch(out sim.MatchOutcome) {
 	}
 }
 
-// presentUIDs 返回在座玩家的 uid（跳过空槽位）。
+// presentUIDs 返回在座玩家的 uid（跳过空槽位与已经放弃对局的槽位）。
 func (i *Instance) presentUIDs() []string {
 	out := make([]string, 0, len(i.uids))
-	for _, uid := range i.uids {
-		if uid != "" {
+	for slot, uid := range i.uids {
+		if uid != "" && !i.left[slot] {
 			out = append(out, uid)
 		}
 	}
 	return out
+}
+
+// Release 把一个玩家从本实例里释放出来（客户端选择「放弃对局」）。
+//
+// 语义（spec）：**只释放这一个玩家**，不终结实例 ——
+//   - 他从此不再收增量/全量帧（broadcast 跳过，presentUIDs 也不含他），
+//   - 结算时他的槽位带上 left 标记，logic 据此把他排除在战绩之外，
+//   - onMatchEnded 也不推给他（他已经不在这个对局里了）。
+//
+// 实例本身继续跑：对手还在局里，他那一局照常打到分出胜负。槽位（也就是那个静止的
+// 角色）留在世界里的意义正在于此 —— 对手仍然能把这一局打完、拿到正常的结算。
+//
+// 命令投进实例 goroutine（唯一的写者），所以 left/pendingFull 不需要加锁。
+func (i *Instance) Release(slot int) {
+	if slot < 0 || slot >= len(i.uids) {
+		return
+	}
+	i.enqueue(func() {
+		i.left[slot] = true
+		// 被释放的槽位不该再收全量帧（它已经不收任何帧了）。
+		i.pendingFull[slot] = false
+		if len(i.presentUIDs()) == 0 {
+			// 最后一个玩家也走了：实例已经没有任何接收者，留它只是空转一条 goroutine
+			// 和一个 Jolt 世界。与空闲回收那条路径等价（Stop + onExit + return）。
+			defer i.Stop()
+			if i.onExit != nil {
+				i.onExit()
+			}
+		}
+	})
 }
 
 func (i *Instance) uidAt(slot int) string {
@@ -181,6 +215,7 @@ func (i *Instance) matchEnded(out sim.MatchOutcome) *protos.MatchEnded {
 			Uid:    i.uidAt(slot),
 			Kills:  out.Kills[slot],
 			Deaths: out.Deaths[slot],
+			Left:   i.left[slot],
 		})
 	}
 	return msg
@@ -204,6 +239,7 @@ func (i *Instance) reportMatch(out sim.MatchOutcome) {
 			Uid:    i.uidAt(slot),
 			Kills:  out.Kills[slot],
 			Deaths: out.Deaths[slot],
+			Left:   i.left[slot],
 		})
 	}
 	reply := &protos.RecordMatchReply{}
@@ -228,6 +264,11 @@ func (i *Instance) broadcast() {
 
 	var deltaUIDs, fullUIDs []string
 	for slot, uid := range i.uids {
+		if uid == "" || i.left[slot] {
+			// 空槽位与「已放弃对局」的玩家都不收帧：前者没人，后者已经从这个对局里
+			// 释放出去了（给他推帧等于把他继续留在这一局里）。
+			continue
+		}
 		if i.pendingFull[slot] {
 			i.pendingFull[slot] = false
 			fullUIDs = append(fullUIDs, uid)

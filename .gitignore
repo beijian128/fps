@@ -11,6 +11,10 @@ JoltPhysics/
 # Godot editor cache
 godot_client/.godot/
 
+# 第二个客户端的本地 APPDATA（见 docs/DEVELOPMENT.md：用 APPDATA=.client2 起客户端 B）
+# 里面是那台"客户端"自己的凭证与偏好，属于本机运行数据。
+.client2/
+
 # Build outputs
 joltgo/build/
 joltgo/joltgo.exe

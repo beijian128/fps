@@ -11,6 +11,9 @@ var _manager = null
 func _ready() -> void:
 	%BackToLobby.pressed.connect(func() -> void: _manager.intent_back_to_lobby())
 	%PlayAgain.pressed.connect(func() -> void: _manager.intent_play_again())
+	%Scrim.color = Tokens.SCRIM_STRONG
+	%PlayAgain.focus_neighbor_left = %BackToLobby.get_path()
+	%BackToLobby.focus_neighbor_right = %PlayAgain.get_path()
 
 func bind(manager) -> void:
 	_manager = manager
@@ -54,3 +57,15 @@ func _on_state_changed(state: int) -> void:
 	var screen_manager := preload("res://ui/screen_manager.gd")
 	if state == screen_manager.State.RESULT:
 		show_result(_manager.last_result(), _manager.my_slot())
+		_play_entrance()
+
+## _play_entrance 结算层入场：整层淡入。结算是一个「时刻」而不是一帧切换，补间把注意力
+## 从战场收回到结果上；tween 自己驱动自己，不需要 _process 轮询。
+func _play_entrance() -> void:
+	# 只淡入整层，不动 position：Panel 挂在 CenterContainer 里，容器每次重排都会把
+	# 子节点的 position 覆盖回去，位移补间会变成看不见的抖动。
+	modulate = Color(1, 1, 1, 0)
+	var tween := create_tween()
+	tween.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	tween.tween_property(self, "modulate:a", 1.0, 0.22)
+	%PlayAgain.grab_focus()

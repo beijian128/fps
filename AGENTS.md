@@ -53,8 +53,8 @@ fps/
 ├── godot_client/            # 客户端（Godot 4）
 │   ├── scenes/main.tscn     # Main(Node3D) + FpsClient + Sfx + UI（CanvasLayer，挂 screen_manager）
 │   ├── theme/               # ★ 界面主题：tokens.gd（颜色/字号/间距唯一真相）+ build_theme.gd + tactical_theme.tres（生成物）
-│   ├── ui/                  # ★ 界面层：screen_manager（唯一状态源）+ shell/login/profile/shop/bag/item_card/match_status_bar/result_overlay/hud
-│   ├── tools/gen_ui_scenes.gd # 一次性生成 ui/*.tscn 骨架（改结构改这里再重跑，别手写 .tscn 节点块）
+│   ├── ui/                  # ★ 界面层：screen_manager（唯一状态源）+ backdrop（全局底图）+ settings（本机偏好）+ shell（大厅入口）/login/profile/shop/bag/item_card/match_status_bar/result_overlay/hud/pause_screen/rejoin_prompt（进大厅时问「回到对局 / 放弃对局」）
+│   ├── assets/ui/           # ★ 界面美术（程序化生成物，tools/gen_art.py 产出）：底图 / 头像 / 道具与入口图标
 │   ├── scripts/main.gd      # 输入/相机/双玩家渲染/插值/玩法反馈（受击红闪 + 命中音）+ 把 FpsClient 事件派发给 UI
 │   ├── scripts/world_store.gd # 本地世界状态：实体-属性增量累积成完整世界（按名字取值）
 │   ├── scripts/fps_client.gd  # 传输层（pomelo 握手/登录/匹配/心跳/Frame 编解码 + Logic Request/Response + 重连/看门狗）
@@ -123,6 +123,8 @@ fps/
 - **增量帧**每 tick 推 `onFrame`，只含本帧变化的 `(实体, 属性, 终值)`；同一属性一帧内改多次只发终值，值没变的写入不产生流量（连静态几何也每 tick 写、但不下发）。
 - **重连回局**：会话 UID（accountID）就是回局的钥匙 → `match.join` 先向所有 game 节点 fan-out RPC `game.game.rejoin` → 命中则走 `bindGameOn`（RPC 请持有该会话的 gate 把 `gameServerId` 写进会话数据）+ `pushMatched`（推 `onMatched`），与首次匹配同一条收尾路径 → 客户端收到 `onMatched` 后先清空本地世界、再主动发 `game.game.resync` → 服务端把该槽位的**下一帧**标为全量，单独下发 full 帧（含 Schema）。因为 full 帧是**先清空再整体覆盖**，即使中间先到了几帧增量也会被整帧盖掉——不存在「onMatched 与 full 帧谁先到」的竞态。
 - **一局结束**：`matchSystem` 判出胜负即产出结算快照（`sim.DrainOutcome`，取走即清），`game` 先广播本 tick 增量帧、再推 `onMatchEnded`、再异步上报战绩，最后终结实例。客户端收到 `onMatchEnded` 必须离开对局态 —— 实例一终结帧流就断，否则 2.5s 接收看门狗会把「本局结束」误判成掉线。
+- **登录进大厅先问一句「有没有没打完的局」**：客户端登录/resume 成功后立刻发 `match.match.pending`（Request/Response，服务端只查询：fan-out `game.rejoin`，**不写会话数据、不推 onMatched、不入队**）。命中就弹 `ui/rejoin_prompt`（「回到对局 / 放弃对局」），ESC = 稍后决定（点「开始匹配」仍走回局分支）。不许替他自动选：服务端权威、对局不因掉线暂停，自动重连会把他从大厅拽进战场，自动放弃等于替他改战绩。
+- **放弃对局 = 释放这一个玩家，不是终结对局实例**：`match.match.abandon` → match 找到托管节点 → `RPCTo("game.game.leave")` → `Instance.Release(slot)`。四件事同时成立：① 摘掉 `uidToInst/uidToIndex`（他的 `game.cmd`/回局查询都不再命中，可立刻重新匹配）；② `Instance.left[slot]=true`（不再给他推帧）；③ 结算槽位带 `left` 标记、logic **跳过他的战绩**、`onMatchEnded` 不推给他；④ **实例照常跑**，对手那一局继续打到分出胜负并正常入账（只在最后一个在场玩家也离开时终结）。`SlotResult.left` 就是为了区分「中途放弃」与「压根没这个槽位」——后者（练习局）照旧不入账。
 - 断线：客户端 1s 重连；**接收看门狗 2.5s 只在匹配后生效**（匹配等待期无帧流属正常）。实例的空闲回收超时是 **30 分钟**，同时也是掉线回局窗口。
 - 服务间通信走 etcd（服务发现）+ NATS（RPC）+ Redis（共享状态：账号、凭证、会话归属、匹配队列、钱包、背包），见 `joltgo/deploy/`。
 
@@ -159,8 +161,17 @@ fps/
 - **构建**：Jolt 必须经 CMake `add_subdirectory` 编译（保证 NDEBUG/指令集宏与静态库一致）；UCRT64 与 MINGW64 不能混用；`build.ps1` 硬编码 `C:\msys64`；运行需 `joltgo.exe` 与 `libjolt_c.dll` 同目录。
 - **Godot 4**：材质属性用 `metallic`（不是 Godot 3 的 `metalness`）；命令行运行用 `preload` 而非 `class_name`；typed for 循环需 4.2+。
 - **客户端界面分层**：`screen_manager` 是**唯一状态源**（`boot → login → lobby → matching → in_match → result → lobby`），界面只做「渲染 `state()` + 发意图（`intent_*`）」；协议在 `fps_client.gd`、世界渲染与输入在 `main.gd`。登录成功后**不自动匹配**，要玩家在大厅点「开始匹配」。
-- **颜色/字号/间距只能来自 `theme/tokens.gd`**：界面里禁止写死十六进制颜色或裸字号；改配色只改 tokens，然后跑 `godot --headless --path godot_client --script res://theme/build_theme.gd` 重生成 `tactical_theme.tres`（`tests/theme_test.gd` 会挡住「改了忘重跑」）。
-- **界面不许用固定像素定位**（`offset_*`）：用锚点 + Container 布局，窗口拉伸才不破版（HUD 的四个贴边面板是唯一例外）。`.tscn` 由 `tools/gen_ui_scenes.gd` 生成，**不要手写节点块**（`PackedScene.pack()` 不会自动设 `owner`，漏了就只有根节点）。
+- **进大厅的询问框是浮层，不进 `State` 枚举**：`ui/rejoin_prompt`（回到对局 / 放弃对局）与 `pause_screen` 同一性质 —— 由 `screen_manager._rejoin_prompt_open` 控制，只在大厅（`_page == ""`）显示；`_set_state()` 里一旦离开 LOBBY/MATCHING 就自动收起。放弃的结果以服务端应答为准（失败**保留**框并提示重试，不假装成功）；`intent_escape()` 只收起它（= 稍后决定），绝不顺手放弃 —— 破坏性动作不该有一个「顺手按到」的键。新增可点控件要同步补 `tests/ui_feedback_test.gd` 的三张清单（手型 / 提示行 / tooltip）。
+- **大厅是入口，子界面整屏铺开**：`_page == ""` 时显示大厅（`shell`：三张入口卡 + 底部匹配条），否则显示那一个子界面（`profile` / `shop` / `bag` 各是一整屏，带「返回大厅」）。大厅与子界面**互斥**、由 `screen_manager._apply_visibility()` 统一切换 —— 子界面不是嵌在大厅里的一块内容，所以它们互不知道对方存在，也不会出现「大厅露出半屏、子界面缩在右边」。返回大厅一律走 `intent_close_page()`。
+- **每个可点的东西都要有「能点 + 点完有回音」**（`tests/ui_feedback_test.gd` 会挡）：① 交互控件 `mouse_default_cursor_shape = 2`（手型）；② 每个主界面有一行操作提示（`HUD` 底部一行按键、子界面「ESC 返回大厅」、大厅「点卡片 / Tab / Enter」）；③ 设置项与关键按钮有 `tooltip_text`；④ 动作结果走通知栈 `ui/toast`（购买 / 装备 / 匹配 / 取消 / 掉线重连…），`screen_manager.notify()` 是唯一入口；⑤ `ESC` 统一走 `intent_escape()`：对局内开合设置层、子界面里返回大厅 —— 同一个键只做一件事，不会出现「在大厅按 ESC 毫无反应」。没有回音的动作等于没做完。
+- **界面美术是程序化生成物**：`godot_client/assets/ui/*.png` 由 `godot_client/tools/gen_art.py`（Pillow，4 倍超采样抗锯齿）生成，改图改脚本再重跑。这与项目「纯程序化美术」一致（模型来自 `body_entity.gd`、音效来自 `sfx.gd`），也让图标可复现、可 diff、无素材授权问题。要换成 AI 出图时只替换同名 png，界面代码一行不用改；`.import` 文件必须一起提交（新增图片后跑一次 `godot --headless --path godot_client --import`）。
+- **界面根节点必须铺满父级**（`anchors_preset = 15`，即 `anchor_right = anchor_bottom = 1.0`）：屏幕的直接父级是 `CanvasLayer` 或内容插槽，**都不是容器**，不会替子节点摆位置。漏掉这一步，锚点全为 0 的根节点尺寸就是 `0×0`，表现为「整个大厅塌进左上角一小块」「锚在右下角的血条跑到屏幕外」——这类塌陷不报错、不崩，只会静默错位，**改完界面要用真实窗口看一眼**（无头断言测不到它）。
+- **对局内 ESC = 设置层，不是暂停**：`ui/pause_screen` 打开时**服务端照常推进**（对手还在打），所以文案必须是「设置 / 返回战场 + 对局仍在继续」，不能写「已暂停」。它不进 `State` 枚举（是对局态上的浮层），离开 `IN_MATCH` 时自动收起 —— 否则鼠标会卡在「未捕获」状态，结算层上点不动按钮。
+- **本机偏好走 `ui/settings.gd`，不要塞进 tokens**：tokens 是**所有玩家共享的视觉真相**（改它要重生成主题），`settings.gd` 是**每个玩家各自的本机开关**（灵敏度 / 界面缩放 / 受击反馈强度 / HUD 安全区，存 `user://settings.cfg`）。改偏好的入口只有 `screen_manager.intent_set_setting()`，由 `apply_settings()` 一次性推给窗口（`content_scale_factor`）与 HUD（安全区）；灵敏度与受击强度由 `main.gd` 现读。
+- **HUD 面板挂在 `%SafeArea/Field` 下**：安全区留白 = 视口尺寸 × 偏好百分比（默认 5%，即标题安全区 90%；电视/投影会裁掉边缘 3%–10%，玩家可拉到 0 贴边）。`%SafeArea` 是 `MarginContainer`（负责四边留白），里面**再垫一层普通 `Control`（`Field`）当锚点参照系** —— `MarginContainer` 是容器，面板直接挂进去会被拉成同一个满格矩形叠在一起。
+- **界面按技能清单走**：**本项目自己的规范沉淀在个人技能 `fps-ui-rules`**（分层 / 八条不可协商 / 改界面的固定动作 / 踩过的坑 + `references/theme-vocabulary.md` 主题词汇表），改 `godot_client/` 界面时先加载它；通用技巧再往下看 godot-prompter 的 `godot-ui`（Control / 容器 / 锚点 / 焦点导航）、`responsive-ui`（分辨率 / 安全区）、`hud-system`（对局内 HUD）。可执行底线只有三条：交互控件有**可见焦点**并在屏幕打开时 `grab_focus()`；可点区域高度 ≥ `tokens.HIT_MIN`；HUD 整层 `mouse_filter = IGNORE`。
+- **主题取值集中在 `theme/tokens.gd`**：`theme/build_theme.gd` 把它写成 `theme/tactical_theme.tres`，`tests/theme_test.gd` 校验两者一致（改了 tokens 要重跑生成，否则测试红）。界面优先用 `theme_type_variation` 挑样式；只有必须参与运算的取值（按血量取色、按用户名取头像色）才 import tokens。要加新样式就在 `build_theme.gd` 里加变体，别在界面代码里 `duplicate()` 出界面私有的样式盒。
+- **`ui/*.tscn` 是手写的**：结构与样式直接在编辑器里改，没有生成器要同步。布局用锚点 + Container；HUD 的四个贴边面板用「锚点 + `offset_*` 贴角」（`offset_*` 在贴边元素上是正确工具，在普通内容里会被窗口拉伸拉坏）。
 - **多进程部署**：单二进制 `joltgo.exe -type gate|account|logic|match|game` 五角色（**只有 `-type` 与 `-redis` 两个 flag**，
   gate 的 WS 端口 8080 写死），先起 etcd + nats + redis（`deploy/start-all.ps1` 一把梭）；服务日志在
   `deploy/gate.log` / `account.log` / `logic.log` / `match.log` / `game.log`（pitaya 写 stderr，`*.out.log` 是 stdout 基本为空）。
@@ -230,6 +241,10 @@ Godot_..._console.exe --headless --path godot_client --script res://tests/screen
 Godot_..._console.exe --headless --path godot_client --script res://tests/profile_screen_test.gd # 个人信息页（等级/经验条/统计派生/战绩列表/空态）
 Godot_..._console.exe --headless --path godot_client --script res://tests/item_grid_test.gd    # 商城与背包卡片（数量 1–99、买不起禁用、装备/卸下、空态）
 Godot_..._console.exe --headless --path godot_client --script res://tests/hud_test.gd          # 对局内 HUD（血条 / K/D / 回合进度 / 击杀播报 / 准星命中）
+Godot_..._console.exe --headless --path godot_client --script res://tests/ui_feedback_test.gd  # 交互反馈（手型光标 / 操作提示 / 工具提示 / 通知栈 / ESC）
+Godot_..._console.exe --headless --path godot_client --script res://tests/pause_settings_test.gd # 设置层：ESC 开合 / 离开对局自动收起 / 四项偏好落到位
+Godot_..._console.exe --headless --path godot_client --script res://tests/pending_match_decode_test.gd # 进大厅询问 / 放弃对局的 Response 解码与 mid 认领
+Godot_..._console.exe --headless --path godot_client --script res://tests/rejoin_prompt_test.gd # 进大厅的询问框：弹框 / 回到对局 / 放弃 / 稍后决定（ESC）
 
 # 冒烟：需要活集群（etcd + NATS + redis + gate/account/logic/match/game 五进程）
 Godot_..._console.exe --headless --path godot_client --script res://tests/login_smoke.gd            # 注册 → LoginReply → 断线 → resume → onMatched（两客户端配对）
@@ -237,6 +252,7 @@ Godot_..._console.exe --headless --path godot_client --script res://tests/ws_smo
 Godot_..._console.exe --headless --path godot_client --script res://tests/rejoin_smoke.gd           # 登录 + 断线回同一局
 Godot_..._console.exe --headless --path godot_client --script res://tests/logic_smoke.gd            # 注册 + Logic 状态 / 购买 / 装备
 Godot_..._console.exe --headless --path godot_client --script res://tests/profile_smoke.gd          # logic.logic.profile 端到端（档案查询）
+Godot_..._console.exe --headless --path godot_client --script res://tests/abandon_smoke.gd          # 进大厅问「有没有没打完的局」→ 放弃 → 对手那一局照常继续
 ```
 
 > `rejoin_smoke.gd` 是新协议下**唯一**端到端验证「重连回到同一对局」的测试（同一
@@ -269,7 +285,7 @@ Godot_..._console.exe --headless --path godot_client --script res://tests/profil
 - 改**会话归属 / 多节点行为** → 动 `joltgo/online/` + `joltgo/gate/session.go`（+ 调用方 `account/` `match/`），
   跑 `go test ./online ./gate ./account ./match`。
 - 改客户端渲染/输入 → 只动 `godot_client/`，Godot 直接 F5。
-- **改客户端界面** → 只动 `godot_client/ui/`（结构与逻辑）与 `godot_client/theme/`（配色与字号）：改颜色先改 `tokens.gd` 再跑 `build_theme.gd` 重生成主题；改布局改 `tools/gen_ui_scenes.gd` 后重跑生成；跑 `theme_test` + `screen_flow_test` + 受影响屏幕自己的测试。界面**不得**绕过 `screen_manager` 直接改状态或直接调 `fps_client`。
+- **改客户端界面** → 只动 `godot_client/ui/`（结构与逻辑）与 `godot_client/theme/`（配色与圆角/字号/间距）：改颜色先改 `tokens.gd` 再跑 `build_theme.gd` 重生成主题，改布局直接改对应 `.tscn`；跑 `theme_test` + `screen_flow_test` + `hud_test` + 受影响屏幕自己的测试。界面**不得**绕过 `screen_manager` 直接改状态或直接调 `fps_client`。
 ## Logic 局外数据边界
 
 - `logic` 是无状态 backend：客户端经 gate 随机路由到任意 logic 节点，节点只把钱包/背包写入 Redis；账号登录成功后由 account 通过 `logic.logic.online` 确保档案存在。

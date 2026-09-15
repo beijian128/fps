@@ -31,6 +31,8 @@ signal profile_received(result: Dictionary)        # PlayerProfileReply（个人
 signal match_cancel_received(result: Dictionary)   # MatchCancelReply
 signal match_status_received(result: Dictionary)   # onMatchStatus 推送（匹配期队列状态）
 signal match_ended_received(result: Dictionary)    # onMatchEnded 推送（本局结束的权威信号）
+signal pending_match_received(result: Dictionary)  # PendingMatchReply（进大厅时问「有没有没打完的局」）
+signal abandon_match_received(result: Dictionary)  # AbandonMatchReply（放弃对局的结果）
 
 const WS_URL := "ws://localhost:8080/"
 const RETRY_SECS := 1.0
@@ -219,6 +221,21 @@ func send_match_join() -> void:
 func send_cancel_match() -> void:
 	_send_tracked("match.match.cancel", PackedByteArray())
 
+## send_pending_match 问服务端「我这个账号有没有没打完的局」（Request/Response）。
+##
+## 登录成功、刚进大厅时问一次：命中才弹「回到对局 / 放弃对局」的询问框。查询本身
+## **不改变任何状态**（服务端不写会话数据、不推 onMatched、不入队），所以拿到
+## found=false 时什么都不用做 —— 大厅照常显示。
+func send_pending_match() -> void:
+	_send_tracked("match.match.pending", PackedByteArray())
+
+## send_abandon_match 放弃那场没打完的局（Request/Response）。
+##
+## 服务端只把**本玩家**从对局实例里释放出来（不再收帧、不再参与结算），对手那一局
+## 照常打完 —— 所以这里既不会收到 onMatchEnded，本地世界也没有任何东西要清。
+func send_abandon_match() -> void:
+	_send_tracked("match.match.abandon", PackedByteArray())
+
 ## send_profile 拉取个人档案（Request/Response；身份来自会话，客户端不自报 uid）。
 func send_profile() -> void:
 	_send_tracked("logic.logic.profile", PackedByteArray())
@@ -269,6 +286,12 @@ func _emit_request_failure(route: String, reason: String) -> void:
 		profile_received.emit({"_failed": true, "reason": reason})
 	elif route == "match.match.cancel":
 		match_cancel_received.emit({"ok": false, "reason": reason, "_failed": true})
+	elif route == "match.match.pending":
+		# 问不到就当「没有存量对局」：宁可少弹一次询问框，也不要把玩家堵在一个点不动的框前
+		# （他仍然可以点「开始匹配」，服务端的回局分支照旧会把他送回原局）。
+		pending_match_received.emit({"found": false, "reason": reason, "_failed": true})
+	elif route == "match.match.abandon":
+		abandon_match_received.emit({"ok": false, "reason": reason, "_failed": true})
 	elif route.begins_with("logic."):
 		logic_state_received.emit(_logic_failure(reason))
 	else:
@@ -751,6 +774,20 @@ func _on_response(data: PackedByteArray, is_err: bool) -> void:
 		else:
 			match_cancel_received.emit(cancel)
 		return
+	if route == "match.match.pending":
+		var probe := _decode_pending_match_reply(payload)
+		if bool(probe.get("_malformed", false)):
+			_emit_request_failure(route, "internal")
+		else:
+			pending_match_received.emit(probe)
+		return
+	if route == "match.match.abandon":
+		var abandon := _decode_abandon_reply(payload)
+		if bool(abandon.get("_malformed", false)):
+			_emit_request_failure(route, "internal")
+		else:
+			abandon_match_received.emit(abandon)
+		return
 	if route.begins_with("logic."):
 		var result := _decode_logic_state(payload)
 		if bool(result.get("_malformed", false)):
@@ -1046,6 +1083,45 @@ func _decode_match_cancel_reply(buf: PackedByteArray) -> Dictionary:
 		else:
 			break
 	return d
+
+## PendingMatchReply：found=1(varint) match_id=2(string)。
+func _decode_pending_match_reply(buf: PackedByteArray) -> Dictionary:
+	var d := {"found": false, "match_id": ""}
+	var i := 0
+	while i < buf.size():
+		var tag: Array = _read_varint_checked(buf, i)
+		if not bool(tag[2]):
+			return {"_malformed": true}
+		i = int(tag[1])
+		var field := int(tag[0]) >> 3
+		var wire := int(tag[0]) & 7
+		if wire == WIRE_VARINT:
+			var r: Array = _read_varint_checked(buf, i)
+			if not bool(r[2]):
+				return {"_malformed": true}
+			i = int(r[1])
+			if field == 1:
+				d["found"] = int(r[0]) != 0
+		elif wire == WIRE_LEN:
+			var rl: Array = _read_varint_checked(buf, i)
+			if not bool(rl[2]):
+				return {"_malformed": true}
+			i = int(rl[1])
+			var size := int(rl[0])
+			if size < 0 or i + size > buf.size():
+				return {"_malformed": true}
+			var sub: PackedByteArray = buf.slice(i, i + size)
+			i += size
+			if field == 2:
+				d["match_id"] = sub.get_string_from_utf8()
+		else:
+			break
+	return d
+
+## AbandonMatchReply：ok=1 reason=2 —— 与 MatchCancelReply 的字段布局完全相同
+## （都是「成功与否 + 原因码」的最小应答），所以共用同一个解码器。
+func _decode_abandon_reply(buf: PackedByteArray) -> Dictionary:
+	return _decode_match_cancel_reply(buf)
 
 ## MatchStatus（onMatchStatus 推送载荷）：queued_players=1 waited_seconds=2。
 func _decode_match_status(buf: PackedByteArray) -> Dictionary:

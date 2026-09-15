@@ -20,6 +20,8 @@ const WALK_SPEED := 8.0
 const RUN_SPEED := 14.0
 const LOOK_SPEED := 0.0022
 const PITCH_LIMIT := PI / 2.0 - 0.05
+## 受击红闪的满强度透明度。设置里的「受击反馈强度」是它的倍率，0 = 整层关掉。
+const HIT_FLASH_ALPHA := 0.28
 # 用 preload 而不是 class_name：纯命令行运行时（未在编辑器里导入过）也能解析。
 const BodyEntityScript := preload("res://scripts/body_entity.gd")
 const WorldStore := preload("res://scripts/world_store.gd")
@@ -102,6 +104,7 @@ func _ready() -> void:
 	# main 只管渲染与输入 —— 两条路各自订阅同一个 client，互不依赖。
 	ui.setup(fps_client, self)
 	ui.state_changed.connect(_on_ui_state)
+	ui.pause_changed.connect(_on_pause_changed)
 	_on_ui_state(ui.state())
 
 ## _on_ui_state 界面状态是「我是否在对局中」的唯一来源：只有 IN_MATCH 才上报命令、
@@ -215,6 +218,12 @@ func _process(delta: float) -> void:
 		fps_client.send_command(move, _yaw, jump, shoot, origin, dir)
 
 func _input(event: InputEvent) -> void:
+	# ESC 最先处理、且不受「鼠标是否已捕获」限制：它现在开合对局内的设置层，
+	# 而设置层打开时鼠标正是**未捕获**的 —— 放在下面那个 return 之后，ESC 就再也关不掉面板了。
+	if event is InputEventKey and event.pressed and event.keycode == KEY_ESCAPE:
+		# 一个键两件事，取决于现在在哪：对局里开合设置层，子界面里返回大厅（见 intent_escape）。
+		ui.intent_escape()
+		return
 	if Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
 		return
 	if event is InputEventMouseMotion:
@@ -224,20 +233,36 @@ func _input(event: InputEvent) -> void:
 	elif event is InputEventKey and event.pressed and event.keycode == KEY_V:
 		_third_person = not _third_person
 		_apply_camera_mode()
-	elif event is InputEventKey and event.pressed and event.keycode == KEY_ESCAPE:
-		# 显式释放鼠标（不依赖引擎对 ESC 的默认行为）。
-		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 
 func _unhandled_input(event: InputEvent) -> void:
 	if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
+		return
+	# 设置层开着时点击属于界面：拖滑块不该顺手把鼠标锁回去、更不该把点击当成开火。
+	if ui.is_paused():
 		return
 	# 只有对局中才用「点击画面」重新锁定鼠标；大厅与登录页上的点击属于界面。
 	if _matched and event is InputEventMouseButton and event.pressed:
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
 func _apply_look(rel: Vector2) -> void:
-	_yaw -= rel.x * LOOK_SPEED
-	_pitch = clampf(_pitch - rel.y * LOOK_SPEED, -PITCH_LIMIT, PITCH_LIMIT)
+	var sens := LOOK_SPEED * look_scale()
+	_yaw -= rel.x * sens
+	_pitch = clampf(_pitch - rel.y * sens, -PITCH_LIMIT, PITCH_LIMIT)
+
+## look_scale 鼠标灵敏度倍率（设置面板可调）。每次现读：少一份「设置存一份、运行时又存一份」
+## 的同步状态，也就少一个忘记同步的地方。
+func look_scale() -> float:
+	if ui == null:
+		return 1.0
+	return ui.settings().value("mouse_sensitivity")
+
+## _on_pause_changed 设置层开合时同步鼠标：打开要能点（可见），关掉要回到瞄准（捕获）。
+## 只有「关掉且确实还在对局里」才重新捕获 —— 否则对局结束时自动收起会把鼠标锁死在结算层上。
+func _on_pause_changed(paused: bool) -> void:
+	if paused:
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	elif ui.state() == ScreenManager.State.IN_MATCH:
+		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
 func _apply_camera_mode() -> void:
 	_avatar.visible = _third_person
@@ -426,8 +451,15 @@ func _remove_body(id: int) -> void:
 
 ## 受击红闪：全屏红色快速淡入淡出。
 func _flash_hit() -> void:
+	var strength := 1.0
+	if ui != null:
+		strength = ui.settings().value("hit_flash")
+	if strength <= 0.001:
+		# 关掉整层红闪（光敏 / 晕动）。信息不会因此丢失：受击音效照常响、
+		# 血条与血量数字照常掉 —— 红闪只是同一件事的第二条通道。
+		return
 	var tw := _hit_flash.create_tween()
-	tw.tween_property(_hit_flash, "color:a", 0.28, 0.03)
+	tw.tween_property(_hit_flash, "color:a", HIT_FLASH_ALPHA * strength, 0.03)
 	tw.tween_property(_hit_flash, "color:a", 0.0, 0.35)
 
 ## _build_fx_layer 建一个只放全屏受击红闪的 CanvasLayer。

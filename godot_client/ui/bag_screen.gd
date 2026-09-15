@@ -8,6 +8,13 @@ var _cards: Array = []
 
 func _ready() -> void:
 	%ToShop.pressed.connect(func() -> void: _manager.intent_show_page("shop"))
+	%Back.pressed.connect(func() -> void: _manager.intent_close_page())
+	# 打开这一屏时焦点落在「返回大厅」；从空态的「去商城」按钮进来的玩家也不会迷路。
+	visibility_changed.connect(_on_visibility_changed)
+
+func _on_visibility_changed() -> void:
+	if visible and is_visible_in_tree():
+		%Back.grab_focus()
 
 func bind(manager) -> void:
 	_manager = manager

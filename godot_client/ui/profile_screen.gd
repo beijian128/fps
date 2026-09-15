@@ -9,6 +9,16 @@ var _manager = null
 var _profile := {}
 var _rows: Array = []
 
+func _ready() -> void:
+	%Back.pressed.connect(func() -> void: _manager.intent_close_page())
+	# 屏幕被打开（而不是每次数据刷新）时把焦点放到「返回大厅」：render 会随数据反复调用，
+	# 在那里抢焦点会把玩家正在滚动的列表顶回去。
+	visibility_changed.connect(_on_visibility_changed)
+
+func _on_visibility_changed() -> void:
+	if visible and is_visible_in_tree():
+		%Back.grab_focus()
+
 func bind(manager) -> void:
 	_manager = manager
 
@@ -18,7 +28,8 @@ func render(profile: Dictionary) -> void:
 	_profile = profile
 	var username: String = "—" if _manager == null else String(_manager.username())
 	%Username.text = username
-	%Avatar.color = _avatar_color(username)
+	# 头像是同一张剪影贴图按用户名染色：不打包 N 张头像，也不会出现两张一模一样的默认脸。
+	%Avatar.self_modulate = _avatar_color(username)
 	%Level.text = level_text()
 	%XP.max_value = maxf(1.0, float(profile.get("xp_for_next_level", 200)))
 	%XP.value = float(profile.get("xp_into_level", 0))
@@ -94,19 +105,17 @@ func _row_node(row: Dictionary, won: bool) -> Control:
 	var result := Label.new()
 	result.text = String(row["result"])
 	result.custom_minimum_size = Vector2(28, 0)
-	result.add_theme_color_override("font_color", Tokens.SUCCESS if won else Tokens.DANGER)
+	result.theme_type_variation = "LabelSuccess" if won else "LabelDanger"
 	var score := Label.new()
 	score.text = String(row["score"])
 	score.custom_minimum_size = Vector2(72, 0)
-	score.add_theme_font_override("font", Tokens.mono_font())
+	score.theme_type_variation = "LabelMono"
 	var opponent := Label.new()
 	opponent.text = String(row["opponent"])
 	opponent.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	opponent.add_theme_color_override("font_color", Tokens.TEXT)
 	var duration := Label.new()
 	duration.text = String(row["duration"])
-	duration.add_theme_font_override("font", Tokens.mono_font())
-	duration.add_theme_color_override("font_color", Tokens.TEXT_MUTED)
+	duration.theme_type_variation = "LabelMonoMuted"
 	for node in [result, score, opponent, duration]:
 		box.add_child(node)
 	return panel

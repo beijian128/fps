@@ -1,83 +1,109 @@
-[gd_scene format=3]
+[gd_scene load_steps=3 format=3]
 
-[ext_resource type="Theme" path="res://theme/tactical_theme.tres" id="1_srhja"]
-[ext_resource type="Script" path="res://ui/login_screen.gd" id="2_7d8cg"]
+[ext_resource type="Theme" path="res://theme/tactical_theme.tres" id="1_theme"]
+[ext_resource type="Script" path="res://ui/login_screen.gd" id="2_login"]
 
-[node name="LoginScreen" type="Control" unique_id=801237058]
+[node name="LoginScreen" type="Control"]
 layout_mode = 3
-anchors_preset = 0
-size_flags_horizontal = 3
-size_flags_vertical = 3
-theme = ExtResource("1_srhja")
-script = ExtResource("2_7d8cg")
-
-[node name="Backdrop" type="ColorRect" parent="." unique_id=2138137072]
-layout_mode = 0
+anchors_preset = 15
 anchor_right = 1.0
 anchor_bottom = 1.0
-size_flags_horizontal = 3
-size_flags_vertical = 3
-mouse_filter = 2
-color = Color(0.03, 0.035, 0.043, 0.86)
+grow_horizontal = 2
+grow_vertical = 2
+theme = ExtResource("1_theme")
+script = ExtResource("2_login")
 
-[node name="Center" type="CenterContainer" parent="." unique_id=1460569443]
-layout_mode = 0
-anchor_right = 1.0
-anchor_bottom = 1.0
-size_flags_horizontal = 3
-size_flags_vertical = 3
-
-[node name="Card" type="PanelContainer" parent="Center" unique_id=341790245]
+[node name="Backdrop" type="ColorRect" parent="."]
 unique_name_in_owner = true
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+
+[node name="Center" type="CenterContainer" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+
+[node name="Card" type="PanelContainer" parent="Center"]
 custom_minimum_size = Vector2(420, 0)
 layout_mode = 2
-theme_type_variation = &"CardPanel"
+theme_type_variation = &"DialogPanel"
 
-[node name="@VBoxContainer@7" type="VBoxContainer" parent="Center/Card" unique_id=1057439500]
+[node name="Rows" type="VBoxContainer" parent="Center/Card"]
 layout_mode = 2
-theme_override_constants/separation = 8
+theme_override_constants/separation = 12
 
-[node name="Title" type="Label" parent="Center/Card/@VBoxContainer@7" unique_id=144774196]
-unique_name_in_owner = true
+[node name="Brand" type="Label" parent="Center/Card/Rows"]
 layout_mode = 2
-theme_type_variation = &"LabelTitle"
+theme_type_variation = &"LabelAccent"
 text = "JOLT FPS"
 
-[node name="Subtitle" type="Label" parent="Center/Card/@VBoxContainer@7" unique_id=1910280290]
-unique_name_in_owner = true
+[node name="Subtitle" type="Label" parent="Center/Card/Rows"]
 layout_mode = 2
 theme_type_variation = &"LabelMuted"
-text = "登录后进入大厅：个人信息 · 商城 · 背包 · 匹配"
+text = "服务端权威 · 20Hz 固定步长 · 双人对枪"
 
-[node name="User" type="LineEdit" parent="Center/Card/@VBoxContainer@7" unique_id=1958263570]
-unique_name_in_owner = true
+[node name="Divider" type="HSeparator" parent="Center/Card/Rows"]
 layout_mode = 2
-placeholder_text = "用户名（3-16 位字母/数字/下划线）"
 
-[node name="Pass" type="LineEdit" parent="Center/Card/@VBoxContainer@7" unique_id=1852849509]
+[node name="User" type="LineEdit" parent="Center/Card/Rows"]
+mouse_default_cursor_shape = 2
 unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 44)
 layout_mode = 2
+tooltip_text = "3-16 位字母 / 数字 / 下划线，大小写不敏感"
+placeholder_text = "用户名（3-16 位字母 / 数字 / 下划线）"
+caret_blink = true
+
+[node name="Pass" type="LineEdit" parent="Center/Card/Rows"]
+mouse_default_cursor_shape = 2
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 44)
+layout_mode = 2
+tooltip_text = "6-64 位；密码只用 bcrypt 哈希存储，服务端日志里也只记长度"
 placeholder_text = "密码（6-64 位）"
 secret = true
+caret_blink = true
 
-[node name="Error" type="Label" parent="Center/Card/@VBoxContainer@7" unique_id=645924930]
+[node name="Error" type="Label" parent="Center/Card/Rows"]
 unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 20)
 layout_mode = 2
 theme_type_variation = &"LabelDanger"
-autowrap_mode = 3
 
-[node name="@HBoxContainer@8" type="HBoxContainer" parent="Center/Card/@VBoxContainer@7" unique_id=1123623606]
+[node name="Actions" type="HBoxContainer" parent="Center/Card/Rows"]
 layout_mode = 2
 theme_override_constants/separation = 8
 
-[node name="Login" type="Button" parent="Center/Card/@VBoxContainer@7/@HBoxContainer@8" unique_id=1681212562]
+[node name="Login" type="Button" parent="Center/Card/Rows/Actions"]
+mouse_default_cursor_shape = 2
+tooltip_text = "用已有账号登录（凭证会保存在本机，下次自动续期）"
 unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 44)
 layout_mode = 2
+size_flags_horizontal = 3
 theme_type_variation = &"PrimaryButton"
 text = "登录"
 
-[node name="Register" type="Button" parent="Center/Card/@VBoxContainer@7/@HBoxContainer@8" unique_id=1778817048]
+[node name="Register" type="Button" parent="Center/Card/Rows/Actions"]
+mouse_default_cursor_shape = 2
+tooltip_text = "注册新账号：用户名没被占用时立刻创建"
 unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 44)
 layout_mode = 2
-theme_type_variation = &"GhostButton"
+size_flags_horizontal = 3
 text = "注册"
+
+[node name="Hint" type="Label" parent="Center/Card/Rows"]
+layout_mode = 2
+theme_type_variation = &"LabelDim"
+text = "首次游玩：填好用户名与密码后点「注册」，之后启动会自动续期登录。"
+autowrap_mode = 2

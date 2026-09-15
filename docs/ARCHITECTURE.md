@@ -226,10 +226,17 @@ Go 侧（sim）；包装层内部只保留两个物理层自身的状态：刚�
 6. 客户端每渲染帧上报一条 `game.game.cmd`（输入 + 射击**合并成一条**），
    由 gate 定点路由到托管该对局的 game 节点。
 7. 连接断开后客户端每秒自动重连：重新握手 → 用本地保存的凭证 `account.account.resume`
-   （会话重新 `Bind` 到**同一个账号 ID**）→ 发 `match.match.join`；
-   match 先向各 game 节点 fan-out `game.rejoin`，命中存量实例则走与首次匹配相同的收尾
-   （写会话数据 + 推 `onMatched`），客户端回到**同一对局、同一槽位**、不入匹配队列；
-   客户端随后发 `game.resync` 请求 full 帧把本地世界整体重建（未命中则按新玩家重新匹配）。
+   （会话重新 `Bind` 到**同一个账号 ID**）→ **进大厅的第一件事是问 `match.match.pending`**：
+   命中存量对局就弹「回到对局 / 放弃对局」的询问框。
+   - **回到对局**：发 `match.match.join`；match 先向各 game 节点 fan-out `game.rejoin`，
+     命中存量实例则走与首次匹配相同的收尾（写会话数据 + 推 `onMatched`），客户端回到
+     **同一对局、同一槽位**、不入匹配队列；客户端随后发 `game.resync` 请求 full 帧把
+     本地世界整体重建（未命中则按新玩家重新匹配）。
+   - **放弃对局**：发 `match.match.abandon` → match fan-out 找到托管节点 → `RPCTo
+     ("game.game.leave")` 把**这一个玩家**从实例里释放（见下）。
+
+   为什么必须问一句而不是替他决定：服务端权威且**对局不因掉线暂停**，自动重连会把他瞬间
+   从大厅拽进战场，自动放弃则是拿一个他没做过的决定去改写他的战绩。
 
 这种「服务端权威 + 固定 tick + 推送 + 客户端插值」让物理/游戏逻辑只存在于一处，
 模拟快慢与客户端数量/帧率无关，客户端换引擎也不影响逻辑。
@@ -424,6 +431,32 @@ resume(token)                ─▶ 解析 token（Redis sess:{token}）──�
   命中盒尤其不能漏 —— 它要到下一 tick 的 `hitboxFollowSystem` 才跟随角色，留在
   死亡点的话，之后飞来的弹丸还会打中一个「已经复活在别处的人」
 
+### 放弃对局（把单个玩家从对局里释放出来）
+
+玩家在大厅选择「放弃对局」时（`match.match.abandon` → `game.game.leave`），服务端做的
+**不是**终结对局实例，而是把**这一个玩家**摘出去：
+
+| 位置 | 变化 |
+| --- | --- |
+| `game.Component` 注册表 | 摘掉 `uidToInst` / `uidToIndex` —— 他的 `game.cmd` 查不到实例，回局查询也不再命中 |
+| `Instance.left[slot]` | 置位：`broadcast` 不再给他推帧，`presentUIDs`（推送目标）也不含他 |
+| 结算 | 槽位带 `left` 标记 → logic **跳过他的战绩**；`onMatchEnded` 不推给他 |
+| 对局实例 | **照常跑**：对手那一局不受影响，能继续打到分出胜负并正常结算 |
+
+语义上的三个要点：
+
+1. **对局不能被「放弃」连坐**。1v1 里两个人都在自己的客户端里，谁都没资格结束对方那一局；
+   实例只在**最后一个在场玩家也离开**（或 30 分钟无人上行）时才终结。
+2. **「放弃」与「空槽位」必须能区分**。`SlotResult` 因此带 `left` 字段：`uid==""` 且
+   `left=false` 才是「这个槽位压根没人」，那种局（练习/调试入口）照旧不入账；
+   `uid!=""` 且 `left=true` 是「本来就是双人局，只是有一位不参与结算」—— 对手照常入账。
+3. **释放是幂等的即时动作**。RPC 返回 `ok=true` 时注册表已经干净（先摘映射、再投实例
+   命令），所以玩家可以立刻重新匹配，不会又被领回旧局。
+
+放弃者的角色**留在世界里**（没有输入 → 站在原地，也不再开火）：这不是遗漏，而是让对手
+那一局仍然可以打完。要改成「对手离场即判胜」或「角色从场上移除」都是产品决定，
+会改变对手看到的结果。
+
 ## 关键设计决策与坑
 
 ### Jolt 必须和包装层用同一套编译参数
@@ -502,16 +535,31 @@ Jolt 的 Release 构建定义 `NDEBUG`、`JPH_DEBUG_RENDERER`、`JPH_PROFILE_ENA
 （`boot → login → lobby → matching → in_match → result → lobby`）与数据快照
 （`logic_state()` / `profile()` / `last_result()` / `match_status()`），并订阅 `FpsClient` 的
 全部业务信号；`shell` / `login_screen` / `profile_screen` / `shop_screen` / `bag_screen` /
-`match_status_bar` / `result_overlay` / `hud` 只做两件事 —— 按 `state()` 渲染、向
+`match_status_bar` / `result_overlay` / `hud` / `pause_screen` / `rejoin_prompt` 只做两件事 —— 按 `state()` 渲染、向
 `intent_*` 发意图。`main.gd` 只剩输入/相机/世界渲染与「玩法反馈」（受击红闪、命中音、
-准星点亮），不再持有任何界面控件。协议细节仍然只在 `fps_client.gd` 里。
+准星点亮），不再持有任何界面控件。协议细节仍然只在 `fps_client.gd` 里。对局内 ESC 打开
+`pause_screen`（本机设置：灵敏度 / 界面缩放 / 受击反馈强度 / HUD 安全区）—— 它**不暂停对局**，
+服务端照常推进，所以它不进 `State` 枚举、只作为对局态上的浮层，离开 `IN_MATCH` 时自动收起。
+进大厅时的 `rejoin_prompt`（回到对局 / 放弃对局）也是同一性质的浮层：由 `screen_manager` 的
+`match.pending` 应答决定显隐，ESC 只收起它（= 稍后决定），绝不顺手放弃。
 
-界面用 `theme/tokens.gd`（颜色/字号/间距唯一真相）+ 生成的 `tactical_theme.tres`；字体是显式
-系统字体回退链，不打包字体文件。`.tscn` 由 `tools/gen_ui_scenes.gd` 生成。
+本机偏好单独放在 `ui/settings.gd`（存 `user://settings.cfg`），与 `theme/tokens.gd` 分工明确：
+tokens 是全体玩家共享的视觉真相，settings 是每个玩家各自的本机开关；改偏好只走
+`screen_manager.intent_set_setting()`，再由 `apply_settings()` 推给窗口与 HUD。
+
+HUD 的所有面板挂在 `%SafeArea/Field` 下，留白 = 视口尺寸 × 安全区百分比（默认 5%，即标题安全区
+90%：电视/投影会裁掉边缘 3%–10%）。另外，所有界面根节点都铺满父级（`anchors_preset = 15`）——
+屏幕的直接父级是 `CanvasLayer` 或内容插槽，都不是容器；根节点一旦是 `0×0`，整个界面会静默塌进
+左上角（见 `AGENTS.md` §5）。
+
+界面用 `theme/tokens.gd`（颜色/圆角/字号/间距的取值来源）+ 生成的 `tactical_theme.tres`；
+字体是显式系统字体回退链，不打包字体文件。`ui/*.tscn` 是手写的场景文件，结构与样式直接在编辑器
+里维护。界面规范以 godot-prompter 的 `godot-ui`（布局 / 主题 / 焦点导航）、`responsive-ui`
+（分辨率 / 拉伸 / 安全区）、`hud-system`（对局内 HUD）三个技能为准。
 
 `logic` 是无状态 backend。gate 对 `logic.logic.state` / `.purchase` / `.equip` / `.profile` 做随机节点路由，因此任意 logic 节点都可以处理同一账号；真实状态只在 Redis。账号登录/注册/resume 进入成功路径时，account 先通过 `logic.logic.online` 向随机 logic 节点发送上线事件，logic 确保钱包、背包与玩家档案存在；该 RPC 失败会中止登录并返回 `internal`，此后才轮换 token、绑定会话，所以旧 token 和已有会话不会被破坏。
 
-战绩由 `game` 在对局结束时**主动**上报：`logic.logic.recordmatch`（remote 注册，`app.RPC` 单发，不重试不去重，失败只记日志）。logic 侧只认「两个槽位都是真实玩家」才入账，并把对局写进累计统计与最近 20 场历史。等级不落库，由 XP 现算（`logic/level.go`）。
+战绩由 `game` 在对局结束时**主动**上报：`logic.logic.recordmatch`（remote 注册，`app.RPC` 单发，不重试不去重，失败只记日志）。logic 侧要求每个槽位「要么是真实玩家、要么带中途放弃标记（`SlotResult.left`）」才入账：放弃者本人跳过（spec：他不再参与这一局结算），对手照常记；空槽位而没有放弃标记的（练习/调试入口）照旧不入账。入账的对局写进累计统计与最近 20 场历史。等级不落库，由 XP 现算（`logic/level.go`）。
 
 钱包、背包与玩家档案分别由 `persist/protos/player/player.proto` 生成的独立包持久化为 `REDB#2:<accountID>:0`、`REDB#1:<accountID>:0` 与 `REDB#3:<accountID>:0`；最近 20 场历史是 List `playerhist:<accountID>`（`LPUSH` + `LTRIM 0 19`，新的在前）。新账号档案的初始钱包为 1000 金币，商城目录由 logic 内置，当前包含 rifle、pistol、shotgun 与 medkit。
 

@@ -1,58 +1,107 @@
-[gd_scene format=3]
+[gd_scene load_steps=3 format=3]
 
-[ext_resource type="Theme" path="res://theme/tactical_theme.tres" id="1_3aqih"]
-[ext_resource type="Script" path="res://ui/bag_screen.gd" id="2_2kuwv"]
+[ext_resource type="Theme" path="res://theme/tactical_theme.tres" id="1_theme"]
+[ext_resource type="Script" path="res://ui/bag_screen.gd" id="2_bag"]
 
-[node name="BagScreen" type="Control" unique_id=169289611]
+[node name="BagScreen" type="Control"]
 layout_mode = 3
-anchors_preset = 0
-size_flags_horizontal = 3
-size_flags_vertical = 3
-theme = ExtResource("1_3aqih")
-script = ExtResource("2_2kuwv")
-
-[node name="@VBoxContainer@29" type="VBoxContainer" parent="." unique_id=97642471]
-layout_mode = 0
+anchors_preset = 15
 anchor_right = 1.0
 anchor_bottom = 1.0
-size_flags_horizontal = 3
-size_flags_vertical = 3
+grow_horizontal = 2
+grow_vertical = 2
+theme = ExtResource("1_theme")
+script = ExtResource("2_bag")
+
+[node name="Rows" type="VBoxContainer" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+theme_override_constants/separation = 16
+
+[node name="Header" type="HBoxContainer" parent="Rows"]
+layout_mode = 2
 theme_override_constants/separation = 12
 
-[node name="Title" type="Label" parent="@VBoxContainer@29" unique_id=822663953]
+[node name="Back" type="Button" parent="Rows/Header"]
+mouse_default_cursor_shape = 2
 unique_name_in_owner = true
+custom_minimum_size = Vector2(140, 44)
 layout_mode = 2
+theme_type_variation = &"GhostButton"
+text = "← 返回大厅"
+
+[node name="Title" type="Label" parent="Rows/Header"]
+layout_mode = 2
+size_flags_vertical = 4
 theme_type_variation = &"LabelTitle"
 text = "背包"
 
-[node name="Scroll" type="ScrollContainer" parent="@VBoxContainer@29" unique_id=572986759]
+[node name="Spacer" type="Control" parent="Rows/Header"]
+layout_mode = 2
+size_flags_horizontal = 3
+mouse_filter = 2
+
+[node name="ToShop" type="Button" parent="Rows/Header"]
+mouse_default_cursor_shape = 2
+unique_name_in_owner = true
+custom_minimum_size = Vector2(120, 44)
+layout_mode = 2
+theme_type_variation = &"GhostButton"
+text = "去商城"
+
+[node name="EscHint" type="Label" parent="Rows/Header"]
+layout_mode = 2
+size_flags_vertical = 4
+mouse_filter = 2
+theme_type_variation = &"LabelDim"
+text = "ESC 返回大厅"
+
+[node name="Scroll" type="ScrollContainer" parent="Rows"]
 unique_name_in_owner = true
 layout_mode = 2
 size_flags_vertical = 3
+horizontal_scroll_mode = 0
 
-[node name="Grid" type="GridContainer" parent="@VBoxContainer@29/Scroll" unique_id=1750701986]
+[node name="Pad" type="MarginContainer" parent="Rows/Scroll"]
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_constants/margin_top = 4
+theme_override_constants/margin_right = 4
+theme_override_constants/margin_bottom = 4
+
+[node name="Grid" type="GridContainer" parent="Rows/Scroll/Pad"]
 unique_name_in_owner = true
 layout_mode = 2
 size_flags_horizontal = 3
 theme_override_constants/h_separation = 12
 theme_override_constants/v_separation = 12
-columns = 4
+columns = 3
 
-[node name="EmptyState" type="VBoxContainer" parent="." unique_id=15109555]
+[node name="EmptyState" type="PanelContainer" parent="Rows"]
 unique_name_in_owner = true
-visible = false
-layout_mode = 0
-theme_override_constants/separation = 12
+layout_mode = 2
+size_flags_vertical = 3
+theme_type_variation = &"CardPanel"
 
-[node name="EmptyText" type="Label" parent="EmptyState" unique_id=1476759609]
-unique_name_in_owner = true
+[node name="Center" type="CenterContainer" parent="Rows/EmptyState"]
+layout_mode = 2
+
+[node name="Hint" type="VBoxContainer" parent="Rows/EmptyState/Center"]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="Title" type="Label" parent="Rows/EmptyState/Center/Hint"]
+layout_mode = 2
+theme_type_variation = &"LabelSub"
+text = "背包是空的"
+horizontal_alignment = 1
+
+[node name="Body" type="Label" parent="Rows/EmptyState/Center/Hint"]
 layout_mode = 2
 theme_type_variation = &"LabelMuted"
-text = "背包还是空的，去商城看看"
-
-[node name="ToShop" type="Button" parent="EmptyState" unique_id=460810297]
-unique_name_in_owner = true
-layout_mode = 2
-size_flags_horizontal = 0
-theme_type_variation = &"GhostButton"
-text = "去商城"
+text = "去商城买点武器，装备后会在对局里生效。"
+horizontal_alignment = 1

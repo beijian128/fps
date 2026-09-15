@@ -33,7 +33,12 @@ func (r *Remote) RecordMatch(ctx context.Context, msg *protos.RecordMatchMsg) (*
 			slots = append(slots, MatchSlot{})
 			continue
 		}
-		slots = append(slots, MatchSlot{UID: slot.Uid, Kills: slot.Kills, Deaths: slot.Deaths})
+		slots = append(slots, MatchSlot{
+			UID:    slot.Uid,
+			Kills:  slot.Kills,
+			Deaths: slot.Deaths,
+			Left:   slot.Left,
+		})
 	}
 	applied, err := r.service.RecordMatch(ctx, MatchResult{
 		MatchID:         msg.MatchId,

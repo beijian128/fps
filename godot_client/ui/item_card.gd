@@ -9,6 +9,16 @@ const Tokens := preload("res://theme/tokens.gd")
 const QTY_MIN := 1
 const QTY_MAX := 99
 
+## 图标表：item_id → 贴图。素材由 tools/gen_art.py 程序化生成，换图只换 png。
+## 表里没有的 id 回退到背包图标 —— 服务端加新道具时界面不会变成一块空白。
+const ICONS := {
+	"rifle": preload("res://assets/ui/item_rifle.png"),
+	"pistol": preload("res://assets/ui/item_pistol.png"),
+	"shotgun": preload("res://assets/ui/item_shotgun.png"),
+	"medkit": preload("res://assets/ui/item_medkit.png"),
+}
+const ICON_FALLBACK := preload("res://assets/ui/item_bag.png")
+
 var _item := {}
 var _mode := "shop"
 var _manager = null
@@ -60,7 +70,8 @@ func is_equipped() -> bool:
 func _refresh() -> void:
 	var display_name := String(_item.get("display_name", "物品"))
 	%Name.text = display_name
-	%Icon.color = _icon_color(item_id())
+	%Icon.texture = ICONS.get(item_id(), ICON_FALLBACK)
+	%Icon.self_modulate = _icon_color(item_id())
 	%Qty.text = str(_quantity) if _mode == "shop" else "×%d" % int(_item.get("owned_quantity", 0))
 	if _mode == "shop":
 		var price := int(_item.get("price", 0))
@@ -81,11 +92,9 @@ func _refresh() -> void:
 		%Action.text = "卸下" if is_equipped() else "装备"
 		%Action.disabled = not equippable
 		%Action.theme_type_variation = "PrimaryButton" if is_equipped() else "GhostButton"
-	# 已装备的卡片加一圈琥珀描边（商城与背包都能看出来）
-	var box := get_theme_stylebox("panel").duplicate() as StyleBoxFlat
-	if box != null:
-		box.border_color = Tokens.ACCENT if is_equipped() else Tokens.BORDER
-		add_theme_stylebox_override("panel", box)
+	# 已装备的卡片换成琥珀描边变体（商城与背包都能一眼看出来）——样式只在主题里定义，
+	# 代码只切变体，不 duplicate 出一份界面私有的样式盒。
+	theme_type_variation = "EquippedCard" if is_equipped() else "CardPanel"
 
 ## _icon_color 用 item_id 取一个稳定色（同一个物品每次打开颜色一致）。
 func _icon_color(id: String) -> Color:

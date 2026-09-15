@@ -30,6 +30,8 @@ class FakeClient:
 	signal match_cancel_received(result: Dictionary)
 	signal match_status_received(result: Dictionary)
 	signal match_ended_received(result: Dictionary)
+	signal pending_match_received(result: Dictionary)
+	signal abandon_match_received(result: Dictionary)
 
 	var client_token := ""
 	var calls: Array[String] = []
@@ -45,6 +47,12 @@ class FakeClient:
 
 	func send_cancel_match() -> void:
 		calls.append("cancel")
+
+	func send_pending_match() -> void:
+		calls.append("pending")
+
+	func send_abandon_match() -> void:
+		calls.append("abandon")
 
 	func send_resync() -> void:
 		calls.append("resync")

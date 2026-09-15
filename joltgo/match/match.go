@@ -25,6 +25,7 @@ const (
 	statusRoute     = "onMatchStatus"      // match → 客户端 push 的 route（匹配期队列状态）
 	gameCreateRoute = "game.game.create"   // game 服务的创建对局 RPC route（三段式）
 	gameRejoinRoute = "game.game.rejoin"   // 回局查询 RPC route（三段式）
+	gameLeaveRoute  = "game.game.leave"    // 把玩家从存量实例里释放出来的 RPC route
 	bindGameRoute   = "gate.gate.bindgame" // 请玩家所属 gate 写会话数据（三段式）
 	tickInterval    = time.Second          // 抢配对的轮询间隔
 )
@@ -92,15 +93,15 @@ func (c *Component) Join(ctx context.Context, msg *protos.JoinMsg) {
 	c.tryMatch(ctx)
 }
 
-// tryRejoin 询问所有 game 节点是否托管着该 uid 的存量实例。命中则走与首次匹配
-// 相同的收尾路径（写会话数据 + 推 onMatched），返回 true。
+// findInstance 询问所有 game 节点是否托管着该 uid 的存量实例，返回第一个命中的。
 //
 // 只按 uid 定址：会话对象本身用不上 —— 会话数据由该 uid 所在的 gate 去写
-// （bindGameOn），不是在这里改。
-func (c *Component) tryRejoin(ctx context.Context, uid string) bool {
+// （bindGameOn），不是在这里改。抽出来是因为三处用同一份查询：
+// tryRejoin（回局）/ Pending（进大厅时问「我有没有没打完的局」）/ Abandon（放弃对局）。
+func (c *Component) findInstance(ctx context.Context, uid string) (*RejoinResult, bool) {
 	servers, err := c.app.GetServersByType(gameServerType)
 	if err != nil || len(servers) == 0 {
-		return false
+		return nil, false
 	}
 	replies := map[string]*RejoinResult{}
 	for id, srv := range servers {
@@ -117,7 +118,13 @@ func (c *Component) tryRejoin(ctx context.Context, uid string) bool {
 			GameServerID: srv.ID,
 		}
 	}
-	hit, ok := firstFound(replies)
+	return firstFound(replies)
+}
+
+// tryRejoin 命中存量实例则走与首次匹配相同的收尾路径（写会话数据 + 推 onMatched），
+// 返回 true。
+func (c *Component) tryRejoin(ctx context.Context, uid string) bool {
+	hit, ok := c.findInstance(ctx, uid)
 	if !ok {
 		return false
 	}
@@ -174,6 +181,73 @@ func (c *Component) pushMatchStatus(ctx context.Context) {
 			log.Printf("match: push %s to %s failed: %v", statusRoute, entry.UID, err)
 		}
 	}
+}
+
+// Pending 是客户端请求 handler（route "match.pending"）：**只查询**「我有没有没打完
+// 的局」，命中就把 match_id 回给客户端，由客户端弹「回到对局 / 放弃对局」的询问框。
+//
+// 与 match.join 的回局分支共用一份查询（findInstance），但**故意什么都不改**：
+// 不写会话数据、不推 onMatched、不入队。进大厅只是想知道「要不要弹这个框」——
+// 在这里顺手把人塞回对局，就等于把「询问」变成「强制重连」，玩家没得选。
+func (c *Component) Pending(ctx context.Context, _ *protos.PendingMatchMsg) (*protos.PendingMatchReply, error) {
+	s := c.app.GetSessionFromCtx(ctx)
+	if s == nil || s.UID() == "" {
+		// 未登录的会话问不出任何东西（也没有 uid 可查）。查询类接口不报错，回 found=false。
+		log.Printf("match: pending rejected: session not bound")
+		return &protos.PendingMatchReply{Found: false}, nil
+	}
+	hit, ok := c.findInstance(ctx, s.UID())
+	if !ok {
+		return &protos.PendingMatchReply{Found: false}, nil
+	}
+	log.Printf("match: uid %s has pending match %s on game %s as slot %d",
+		s.UID(), hit.MatchID, hit.GameServerID, hit.PlayerIdx)
+	return &protos.PendingMatchReply{Found: true, MatchId: hit.MatchID}, nil
+}
+
+// Abandon 是客户端请求 handler（route "match.abandon"）：放弃那场没打完的局。
+//
+// **不是终止对局**：只是请托管实例的 game 节点把当前玩家释放出来（route
+// game.game.leave）—— 他不再收帧、不再参与结算；对局本身继续跑，对手那一局照常打到
+// 分出胜负。所以这里唯一做的事就是把 RPC 转过去，外加把会话里那份对局归属清掉。
+//
+// reason：released（已释放）/ not_found（此刻查不到他的存量对局）/ unauthenticated /
+// internal（RPC 不通）。ok=false 时客户端保留询问框、提示失败，不假装成功。
+func (c *Component) Abandon(ctx context.Context, _ *protos.AbandonMatchMsg) (*protos.AbandonMatchReply, error) {
+	s := c.app.GetSessionFromCtx(ctx)
+	if s == nil || s.UID() == "" {
+		log.Printf("match: abandon rejected: session not bound")
+		return &protos.AbandonMatchReply{Ok: false, Reason: "unauthenticated"}, nil
+	}
+	uid := s.UID()
+
+	hit, ok := c.findInstance(ctx, uid)
+	if !ok {
+		return &protos.AbandonMatchReply{Ok: false, Reason: "not_found"}, nil
+	}
+	reply := &protos.LeaveReply{}
+	if err := c.app.RPCTo(ctx, hit.GameServerID, gameLeaveRoute, reply,
+		&protos.LeaveMsg{Uid: uid}); err != nil {
+		log.Printf("match: abandon %s: leave on %s failed: %v", uid, hit.GameServerID, err)
+		return &protos.AbandonMatchReply{Ok: false, Reason: "internal"}, nil
+	}
+	if !reply.Ok {
+		// 节点在、但此刻已经没有他的实例（刚好打完了 / 已经释放过）。语义上等同 not_found。
+		log.Printf("match: abandon %s: game %s has no instance anymore", uid, hit.GameServerID)
+		return &protos.AbandonMatchReply{Ok: false, Reason: "not_found"}, nil
+	}
+	log.Printf("match: uid %s abandoned match %s on game %s (slot %d)",
+		uid, hit.MatchID, hit.GameServerID, hit.PlayerIdx)
+
+	// 清掉会话里那份对局归属（最好努力）：他不再属于那一局，而会话数据里若还留着
+	// gameServerId，客户端一旦发出 game.cmd 会被定点路由到旧节点。失败只记日志 ——
+	// 真正管用的是 game 侧已经把 uid 从实例注册表里摘掉了（那些消息查不到实例、静默丢弃）。
+	if gateID, err := c.online.Gate(ctx, uid); err != nil || gateID == "" {
+		log.Printf("match: abandon %s: no online gate (err=%v)", uid, err)
+	} else if err := c.bindGameOn(ctx, gateID, uid, "", "", 0); err != nil {
+		log.Printf("match: abandon %s: clear game binding failed: %v", uid, err)
+	}
+	return &protos.AbandonMatchReply{Ok: true, Reason: "released"}, nil
 }
 
 // Cancel 是客户端请求 handler（route "match.cancel"）：把已登录会话移出匹配队列。

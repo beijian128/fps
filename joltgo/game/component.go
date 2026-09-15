@@ -162,6 +162,43 @@ func ctxUID(ctx context.Context, app pitaya.Pitaya) string {
 	return ""
 }
 
+// Leave 是远端 RPC handler（route "game.leave"）：把该 uid 从本节点托管的实例里
+// **释放**出来（客户端在大厅选择「放弃对局」时，由 match 转发过来）。
+//
+// 三件事，缺一不可：
+//  1. 摘掉注册表里的 uid 映射 —— 他之后的 game.cmd / game.resync 一律查不到实例，
+//     也不会被 Rejoin 再次领回这一局（他确实已经不在局里了）；
+//  2. 让实例把该槽位标成「已离场」：不再收帧、结算时带上 left 标记被排除；
+//  3. 实例本身**不终结**（除非这一局已经一个人都不剩）—— 对手还在打，他那局照常。
+//
+// 与 Create/Rejoin 同样只接受后端 RPC：客户端若能直接调它，就能拿别人的 uid 把
+// 任意玩家从对局里踢出去（服务端会照做，因为这里没有别的身份判据）。
+func (c *Component) Leave(ctx context.Context, msg *protos.LeaveMsg) (*protos.LeaveReply, error) {
+	if isClientCall(ctx, c.app) {
+		log.Printf("game: leave from client rejected (uid=%s)", ctxUID(ctx, c.app))
+		return &protos.LeaveReply{Ok: false}, nil
+	}
+
+	c.mu.Lock()
+	inst := c.uidToInst[msg.Uid]
+	idx := c.uidToIndex[msg.Uid]
+	if inst != nil {
+		// 先摘映射再投命令：RPC 返回时注册表已经干净，调用方（match）拿到的 ok=true
+		// 就是「他确实不再是这个对局的人了」。
+		delete(c.uidToInst, msg.Uid)
+		delete(c.uidToIndex, msg.Uid)
+	}
+	c.mu.Unlock()
+
+	if inst == nil {
+		// 查询类接口不把「没命中」和「被拒绝」搅在一起：这里只是此刻已经没有他的实例。
+		return &protos.LeaveReply{Ok: false}, nil
+	}
+	inst.Release(idx)
+	log.Printf("game: released uid %s from instance %s (slot %d)", msg.Uid, inst.MatchID(), idx)
+	return &protos.LeaveReply{Ok: true}, nil
+}
+
 // Cmd 是远端 RPC handler（route "game.cmd"）：一帧上行命令。
 // 输入、射击、重置合并成一条消息，减少消息数（帧是最小发送单位）。
 func (c *Component) Cmd(ctx context.Context, msg *protos.CommandMsg) {

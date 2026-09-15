@@ -1,105 +1,261 @@
-[gd_scene format=3]
+[gd_scene load_steps=7 format=3]
 
-[ext_resource type="Theme" path="res://theme/tactical_theme.tres" id="1_j0f3g"]
-[ext_resource type="Script" path="res://ui/shell.gd" id="2_mg4gw"]
+[ext_resource type="Theme" path="res://theme/tactical_theme.tres" id="1_theme"]
+[ext_resource type="Script" path="res://ui/shell.gd" id="2_shell"]
+[ext_resource type="Texture2D" path="res://assets/ui/logo_mark.png" id="3_logo"]
+[ext_resource type="Texture2D" path="res://assets/ui/avatar_default.png" id="4_avatar"]
+[ext_resource type="Texture2D" path="res://assets/ui/item_rifle.png" id="5_rifle"]
+[ext_resource type="Texture2D" path="res://assets/ui/item_bag.png" id="6_bag"]
 
-[node name="Shell" type="Control" unique_id=1711268264]
+[node name="Shell" type="Control"]
 layout_mode = 3
-anchors_preset = 0
-size_flags_horizontal = 3
-size_flags_vertical = 3
-theme = ExtResource("1_j0f3g")
-script = ExtResource("2_mg4gw")
-
-[node name="@VBoxContainer@2" type="VBoxContainer" parent="." unique_id=1094164951]
-layout_mode = 0
+anchors_preset = 15
 anchor_right = 1.0
 anchor_bottom = 1.0
-size_flags_horizontal = 3
-size_flags_vertical = 3
+grow_horizontal = 2
+grow_vertical = 2
+theme = ExtResource("1_theme")
+script = ExtResource("2_shell")
+
+[node name="Root" type="VBoxContainer" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
 theme_override_constants/separation = 0
 
-[node name="TopBar" type="PanelContainer" parent="@VBoxContainer@2" unique_id=1870607510]
-unique_name_in_owner = true
+[node name="TopBar" type="PanelContainer" parent="Root"]
 layout_mode = 2
 theme_type_variation = &"BarPanel"
 
-[node name="@HBoxContainer@3" type="HBoxContainer" parent="@VBoxContainer@2/TopBar" unique_id=601758078]
+[node name="Row" type="HBoxContainer" parent="Root/TopBar"]
 layout_mode = 2
-theme_override_constants/separation = 12
+theme_override_constants/separation = 10
 
-[node name="Brand" type="Label" parent="@VBoxContainer@2/TopBar/@HBoxContainer@3" unique_id=1110508149]
-unique_name_in_owner = true
+[node name="LogoMark" type="TextureRect" parent="Root/TopBar/Row"]
+custom_minimum_size = Vector2(28, 28)
 layout_mode = 2
+size_flags_vertical = 4
+mouse_filter = 2
+texture = ExtResource("3_logo")
+expand_mode = 1
+stretch_mode = 5
+
+[node name="Brand" type="Label" parent="Root/TopBar/Row"]
+layout_mode = 2
+size_flags_vertical = 4
 theme_type_variation = &"LabelAccent"
 text = "JOLT FPS"
 
-[node name="Spacer" type="Control" parent="@VBoxContainer@2/TopBar/@HBoxContainer@3" unique_id=1787326570]
+[node name="Mode" type="Label" parent="Root/TopBar/Row"]
+layout_mode = 2
+size_flags_vertical = 4
+theme_type_variation = &"LabelDim"
+text = "服务端权威"
+
+[node name="Spacer" type="Control" parent="Root/TopBar/Row"]
 layout_mode = 2
 size_flags_horizontal = 3
 mouse_filter = 2
 
-[node name="TopText" type="Label" parent="@VBoxContainer@2/TopBar/@HBoxContainer@3" unique_id=450122706]
+[node name="TopText" type="Label" parent="Root/TopBar/Row"]
 unique_name_in_owner = true
 layout_mode = 2
-theme_type_variation = &"LabelMuted"
+size_flags_vertical = 4
+theme_type_variation = &"LabelMono"
 text = "未登录"
 
-[node name="@HBoxContainer@4" type="HBoxContainer" parent="@VBoxContainer@2" unique_id=535199702]
+[node name="Body" type="MarginContainer" parent="Root"]
 layout_mode = 2
 size_flags_vertical = 3
+theme_override_constants/margin_left = 24
+theme_override_constants/margin_top = 24
+theme_override_constants/margin_right = 24
+theme_override_constants/margin_bottom = 16
+
+[node name="Column" type="VBoxContainer" parent="Root/Body"]
+layout_mode = 2
+theme_override_constants/separation = 16
+
+[node name="Title" type="Label" parent="Root/Body/Column"]
+layout_mode = 2
+theme_type_variation = &"LabelHero"
+text = "大厅"
+
+[node name="Subtitle" type="Label" parent="Root/Body/Column"]
+layout_mode = 2
+theme_type_variation = &"LabelMuted"
+text = "选择要进入的界面；匹配在下方开始。"
+
+[node name="Entries" type="HBoxContainer" parent="Root/Body/Column"]
+layout_mode = 2
+theme_override_constants/separation = 12
+
+[node name="EntryProfile" type="Button" parent="Root/Body/Column/Entries"]
+mouse_default_cursor_shape = 2
+tooltip_text = "查看等级、经验与最近 20 场战绩"
+unique_name_in_owner = true
+custom_minimum_size = Vector2(260, 210)
+layout_mode = 2
+size_flags_horizontal = 3
+theme_type_variation = &"NavCard"
+
+[node name="Box" type="VBoxContainer" parent="Root/Body/Column/Entries/EntryProfile"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 8.0
+offset_top = 8.0
+offset_right = -8.0
+offset_bottom = -8.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
 theme_override_constants/separation = 8
+alignment = 1
 
-[node name="NavPanel" type="PanelContainer" parent="@VBoxContainer@2/@HBoxContainer@4" unique_id=888934989]
-unique_name_in_owner = true
-custom_minimum_size = Vector2(180, 0)
+[node name="Icon" type="TextureRect" parent="Root/Body/Column/Entries/EntryProfile/Box"]
+custom_minimum_size = Vector2(72, 72)
 layout_mode = 2
-theme_type_variation = &"BarPanel"
+size_flags_horizontal = 4
+mouse_filter = 2
+texture = ExtResource("4_avatar")
+expand_mode = 1
+stretch_mode = 5
 
-[node name="@VBoxContainer@5" type="VBoxContainer" parent="@VBoxContainer@2/@HBoxContainer@4/NavPanel" unique_id=1791895156]
+[node name="Name" type="Label" parent="Root/Body/Column/Entries/EntryProfile/Box"]
 layout_mode = 2
-theme_override_constants/separation = 4
-
-[node name="NavProfile" type="Button" parent="@VBoxContainer@2/@HBoxContainer@4/NavPanel/@VBoxContainer@5" unique_id=25496348]
-unique_name_in_owner = true
-layout_mode = 2
-theme_type_variation = &"GhostButton"
-theme_override_colors/font_color = Color(1, 0.627451, 0.15686275, 1)
+mouse_filter = 2
+theme_type_variation = &"LabelSub"
 text = "个人信息"
-alignment = 0
+horizontal_alignment = 1
 
-[node name="NavShop" type="Button" parent="@VBoxContainer@2/@HBoxContainer@4/NavPanel/@VBoxContainer@5" unique_id=865780585]
-unique_name_in_owner = true
+[node name="Desc" type="Label" parent="Root/Body/Column/Entries/EntryProfile/Box"]
 layout_mode = 2
-theme_type_variation = &"GhostButton"
+mouse_filter = 2
+theme_type_variation = &"LabelMuted"
+text = "等级 / 战绩 / 最近 20 场"
+horizontal_alignment = 1
+autowrap_mode = 2
+
+[node name="EntryShop" type="Button" parent="Root/Body/Column/Entries"]
+mouse_default_cursor_shape = 2
+tooltip_text = "用金币购买武器与补给（目录 4 件）"
+unique_name_in_owner = true
+custom_minimum_size = Vector2(260, 210)
+layout_mode = 2
+size_flags_horizontal = 3
+theme_type_variation = &"NavCard"
+
+[node name="Box" type="VBoxContainer" parent="Root/Body/Column/Entries/EntryShop"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 8.0
+offset_top = 8.0
+offset_right = -8.0
+offset_bottom = -8.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+theme_override_constants/separation = 8
+alignment = 1
+
+[node name="Icon" type="TextureRect" parent="Root/Body/Column/Entries/EntryShop/Box"]
+custom_minimum_size = Vector2(96, 72)
+layout_mode = 2
+size_flags_horizontal = 4
+mouse_filter = 2
+texture = ExtResource("5_rifle")
+expand_mode = 1
+stretch_mode = 5
+
+[node name="Name" type="Label" parent="Root/Body/Column/Entries/EntryShop/Box"]
+layout_mode = 2
+mouse_filter = 2
+theme_type_variation = &"LabelSub"
 text = "商城"
-alignment = 0
+horizontal_alignment = 1
 
-[node name="NavBag" type="Button" parent="@VBoxContainer@2/@HBoxContainer@4/NavPanel/@VBoxContainer@5" unique_id=2128094703]
-unique_name_in_owner = true
+[node name="Desc" type="Label" parent="Root/Body/Column/Entries/EntryShop/Box"]
 layout_mode = 2
-theme_type_variation = &"GhostButton"
-text = "背包"
-alignment = 0
+mouse_filter = 2
+theme_type_variation = &"LabelMuted"
+text = "买枪 / 买补给，金币结算"
+horizontal_alignment = 1
+autowrap_mode = 2
 
-[node name="Spacer" type="Control" parent="@VBoxContainer@2/@HBoxContainer@4/NavPanel/@VBoxContainer@5" unique_id=699751489]
+[node name="EntryBag" type="Button" parent="Root/Body/Column/Entries"]
+mouse_default_cursor_shape = 2
+tooltip_text = "查看已拥有的物品，装备主武器"
+unique_name_in_owner = true
+custom_minimum_size = Vector2(260, 210)
+layout_mode = 2
+size_flags_horizontal = 3
+theme_type_variation = &"NavCard"
+
+[node name="Box" type="VBoxContainer" parent="Root/Body/Column/Entries/EntryBag"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 8.0
+offset_top = 8.0
+offset_right = -8.0
+offset_bottom = -8.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+theme_override_constants/separation = 8
+alignment = 1
+
+[node name="Icon" type="TextureRect" parent="Root/Body/Column/Entries/EntryBag/Box"]
+custom_minimum_size = Vector2(80, 72)
+layout_mode = 2
+size_flags_horizontal = 4
+mouse_filter = 2
+texture = ExtResource("6_bag")
+expand_mode = 1
+stretch_mode = 5
+
+[node name="Name" type="Label" parent="Root/Body/Column/Entries/EntryBag/Box"]
+layout_mode = 2
+mouse_filter = 2
+theme_type_variation = &"LabelSub"
+text = "背包"
+horizontal_alignment = 1
+
+[node name="Desc" type="Label" parent="Root/Body/Column/Entries/EntryBag/Box"]
+layout_mode = 2
+mouse_filter = 2
+theme_type_variation = &"LabelMuted"
+text = "装备主武器，决定对局手感"
+horizontal_alignment = 1
+autowrap_mode = 2
+
+[node name="Spacer" type="Control" parent="Root/Body/Column"]
 layout_mode = 2
 size_flags_vertical = 3
 mouse_filter = 2
 
-[node name="@MarginContainer@6" type="MarginContainer" parent="@VBoxContainer@2/@HBoxContainer@4" unique_id=1494422897]
+[node name="Hints" type="Label" parent="Root/Body/Column"]
 layout_mode = 2
-size_flags_horizontal = 3
-theme_override_constants/margin_left = 16
-theme_override_constants/margin_top = 16
-theme_override_constants/margin_right = 16
-theme_override_constants/margin_bottom = 16
+mouse_filter = 2
+theme_type_variation = &"LabelDim"
+text = "点卡片进入子界面 · Tab / ← → 切换焦点 · Enter 打开"
 
-[node name="Content" type="Control" parent="@VBoxContainer@2/@HBoxContainer@4/@MarginContainer@6" unique_id=1179366243]
-unique_name_in_owner = true
+[node name="StatusMargin" type="MarginContainer" parent="Root"]
 layout_mode = 2
+theme_override_constants/margin_left = 8
+theme_override_constants/margin_top = 8
+theme_override_constants/margin_right = 8
+theme_override_constants/margin_bottom = 8
 
-[node name="StatusSlot" type="Control" parent="@VBoxContainer@2" unique_id=251027743]
+[node name="StatusSlot" type="Control" parent="Root/StatusMargin"]
 unique_name_in_owner = true
-custom_minimum_size = Vector2(0, 44)
+custom_minimum_size = Vector2(0, 52)
 layout_mode = 2

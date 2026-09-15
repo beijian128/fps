@@ -6,8 +6,12 @@
 //   - 客户端 → gate → logic：logic.logic.state / logic.logic.purchase /
 //     logic.logic.equip（Request/Response）
 //   - 客户端 → gate → match：match.match.join（JoinMsg，Notify）
+//   - 客户端 → gate → match：match.match.pending（PendingMatchMsg）/ match.match.abandon
+//     （AbandonMatchMsg）（Request/Response：进大厅时问「我有没有没打完的局」、
+//     以及放弃那场对局 —— 放弃只是把该玩家从实例里释放出来，实例照常打完）
 //   - match → 客户端：onMatched（MatchResult，Push —— 推送用 route 名，不是三段式）
 //   - match → game（RPC）：game.game.create（CreateGameMsg）/ game.game.rejoin（RejoinMsg）
+//     / game.game.leave（LeaveMsg，放弃对局时把玩家从实例里摘出来）
 //   - match → gate（RPC）：gate.gate.bindgame（BindGameMsg）
 //   - 客户端 → gate → game：game.game.cmd（CommandMsg）/ game.game.resync（空，Notify）
 //   - game → 客户端：onFrame（Frame，Push）
@@ -39,6 +43,30 @@ message CommandMsg {
 // JoinMsg 是加入匹配的请求。身份来自会话绑定（account 服务在登录时做的），
 // 这里不再携带任何凭证 —— 字段清空后 route 与 handler 签名都不变。
 message JoinMsg {}
+
+// PendingMatchMsg 是「我有没有没打完的局」的查询请求（route "match.match.pending"）。
+// 客户端登录成功、刚进大厅时问一次：命中就弹「回到对局 / 放弃对局」的询问框。
+// 身份来自会话，payload 为空。
+message PendingMatchMsg {}
+
+// PendingMatchReply 是 match.match.pending 的应答。
+// found=false 时 match_id 无意义（空串）。
+message PendingMatchReply {
+  bool found = 1;
+  string match_id = 2;
+}
+
+// AbandonMatchMsg 是「放弃那场没打完的局」的请求（route "match.match.abandon"）。
+// 语义：**只把当前玩家从对局里释放出来**（不再收帧、不再参与结算），对局实例本身
+// 照常推进 —— 对手还在打，他的那一局不因为有人放弃而中断。身份来自会话。
+message AbandonMatchMsg {}
+
+// AbandonMatchReply 是 match.match.abandon 的应答。
+// reason：released | not_found | unauthenticated | internal。
+message AbandonMatchReply {
+  bool ok = 1;
+  string reason = 2;
+}
 
 // RegisterMsg 是注册请求。用户名 3-16 位 [a-zA-Z0-9_]，密码 6-64 位。
 message RegisterMsg {
@@ -152,6 +180,18 @@ message RejoinReply {
   int32 player_idx = 3; // 原本的玩家槽位（0/1）
 }
 
+// LeaveMsg 是 match → game 的 RPC（route "game.game.leave"）：请托管该实例的 game
+// 节点把这个玩家从对局里释放出来（见 AbandonMatchMsg 的语义）。uid 是会话 UID。
+message LeaveMsg {
+  string uid = 1;
+}
+
+// LeaveReply 是 game.leave 的应答。ok=false 表示这个 game 节点上没有该 uid 的实例
+// （已经离场、或本来就不在这个节点上）。
+message LeaveReply {
+  bool ok = 1;
+}
+
 // SchemaField 是一个同步属性的声明。
 message SchemaField {
   uint32 id = 1;   // 属性 ID（Frame 里的 AttrValue.id）
@@ -196,6 +236,11 @@ message SlotResult {
   string uid = 1;
   int32 kills = 2;
   int32 deaths = 3;
+  // left = true：该槽位的玩家中途放弃了对局（uid 仍然是他的账号 ID）。
+  // 结算方据此把这一位**排除在结算之外**（不计战绩、不推结算），而对局本身仍然
+  // 是「两个人的局」—— 这正是「放弃 ≠ 没有对手」的区分点：
+  // uid=="" 且 left=false 才是「这个槽位压根没人」，那种局不入账。
+  bool left = 4;
 }
 
 // game → logic：一局分出胜负时的结算上报（remote route logic.logic.recordmatch）。

@@ -1,66 +1,99 @@
-[gd_scene format=3]
+[gd_scene load_steps=7 format=3]
 
-[ext_resource type="Theme" path="res://theme/tactical_theme.tres" id="1_wwa13"]
-[ext_resource type="Script" path="res://ui/item_card.gd" id="2_afnk7"]
+[ext_resource type="Theme" path="res://theme/tactical_theme.tres" id="1_theme"]
+[ext_resource type="Script" path="res://ui/item_card.gd" id="2_card"]
+[ext_resource type="Texture2D" path="res://assets/ui/item_rifle.png" id="3_rifle"]
+[ext_resource type="Texture2D" path="res://assets/ui/item_pistol.png" id="4_pistol"]
+[ext_resource type="Texture2D" path="res://assets/ui/item_shotgun.png" id="5_shotgun"]
+[ext_resource type="Texture2D" path="res://assets/ui/item_medkit.png" id="6_medkit"]
 
-[node name="ItemCard" type="PanelContainer" unique_id=648905090]
-custom_minimum_size = Vector2(170, 190)
+[node name="ItemCard" type="PanelContainer"]
+custom_minimum_size = Vector2(240, 0)
+layout_mode = 3
+anchors_preset = 0
+theme = ExtResource("1_theme")
+theme_type_variation = &"CardPanel"
+script = ExtResource("2_card")
+
+[node name="Rows" type="VBoxContainer" parent="."]
+layout_mode = 2
+theme_override_constants/separation = 12
+
+[node name="Header" type="HBoxContainer" parent="Rows"]
+layout_mode = 2
+theme_override_constants/separation = 12
+
+[node name="Icon" type="TextureRect" parent="Rows/Header"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(48, 48)
+layout_mode = 2
+size_flags_vertical = 4
+mouse_filter = 2
+texture = ExtResource("3_rifle")
+expand_mode = 1
+stretch_mode = 5
+
+[node name="Texts" type="VBoxContainer" parent="Rows/Header"]
+layout_mode = 2
 size_flags_horizontal = 3
-size_flags_vertical = 3
-theme = ExtResource("1_wwa13")
-script = ExtResource("2_afnk7")
+theme_override_constants/separation = 2
 
-[node name="@VBoxContainer@33" type="VBoxContainer" parent="." unique_id=2050167548]
-layout_mode = 2
-theme_override_constants/separation = 4
-
-[node name="Icon" type="ColorRect" parent="@VBoxContainer@33" unique_id=697621205]
-unique_name_in_owner = true
-custom_minimum_size = Vector2(0, 52)
-layout_mode = 2
-color = Color(0.16470589, 0.18039216, 0.20784314, 1)
-
-[node name="Name" type="Label" parent="@VBoxContainer@33" unique_id=2143184285]
+[node name="Name" type="Label" parent="Rows/Header/Texts"]
 unique_name_in_owner = true
 layout_mode = 2
+theme_type_variation = &"LabelSub"
 text = "物品"
 
-[node name="Info" type="Label" parent="@VBoxContainer@33" unique_id=590271564]
+[node name="Info" type="Label" parent="Rows/Header/Texts"]
 unique_name_in_owner = true
 layout_mode = 2
 theme_type_variation = &"LabelMuted"
 text = "—"
 
-[node name="@HBoxContainer@34" type="HBoxContainer" parent="@VBoxContainer@33" unique_id=1888082108]
+[node name="Divider" type="HSeparator" parent="Rows"]
 layout_mode = 2
-theme_override_constants/separation = 4
 
-[node name="QtyMinus" type="Button" parent="@VBoxContainer@33/@HBoxContainer@34" unique_id=218126203]
-unique_name_in_owner = true
+[node name="Footer" type="HBoxContainer" parent="Rows"]
 layout_mode = 2
-theme_type_variation = &"GhostButton"
+theme_override_constants/separation = 8
+
+[node name="QtyMinus" type="Button" parent="Rows/Footer"]
+mouse_default_cursor_shape = 2
+tooltip_text = "数量 -1"
+unique_name_in_owner = true
+custom_minimum_size = Vector2(40, 40)
+layout_mode = 2
+theme_type_variation = &"StepButton"
 text = "−"
 
-[node name="Qty" type="Label" parent="@VBoxContainer@33/@HBoxContainer@34" unique_id=622579471]
+[node name="Qty" type="Label" parent="Rows/Footer"]
 unique_name_in_owner = true
+custom_minimum_size = Vector2(44, 0)
 layout_mode = 2
-size_flags_horizontal = 3
+size_flags_vertical = 4
+theme_type_variation = &"LabelMono"
 text = "1"
 horizontal_alignment = 1
 
-[node name="QtyPlus" type="Button" parent="@VBoxContainer@33/@HBoxContainer@34" unique_id=38629433]
+[node name="QtyPlus" type="Button" parent="Rows/Footer"]
+mouse_default_cursor_shape = 2
+tooltip_text = "数量 +1（单次最多 99）"
 unique_name_in_owner = true
+custom_minimum_size = Vector2(40, 40)
 layout_mode = 2
-theme_type_variation = &"GhostButton"
+theme_type_variation = &"StepButton"
 text = "+"
 
-[node name="Spacer" type="Control" parent="@VBoxContainer@33" unique_id=1523064762]
+[node name="Spacer" type="Control" parent="Rows/Footer"]
 layout_mode = 2
-size_flags_vertical = 3
+size_flags_horizontal = 3
 mouse_filter = 2
 
-[node name="Action" type="Button" parent="@VBoxContainer@33" unique_id=1980570416]
+[node name="Action" type="Button" parent="Rows/Footer"]
+mouse_default_cursor_shape = 2
+tooltip_text = "购买 / 装备；金币不足或不可装备时按钮会说明原因"
 unique_name_in_owner = true
+custom_minimum_size = Vector2(96, 40)
 layout_mode = 2
 theme_type_variation = &"PrimaryButton"
 text = "购买"

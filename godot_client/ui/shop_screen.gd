@@ -6,6 +6,14 @@ const CardScene := preload("res://ui/item_card.tscn")
 var _manager = null
 var _cards: Array = []
 
+func _ready() -> void:
+	%Back.pressed.connect(func() -> void: _manager.intent_close_page())
+	visibility_changed.connect(_on_visibility_changed)
+
+func _on_visibility_changed() -> void:
+	if visible and is_visible_in_tree():
+		%Back.grab_focus()
+
 func bind(manager) -> void:
 	_manager = manager
 

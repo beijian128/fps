@@ -20,10 +20,17 @@
 - **断线重连回到同一对局**：重连后先用本地凭证 `account.resume` 登回同一账号，服务端推
   `onMatched`（同一 match_id / 槽位），客户端请求 `game.resync` 拿一份 full 帧整体重建
 - 受击反馈：全屏红闪 + 音效；打中对手有命中音、准星短暂点亮
-- **对局内 HUD**：准星（命中反馈）、自己与对手的血条和 K/D、回合进度（先到 10 杀）、
-  击杀播报条、FPS
+- **对局内 HUD**：准星（命中时点亮并出命中标记）、自己与对手的血条和 K/D、回合进度
+  （先到 10 杀）、击杀播报栈（最多 4 条、6s 过期）、伤害数字、FPS。自己的血条按剩余比例
+  换色（绿 → 琥珀 → 红），对手固定红 —— 余光里也不会搞混两条血条
 - **一局结束**：收到 `onMatchEnded` 即离开对局态（停掉 2.5s 接收看门狗，否则会被误判成
   掉线）、清空本地世界，弹出**全屏结算层**（胜负 / 比分 / 对手 / 时长 + 回大厅 / 再来一局）
+- **对局内设置层（ESC）**：鼠标灵敏度 / 界面缩放 / 受击反馈强度 / HUD 安全区，改完立刻生效并
+  存进 `user://settings.cfg`。它**不暂停对局**（服务端照常推进、对手还在打），所以面板上写的是
+  「对局仍在继续」而不是「已暂停」
+- **HUD 安全区**：全部 HUD 面板落在「视口尺寸 × 安全区百分比」的内缩区内（默认 5% = 标题安全区
+  90%）。电视/投影会裁掉边缘 3%–10%，贴边摆的血条与击杀播报在那些设备上会被切掉；纯 PC 想贴边
+  就在设置里拉 0
 
 ## 运行
 
@@ -39,7 +46,8 @@
    （密码框里按回车 = 点登录）。之后再启动会自动用本地凭证登录，登录页不再出现
 4. 登录后进**大厅**：左侧切「个人信息 / 商城 / 背包」，底部点「开始匹配」进队列
    （搜索中会显示队列人数与已等待秒数，可随时取消）
-5. 对局中由**点击画面**锁定鼠标；ESC 释放鼠标（大厅与结算层里鼠标始终可见）
+5. 对局中由**点击画面**锁定鼠标；**ESC 打开/收起设置层**（打开时鼠标自动释放，关掉后自动重新
+   锁定；大厅与结算层里鼠标始终可见）
 
 > 服务端地址硬编码在 `scripts/fps_client.gd` 的 `WS_URL`，改端口时同步修改。
 
@@ -76,16 +84,21 @@ Request/Response，详见 [docs/API.md](../docs/API.md)）。
 godot_client/
 ├── scenes/main.tscn      # 主场景：Main + FpsClient + Sfx + UI（挂 screen_manager）
 ├── theme/                # 视觉 token（tokens.gd）+ 主题生成器（build_theme.gd）+ tactical_theme.tres（生成物）
+├── assets/ui/            # 界面美术（程序化生成）：大厅底图 / 头像 / 道具与入口图标
 ├── ui/                   # 界面层：screen_manager 是唯一状态源；各屏幕只渲染 + 发意图
 │   ├── screen_manager.gd # 状态机（boot/login/lobby/matching/in_match/result）+ 意图 API + 数据快照
-│   ├── shell.tscn/.gd    # 大厅外壳：左导航 + 顶栏 + 内容插槽 + 底部状态条
+│   ├── backdrop          # 全局底图（大厅与子界面共用，在最底层）
+│   ├── shell.tscn/.gd    # 大厅**入口页**：顶栏 + 三张入口卡（个人信息/商城/背包）+ 底部匹配条
 │   ├── login_screen      # 登录 / 注册
-│   ├── profile_screen    # 个人信息：身份栏 + 六个统计卡 + 最近 20 场
-│   ├── shop_screen / bag_screen / item_card  # 商城与背包共用卡片
+│   ├── profile_screen    # 子界面（整屏）：身份栏 + 六个统计卡 + 最近 20 场
+│   ├── shop_screen / bag_screen / item_card  # 子界面（整屏）：商城与背包共用卡片
 │   ├── match_status_bar  # 底部：开始匹配 / 搜索中（队列人数与等待时长）/ 取消
 │   ├── result_overlay    # 全屏结算：胜负 / 比分 / 对手 / 时长 + 回大厅 / 再来一局
-│   └── hud               # 对局内：准星 / 双方血条与 K/D / 回合进度 / 击杀播报
-├── tools/gen_ui_scenes.gd # 生成上面所有 .tscn（改结构改这里再重跑）
+│   ├── pause_screen      # 对局内设置层（ESC）：灵敏度 / 界面缩放 / 受击反馈 / HUD 安全区
+│   ├── rejoin_prompt     # 进大厅时的浮层：你有一场没打完的局 → 回到对局 / 放弃对局
+│   ├── settings.gd       # 本机偏好（存 user://settings.cfg）—— 与 theme/tokens.gd 分工见下
+│   ├── toast             # 交互反馈通知栈（已购买 / 已装备 / 掉线重连…），screen_manager.notify()
+│   └── hud               # 对局内：准星 / 双方血条与 K/D / 回合进度 / 击杀播报 / 伤害数字
 ├── scripts/
 │   ├── main.gd           # 输入/相机(第一/第三人称)/按属性名查询与插值/持枪/玩法反馈（Node3D）
 │   ├── world_store.gd    # 本地世界状态：实体-属性增量累积成完整世界（按名字取值）
@@ -108,27 +121,48 @@ matching ──(取消 → cancelled/not_queued)──> lobby
 
 - **登录成功后不会自动匹配**：必须在大厅点「开始匹配」。新玩家因此先看到自己的战绩与商店，
   而不是被直接丢进队列。
+- **登录成功后先问一句「有没有没打完的局」**（`match.pending`）：命中就弹 `rejoin_prompt`
+  询问框 —— 服务端权威、那一局不因为有人掉线而暂停，所以「回到对局」和「放弃对局」必须由
+  玩家自己选。放弃只把**本玩家**从那一局里释放出来（不再收帧、不再计入本局战绩），对手
+  那一局照常打完；ESC 收起框 = 稍后决定（点「开始匹配」仍会回到那一局）。
 - `matching` 期间大厅仍然可用（可以翻战绩、逛商城），底部状态条显示
   `队列 N 人 · 已等待 Ns`（数据来自服务端每秒推送的 `onMatchStatus`）。
 - `in_match` 显示 HUD；`result` 显示全屏结算层，两个按钮是「回大厅」与「再来一局」
   （后者 = 立刻重新匹配）。
 - 断线时状态收回 `lobby`（有凭证会自动 resume），本地世界由 `main.gd` 清空。
+- 对局内 ESC 打开 `pause_screen`：它是**对局态上的浮层，不是第 7 个状态**（`is_paused()` 单独
+  记录），因为服务端并不会因为本地开了设置面板就停止推进。离开 `IN_MATCH` 时自动收起。
 
-**主题与字体**：所有颜色/字号/间距都来自 `theme/tokens.gd`（暗色战术风：近黑底 + 琥珀强调
-`#ffa028` + 直角细描边 + 等宽数字）。`theme/build_theme.gd` 把 tokens 写进
+**本机偏好 vs 设计 token**：`theme/tokens.gd` 是**所有玩家共享的视觉真相**（改它要重新生成
+主题）；`ui/settings.gd` 是**每个玩家各自的本机开关**（灵敏度 / 界面缩放 / 受击反馈强度 /
+HUD 安全区，存 `user://settings.cfg`）。改偏好的入口只有 `screen_manager.intent_set_setting()`，
+由 `apply_settings()` 一次性推给窗口（`content_scale_factor`）与 HUD（安全区）；灵敏度与受击
+反馈强度是 `main.gd` 每次用到时现读的瞬时值。
+
+**主题与字体**：颜色 / 圆角 / 字号 / 间距的取值集中在 `theme/tokens.gd`（暗色战术风：近黑分层
+底色 + 琥珀强调 `#ffb020` + 6px 小圆角 + 等宽数字）。`theme/build_theme.gd` 把 tokens 写进
 `tactical_theme.tres`（生成物，改 tokens 后重跑生成；`tests/theme_test.gd` 会挡住漂移）。
+界面优先用 `theme_type_variation` 挑样式（`PrimaryButton` / `HudPanel` / `LabelMono` /
+`HealthBarWarn`…），只有必须参与运算的取值才直接 import tokens。
 字体不打包进仓库，而是显式声明的系统字体回退链（`Microsoft YaHei UI` → `Noto Sans CJK SC`
 → `PingFang SC`，数字用 `Consolas`）——不再依赖 Godot 默认字体对中文的兜底。
 
-**场景怎么来的**：`ui/*.tscn` 由 `tools/gen_ui_scenes.gd` 生成：
+**大厅是入口，子界面整屏**：登录后停在入口页（`_page == ""`），点一张入口卡把对应子界面
+**整屏铺开**（大厅同时隐藏），子界面左上角是「← 返回大厅」= `intent_close_page()`。两者互斥，
+由 `screen_manager._apply_visibility()` 一处切换，所以不存在「子界面嵌在大厅某一块」的布局。
 
-```bash
-Godot_v4.7.2-stable_win64_console.exe --headless --path godot_client \
-  --script res://tools/gen_ui_scenes.gd
-```
+**交互反馈**：① 所有可点控件是手型光标；② 每个界面有一行操作提示（对局内 HUD 底部写按键、
+子界面写「ESC 返回大厅」、大厅写「点卡片 / Tab / Enter」）；③ 设置项与关键按钮带工具提示；
+④ 动作结果进 `ui/toast` 通知栈（购买 / 装备 / 匹配 / 取消 / 掉线重连）；⑤ `ESC` 走
+`intent_escape()`，对局内开合设置层、子界面里返回大厅。`tests/ui_feedback_test.gd` 钉住这五条。
 
-生成后它们就是标准场景文件，可以在编辑器里继续调；**结构性改动请改生成器再重跑**，不要手写
-`.tscn` 的节点块（`PackedScene.pack()` 不替你设 `owner`，漏了节点就会整棵丢掉）。
+**界面美术**：`assets/ui/*.png` 由 `tools/gen_art.py` 程序化生成（底图 / 头像 / 步枪 / 手枪 /
+霰弹枪 / 医疗包 / 背包 / 品牌标记），与项目「纯程序化美术」一致；改图改脚本，新增图片后跑
+`godot --headless --path godot_client --import` 生成 `.import`（要一起提交）。
+
+**界面规范**：以 godot-prompter 的三个技能为准 —— `godot-ui`（Control / 容器 / 锚点 /
+焦点导航）、`responsive-ui`（拉伸模式 / 分辨率 / 安全区）、`hud-system`（对局内 HUD）。
+`ui/*.tscn` 是手写场景，结构与样式直接在编辑器里改（没有生成器要同步）。
 
 - `FpsClient` 与渲染层**通过信号解耦**：`frame_received(frame)` 发同步帧、
   `matched_received(result)` 报匹配结果、`login_result(result)` 报登录/注册/resume 结果、
@@ -180,6 +214,9 @@ Godot_v4.7.2-stable_win64_console.exe --headless --path godot_client --script re
 Godot_v4.7.2-stable_win64_console.exe --headless --path godot_client --script res://tests/profile_screen_test.gd
 Godot_v4.7.2-stable_win64_console.exe --headless --path godot_client --script res://tests/item_grid_test.gd
 Godot_v4.7.2-stable_win64_console.exe --headless --path godot_client --script res://tests/hud_test.gd
+Godot_v4.7.2-stable_win64_console.exe --headless --path godot_client --script res://tests/pause_settings_test.gd
+Godot_v4.7.2-stable_win64_console.exe --headless --path godot_client --script res://tests/pending_match_decode_test.gd
+Godot_v4.7.2-stable_win64_console.exe --headless --path godot_client --script res://tests/rejoin_prompt_test.gd
 ```
 
 - `world_store_test.gd`：世界存储语义（full / removed / destroy / 未知属性）
@@ -194,7 +231,12 @@ Godot_v4.7.2-stable_win64_console.exe --headless --path godot_client --script re
 - `screen_flow_test.gd`：屏幕状态机全流程（登录不自动匹配 / 匹配 / 取消三态 / 进局 / 结算 / 回大厅）
 - `profile_screen_test.gd`：个人信息页（等级/经验条/统计派生 K/D 与胜率/战绩列表/空态）
 - `item_grid_test.gd`：商城与背包卡片（数量 1–99、买不起禁用、装备/卸下文案、空态）
-- `hud_test.gd`：对局内 HUD（双方血条与 K/D、回合进度、击杀播报上限、准星命中反馈）
+- `hud_test.gd`：对局内 HUD（双方血条与 K/D、血条按比例换配色、回合进度、击杀播报上限、
+  伤害数字、准星命中反馈、整层不吃鼠标事件、贴边面板走锚点、安全区换算 = 视口 × 百分比）
+- `pause_settings_test.gd`：设置层（ESC 开合、**不暂停对局**、离开对局自动收起、四项偏好真的
+  落到窗口/HUD，且首次绑定不会把偏好写成滑块最小值）
+- `pending_match_decode_test.gd`：`match.pending` / `match.abandon` 的 Response 解码与 mid 认领
+- `rejoin_prompt_test.gd`：进大厅的询问框（弹框条件 / 回到对局 / 放弃失败要保留框 / ESC 稍后决定）
 
 下面是**冒烟测试，需要活集群**（etcd + NATS + redis + gate/account/logic/match/game 五进程），
 其中 `login_smoke` / `ws_smoke` / `rejoin_smoke` 都需要**两个客户端真配对**（单人兜底已删除）：
@@ -205,6 +247,7 @@ Godot_v4.7.2-stable_win64_console.exe --headless --path godot_client --script re
 Godot_v4.7.2-stable_win64_console.exe --headless --path godot_client --script res://tests/rejoin_smoke.gd
 Godot_v4.7.2-stable_win64_console.exe --headless --path godot_client --script res://tests/logic_smoke.gd
 Godot_v4.7.2-stable_win64_console.exe --headless --path godot_client --script res://tests/profile_smoke.gd
+Godot_v4.7.2-stable_win64_console.exe --headless --path godot_client --script res://tests/abandon_smoke.gd
 ```
 
 - `login_smoke.gd`：注册（随机用户名）→ 收到 `LoginReply` 带 token → 断线 → `resume`

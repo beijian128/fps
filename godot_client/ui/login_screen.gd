@@ -3,6 +3,11 @@ extends Control
 ##
 ## 只做三件事：把服务端的 reason 翻成中文、请求在途时禁用按钮（单飞）、把意图交给
 ## `screen_manager`。协议细节（Request/Response、token 落盘）全在 fps_client 里。
+##
+## 键盘 / 手柄可达：进入这一页时焦点落在用户名框，回车依次前进（用户名 → 密码 → 登录），
+## 焦点链在 _ready 里显式连好 —— 只靠 Godot 的空间猜测，Tab 会在「注册」和输入框之间乱跳。
+
+const Tokens := preload("res://theme/tokens.gd")
 
 ## 服务端 reason → 玩家能看懂的中文。没有映射的 reason 一律显示「服务暂时不可用」，
 ## 免得把内部错误码漏到界面上。
@@ -24,7 +29,21 @@ func _ready() -> void:
 	%Login.pressed.connect(func() -> void: submit(false))
 	%Register.pressed.connect(func() -> void: submit(true))
 	%Pass.text_submitted.connect(func(_text: String) -> void: submit(false))
+	# 回车在用户名框里是「下一格」，不是「提交」：密码还没输就提交只会吃一个 bad_password。
+	%User.text_submitted.connect(func(_text: String) -> void: %Pass.grab_focus())
+	# 半透明：让全局背景（assets/ui/bg_lobby.png）透出来，登录页不至于是一块纯黑布。
+	%Backdrop.color = Color(Tokens.BG, 0.82)
+	_wire_focus()
 	_clear_form()
+
+## _wire_focus 显式连焦点链：2D 空间自动寻路在「输入框 + 两个按钮」这种混排里会跳得很随机。
+func _wire_focus() -> void:
+	%User.focus_neighbor_bottom = %Pass.get_path()
+	%Pass.focus_neighbor_top = %User.get_path()
+	%Pass.focus_neighbor_bottom = %Login.get_path()
+	%Login.focus_neighbor_top = %Pass.get_path()
+	%Login.focus_neighbor_right = %Register.get_path()
+	%Register.focus_neighbor_left = %Login.get_path()
 
 ## bind 由一个 manager 调用（screen_manager 建好场景后立刻绑定）。
 func bind(manager) -> void:
@@ -82,6 +101,11 @@ func _on_state_changed(state: int) -> void:
 	var screen_manager := preload("res://ui/screen_manager.gd")
 	if state != screen_manager.State.LOGIN:
 		_clear_form()
+		return
+	# 进入登录页：焦点直接落在用户名框，玩家不用先摸鼠标点一下。
+	await get_tree().process_frame
+	if is_visible_in_tree():
+		%User.grab_focus()
 
 func _clear_form() -> void:
 	_busy = false

@@ -454,6 +454,10 @@ type MatchSlot struct {
 	UID    string
 	Kills  int32
 	Deaths int32
+	// Left = true：这位玩家中途放弃了对局（uid 仍然是他的账号 ID）。
+	// 与「空槽位」（UID=="" 且 Left=false）是两回事：前者说明这**本来就是一场双人局**、
+	// 只是有一位不参与结算；后者说明这个槽位压根没有人。
+	Left bool
 }
 
 // MatchResult 是一局的结算结果，由 game 在对局结束时上报。
@@ -496,21 +500,44 @@ func (s *Service) Profile(ctx context.Context, accountID string) (Profile, error
 	}, nil
 }
 
-// RecordMatch 把一局结果记进两名玩家的档案与历史，返回是否真的入账。
+// RecordMatch 把一局结果记进**仍在场**玩家的档案与历史，返回是否真的入账。
 //
-// 两个槽位都必须有真实 uid 才入账：兜底单人局已删除，这条是防御 —— 将来若有练习局
-// 或调试入口，不至于把「刷木桩」记成胜率。上报方不重试，所以这里任何一步失败都只
-// 记日志（没有补偿机会），不把错误抛回去。
+// 入账条件：每个槽位要么有真实 uid（在场），要么带着 left 标记（中途放弃了对局）。
+// 放弃者本人跳过（spec：放弃对局的人不再参与这场对局的结算），对手照常入账 ——
+// 他确实打完了一局，不能因为对手跑了就白打。反过来，**空槽位而没有 left 标记**的
+// 说明这压根不是一场双人局（练习/调试入口那种），照旧不入账：兜底单人局已删除，
+// 这条是防御，不至于把「刷木桩」记成胜率。
+//
+// 上报方不重试，所以这里任何一步失败都只记日志（没有补偿机会），不把错误抛回去。
 func (s *Service) RecordMatch(ctx context.Context, res MatchResult) (bool, error) {
-	if len(res.Slots) < 2 || res.Slots[0].UID == "" || res.Slots[1].UID == "" {
+	if len(res.Slots) < 2 {
 		return false, nil
 	}
-	if res.WinnerSlot != 0 && res.WinnerSlot != 1 {
+	present := 0
+	for slot := range res.Slots {
+		if res.Slots[slot].UID == "" {
+			if !res.Slots[slot].Left {
+				return false, nil // 空槽位且不是「放弃」= 这一局本来就不是两个人的
+			}
+			continue
+		}
+		if !res.Slots[slot].Left {
+			present++
+		}
+	}
+	if present == 0 {
+		// 双方都放弃了对局：没有人的档案要更新（也算「未入账」，不是错误）。
+		return false, nil
+	}
+	if int(res.WinnerSlot) < 0 || int(res.WinnerSlot) >= len(res.Slots) {
 		return false, reason(ReasonInternal)
 	}
 
 	for slot := range res.Slots {
 		me := res.Slots[slot]
+		if me.Left || me.UID == "" {
+			continue // 放弃对局的玩家不进结算（不计战绩、不写历史）
+		}
 		opp := res.Slots[1-slot]
 		id, err := parseAccountID(me.UID)
 		if err != nil {

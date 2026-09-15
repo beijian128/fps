@@ -67,12 +67,15 @@ Response： flag (1B) ─ mid (LEB128 变长) ─ protobuf payload
 | `logic.logic.purchase` | Request | 客户端 → logic（随机） | `PurchaseMsg` → `LogicStateReply` |
 | `logic.logic.equip` | Request | 客户端 → logic（随机） | `EquipMsg` → `LogicStateReply` |
 | `match.match.join` | Notify | 客户端 → match | `JoinMsg`（空） |
+| `match.match.pending` | Request | 客户端 → match | `PendingMatchMsg`（空）→ `PendingMatchReply` |
+| `match.match.abandon` | Request | 客户端 → match | `AbandonMatchMsg`（空）→ `AbandonMatchReply` |
 | `game.game.cmd` | Notify | 客户端 → game | `CommandMsg` |
 | `game.game.resync` | Notify | 客户端 → game | 空 |
 | `onMatched` | Push | game/match → 客户端 | `MatchResult` |
 | `onFrame` | Push | game → 客户端 | `Frame` |
 | `game.game.create` | RPC | match → game | `CreateGameMsg` → `CreateGameReply` |
 | `game.game.rejoin` | RPC | match → game | `RejoinMsg` → `RejoinReply` |
+| `game.game.leave` | RPC | match → game | `LeaveMsg` → `LeaveReply` |
 | `gate.gate.bindgame` | RPC | match → gate | `BindGameMsg` → `BindGameReply` |
 | `logic.logic.online` | RPC | account → logic（随机） | `UserOnlineMsg` → `UserOnlineReply` |
 | `gate.sys.kick` | RPC | account → gate | pitaya 内置 `KickMsg` → `KickAnswer` |
@@ -145,9 +148,14 @@ message MatchResult {
 ```
 
 **重连也走这条 push**：断线后客户端先用本地凭证 `account.account.resume` 登回同一个账号，
-再发 `match.join`；match 服务向各 game 节点 fan-out `game.rejoin`，命中存量实例时用同一条
+而**进大厅后的第一件事是问一句** `match.pending`：命中存量对局就弹「回到对局 / 放弃对局」
+的询问框（见上文两条 route）。选择「回到对局」才发 `match.join`；match 服务向各 game
+节点 fan-out `game.rejoin`，命中存量实例时用同一条
 收尾路径（写会话数据 + 推 `onMatched`），客户端回到**同一对局、同一 `player_idx`**、
 不再进匹配队列；收到 `onMatched` 后客户端主动发 `game.resync` 请求全量帧（见下）。
+
+这条「提问 → 玩家选」是刻意的：服务端权威、对局不因掉线暂停，替他自动选任何一个都是错的
+——自动重连会把他瞬间从大厅拽进战场，自动放弃则拿一个他没做过的决定去改写他的战绩。
 
 ## 匹配状态（Push，route `onMatchStatus`）
 
@@ -173,10 +181,13 @@ message MatchStatus {
 message MatchEnded {
   string match_id = 1;
   int32 winner_slot = 2;             // 0/1
-  repeated SlotResult slots = 3;     // 每个槽位的 {uid, kills, deaths}
+  repeated SlotResult slots = 3;     // 每个槽位的 {uid, kills, deaths, left}
   int32 duration_seconds = 4;        // 从实例开始到判出胜负
 }
 ```
+
+`slots[i].left = true` 表示这位玩家中途放弃了对局（`uid` 仍是他的账号 ID）：他不会收到
+这条 push，战绩也不会入账，所以客户端拿到的槽位数据里他不会出现在正常结果中。
 
 **客户端必须把它当成「本局结束」的权威信号**：实例一终结帧流就断，若客户端仍自认在对局
 中，2.5 秒的接收看门狗会把「本局结束」误判成掉线（重连 → resume → 重新入队）。正确动作
@@ -295,6 +306,45 @@ message JoinMsg {}
 （只在服务端日志里留一行），所以客户端必须先拿到 `LoginReply.ok=true`。
 重连时用同一个账号登录/resume 就能找回原来的对局实例（见上文 `onMatched` 的重连说明）。
 
+### match.match.pending —— 我有没有没打完的局（Request/Response）
+
+```proto
+message PendingMatchMsg  {}
+message PendingMatchReply { bool found = 1; string match_id = 2; }
+```
+
+payload 空，身份来自会话。客户端**登录成功、刚进大厅时问一次**：`found=true` 就弹
+「回到对局 / 放弃对局」的询问框，`found=false` 就什么都不做。
+
+服务端只做查询（`findInstance`：向所有 game 节点 fan-out 一次 `game.game.rejoin`），
+**不写会话数据、不推 `onMatched`、不入队** —— 否则「询问」就变成了「强制重连」，
+玩家没得选。未绑定会话（没登录）回 `found=false`，不报错。
+
+### match.match.abandon —— 放弃那场没打完的局（Request/Response）
+
+```proto
+message AbandonMatchMsg  {}
+message AbandonMatchReply { bool ok = 1; string reason = 2; }
+```
+
+payload 空，身份来自会话。**放弃不是终止对局实例**：服务端只是把当前玩家从那一局里
+**释放**出来 ——
+
+- 他不再收到增量/全量帧（`onFrame` 不再推给他），`game.cmd` / `game.resync` 查不到实例；
+- 他不再被回局查询命中（`match.join` / `match.pending` 都找不到他），不会又被领回旧局；
+- 结算时他的槽位带 `left` 标记，logic **跳过他的战绩**（不计场次、胜负、K/D，也不写历史）；
+- `onMatchEnded` 也不推给他（他已经不在这一局里了）。
+
+**对局本身照常继续**：对手那一局不受影响，他照旧能把这一局打到分出胜负（对手的结算
+正常入账）。实例只有在最后一个在场玩家也离开后才终结。
+
+| reason | ok | 含义与客户端动作 |
+|---|---|---|
+| `released` | true | 已从对局里释放。收起询问框，留在大厅（可以重新匹配） |
+| `not_found` | false | 此刻已经查不到他的存量对局（刚好打完 / 已经释放过）。目标已达成，收起询问框 |
+| `unauthenticated` | false | 会话未绑定账号。提示重新登录 |
+| `internal` | false | `game.game.leave` 的 RPC 不通。**保留询问框**并提示可重试（别假装成功） |
+
 ### game.game.cmd —— 一帧上行命令（约 60 Hz）
 
 输入与射击**合并成一条消息**（帧是最小发送单位）。`shoot` 是边沿触发，未触发时为
@@ -370,6 +420,12 @@ message RejoinReply {
   int32 player_idx = 3; // 原本的玩家槽位（0/1）
 }
 
+// match → game，把玩家从存量实例里释放出来（route "game.game.leave"）：
+// 客户端在大厅选择「放弃对局」时由 match 转发。只释放这一个槽位 —— 实例与对手
+// 那一局都不受影响（见上文 match.match.abandon）。
+message LeaveMsg  { string uid = 1; }  // 会话 UID（账号 ID）
+message LeaveReply { bool ok = 1; }    // false = 这个节点上没有他的实例
+
 // match → gate，请玩家所属的 gate 把对局信息写进会话数据（route "gate.gate.bindgame"）
 message BindGameMsg {
   string uid = 1;            // 会话 UID（账号 ID）
@@ -382,7 +438,9 @@ message BindGameReply { bool found = 1; } // false = 这个 gate 上已经没有
 // game → logic，一局结束时的战绩上报（route "logic.logic.recordmatch"）
 // 用 app.RPC（不是 RPCTo）：RPCType_User 走 router 的 default route，任意 logic 节点都能处理。
 // **不重试、不去重**：失败只记日志（spec 明确取舍）。载荷带 match_id，将来要加幂等键不用改协议。
-message SlotResult { string uid = 1; int32 kills = 2; int32 deaths = 3; } // uid 为空串 = 空槽位
+// uid 为空串 = 空槽位（这一局压根没这个人）；left = true = 这位玩家中途放弃了对局
+// （uid 仍是他的账号 ID，结算方把他跳过、其余人照常入账）。
+message SlotResult { string uid = 1; int32 kills = 2; int32 deaths = 3; bool left = 4; }
 message RecordMatchMsg {
   string match_id = 1;
   repeated SlotResult slots = 2; // 下标即槽位 0/1

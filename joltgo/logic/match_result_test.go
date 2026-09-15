@@ -89,6 +89,71 @@ func TestRecordMatchSkipsIncompleteSlots(t *testing.T) {
 	}
 }
 
+// 中途放弃对局的玩家不进结算：他的档案与历史一行都不写，而**对手照常入账** ——
+// 对手确实打完了一局，不能因为有人跑了就白打（spec：放弃者不参与本局结算）。
+func TestRecordMatchSkipsPlayerWhoLeft(t *testing.T) {
+	env := newServiceTestEnv(t)
+	ctx := context.Background()
+	for _, id := range []string{"7", "8"} {
+		if err := env.svc.EnsureProfile(ctx, id); err != nil {
+			t.Fatalf("EnsureProfile(%s): %v", id, err)
+		}
+	}
+	// 对手的名字仍然解析得到（uid 还在，只是带了 left 标记）—— 历史里看得见「跟谁打的」。
+	env.mr.HSet(persist.AccountKey(8), fmt.Sprintf("%d", accountpb.FieldDBAccount_Username), "bob")
+
+	applied, err := env.svc.RecordMatch(ctx, MatchResult{
+		MatchID: "m1",
+		Slots: []MatchSlot{
+			{UID: "7", Kills: 10, Deaths: 2},
+			{UID: "8", Kills: 2, Deaths: 10, Left: true}, // 中途放弃
+		},
+		WinnerSlot: 0, DurationSeconds: 90,
+	})
+	if err != nil || !applied {
+		t.Fatalf("RecordMatch: applied=%v err=%v", applied, err)
+	}
+
+	winner, err := env.svc.Profile(ctx, "7")
+	if err != nil {
+		t.Fatalf("Profile(7): %v", err)
+	}
+	if winner.Matches != 1 || winner.Wins != 1 || winner.Kills != 10 || winner.Deaths != 2 {
+		t.Fatalf("在场玩家的战绩应照常入账: %+v", winner)
+	}
+	if len(winner.Recent) != 1 || winner.Recent[0].OpponentName != "bob" ||
+		winner.Recent[0].OpponentKills != 2 {
+		t.Fatalf("对手离场前的战绩应留在历史快照里: %+v", winner.Recent)
+	}
+
+	leaver, err := env.svc.Profile(ctx, "8")
+	if err != nil {
+		t.Fatalf("Profile(8): %v", err)
+	}
+	if leaver.Matches != 0 || leaver.XP != 0 || leaver.Kills != 0 || len(leaver.Recent) != 0 {
+		t.Fatalf("放弃对局的玩家不该进结算: %+v", leaver)
+	}
+}
+
+// 双方都放弃了：没有人的档案要更新，返回未入账（不是错误）。
+func TestRecordMatchNotAppliedWhenEveryoneLeft(t *testing.T) {
+	env := newServiceTestEnv(t)
+	applied, err := env.svc.RecordMatch(context.Background(), MatchResult{
+		MatchID: "m1",
+		Slots: []MatchSlot{
+			{UID: "7", Kills: 3, Left: true},
+			{UID: "8", Kills: 4, Left: true},
+		},
+		WinnerSlot: 1, DurationSeconds: 12,
+	})
+	if err != nil {
+		t.Fatalf("RecordMatch 不该报错: %v", err)
+	}
+	if applied {
+		t.Fatal("一个人都不剩时不该入账")
+	}
+}
+
 func TestProfileCreatesMissingStatsRow(t *testing.T) {
 	env := newServiceTestEnv(t)
 	ctx := context.Background()

@@ -39,6 +39,12 @@ func refresh() -> void:
 	var searching := state == screen_manager.State.MATCHING
 	%StartMatch.visible = not searching
 	%CancelMatch.visible = searching
+	# 显示 / 隐藏按钮时把焦点跟着搬走：隐藏的控件不能继续持有焦点，否则键盘玩家按确认键
+	# 会打到一个看不见的按钮上（隐藏式界面最常见的键盘陷阱）。
+	if searching and %StartMatch.has_focus():
+		%CancelMatch.grab_focus()
+	elif not searching and %CancelMatch.has_focus():
+		%StartMatch.grab_focus()
 	if searching:
 		# 队列人数与等待时长来自服务端每秒推送（onMatchStatus）；推送还没到时先显示占位，
 		# 免得闪成「队列 0 人」。

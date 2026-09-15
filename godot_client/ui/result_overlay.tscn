@@ -1,64 +1,88 @@
-[gd_scene format=3]
+[gd_scene load_steps=3 format=3]
 
-[ext_resource type="Theme" path="res://theme/tactical_theme.tres" id="1_so2f1"]
-[ext_resource type="Script" path="res://ui/result_overlay.gd" id="2_5d3vn"]
+[ext_resource type="Theme" path="res://theme/tactical_theme.tres" id="1_theme"]
+[ext_resource type="Script" path="res://ui/result_overlay.gd" id="2_result"]
 
-[node name="ResultOverlay" type="Control" unique_id=908910239]
-visible = false
+[node name="ResultOverlay" type="Control"]
 layout_mode = 3
-anchors_preset = 0
-size_flags_horizontal = 3
-size_flags_vertical = 3
-theme = ExtResource("1_so2f1")
-script = ExtResource("2_5d3vn")
-
-[node name="Scrim" type="ColorRect" parent="." unique_id=1534282010]
-layout_mode = 0
+anchors_preset = 15
 anchor_right = 1.0
 anchor_bottom = 1.0
-size_flags_horizontal = 3
-size_flags_vertical = 3
-color = Color(0.03, 0.035, 0.043, 0.86)
+grow_horizontal = 2
+grow_vertical = 2
+theme = ExtResource("1_theme")
+script = ExtResource("2_result")
 
-[node name="Center" type="CenterContainer" parent="." unique_id=45036042]
-layout_mode = 0
+[node name="Scrim" type="ColorRect" parent="."]
+unique_name_in_owner = true
+layout_mode = 1
+anchors_preset = 15
 anchor_right = 1.0
 anchor_bottom = 1.0
-size_flags_horizontal = 3
-size_flags_vertical = 3
+grow_horizontal = 2
+grow_vertical = 2
 
-[node name="@VBoxContainer@36" type="VBoxContainer" parent="Center" unique_id=984946075]
+[node name="Center" type="CenterContainer" parent="."]
+unique_name_in_owner = true
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+
+[node name="Panel" type="PanelContainer" parent="Center"]
+custom_minimum_size = Vector2(460, 0)
+layout_mode = 2
+theme_type_variation = &"DialogPanel"
+
+[node name="Rows" type="VBoxContainer" parent="Center/Panel"]
 layout_mode = 2
 theme_override_constants/separation = 12
 
-[node name="Headline" type="Label" parent="Center/@VBoxContainer@36" unique_id=1870396193]
+[node name="Headline" type="Label" parent="Center/Panel/Rows"]
 unique_name_in_owner = true
 layout_mode = 2
-theme_type_variation = &"LabelHero"
+theme_type_variation = &"HeadlineWin"
+text = "本局结束"
+horizontal_alignment = 1
 
-[node name="ScoreLine" type="Label" parent="Center/@VBoxContainer@36" unique_id=2145633377]
+[node name="ScoreLine" type="Label" parent="Center/Panel/Rows"]
 unique_name_in_owner = true
 layout_mode = 2
-theme_type_variation = &"LabelSub"
+theme_type_variation = &"LabelMonoSub"
+horizontal_alignment = 1
 
-[node name="Duration" type="Label" parent="Center/@VBoxContainer@36" unique_id=1209688389]
+[node name="Duration" type="Label" parent="Center/Panel/Rows"]
 unique_name_in_owner = true
 layout_mode = 2
 theme_type_variation = &"LabelMuted"
+horizontal_alignment = 1
 
-[node name="@HBoxContainer@37" type="HBoxContainer" parent="Center/@VBoxContainer@36" unique_id=1537399134]
+[node name="Divider" type="HSeparator" parent="Center/Panel/Rows"]
+layout_mode = 2
+
+[node name="Actions" type="HBoxContainer" parent="Center/Panel/Rows"]
 layout_mode = 2
 theme_override_constants/separation = 8
-alignment = 1
 
-[node name="BackToLobby" type="Button" parent="Center/@VBoxContainer@36/@HBoxContainer@37" unique_id=519302640]
+[node name="BackToLobby" type="Button" parent="Center/Panel/Rows/Actions"]
+mouse_default_cursor_shape = 2
+tooltip_text = "回到大厅入口页（顺手刷新战绩）"
 unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 44)
 layout_mode = 2
-theme_type_variation = &"PrimaryButton"
+size_flags_horizontal = 3
+theme_type_variation = &"GhostButton"
 text = "回大厅"
 
-[node name="PlayAgain" type="Button" parent="Center/@VBoxContainer@36/@HBoxContainer@37" unique_id=1232731122]
+[node name="PlayAgain" type="Button" parent="Center/Panel/Rows/Actions"]
+mouse_default_cursor_shape = 2
+tooltip_text = "直接重新排队，不用先回大厅"
 unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 44)
 layout_mode = 2
-theme_type_variation = &"GhostButton"
+size_flags_horizontal = 3
+theme_type_variation = &"PrimaryButton"
 text = "再来一局"
