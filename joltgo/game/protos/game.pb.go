@@ -2567,6 +2567,262 @@ func (x *MatchEnded) GetDurationSeconds() int32 {
 	return 0
 }
 
+// AddBotsMsg 是 gm → match 的 RPC（route "match.match.addbots"）：往匹配队列里
+// 塞 N 个机器人凑人数。
+//
+// admin_key 是共享密钥。这条 route 会被 gate 按前缀路由到 match 节点，
+// **客户端也能发到**，所以服务端不能靠「route 是内部的」来假设调用方可信：
+// 除了密钥，还要拒绝任何「带着会话」的调用（那是客户端经 gate 转发来的）。
+type AddBotsMsg struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	Count    int32  `protobuf:"varint,1,opt,name=count,proto3" json:"count,omitempty"` // 期望入队的机器人数量，服务端另有单次上限
+	AdminKey string `protobuf:"bytes,2,opt,name=admin_key,json=adminKey,proto3" json:"admin_key,omitempty"`
+}
+
+func (x *AddBotsMsg) Reset() {
+	*x = AddBotsMsg{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_game_protos_game_proto_msgTypes[41]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *AddBotsMsg) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AddBotsMsg) ProtoMessage() {}
+
+func (x *AddBotsMsg) ProtoReflect() protoreflect.Message {
+	mi := &file_game_protos_game_proto_msgTypes[41]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AddBotsMsg.ProtoReflect.Descriptor instead.
+func (*AddBotsMsg) Descriptor() ([]byte, []int) {
+	return file_game_protos_game_proto_rawDescGZIP(), []int{41}
+}
+
+func (x *AddBotsMsg) GetCount() int32 {
+	if x != nil {
+		return x.Count
+	}
+	return 0
+}
+
+func (x *AddBotsMsg) GetAdminKey() string {
+	if x != nil {
+		return x.AdminKey
+	}
+	return ""
+}
+
+// AddBotsReply 是 match.match.addbots 的应答。
+// reason：forbidden | internal | noop（count<=0 时的空操作，ok 仍为 true）。
+type AddBotsReply struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	Ok       bool   `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
+	Enqueued int32  `protobuf:"varint,2,opt,name=enqueued,proto3" json:"enqueued,omitempty"` // 实际入队数量
+	Reason   string `protobuf:"bytes,3,opt,name=reason,proto3" json:"reason,omitempty"`
+}
+
+func (x *AddBotsReply) Reset() {
+	*x = AddBotsReply{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_game_protos_game_proto_msgTypes[42]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *AddBotsReply) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AddBotsReply) ProtoMessage() {}
+
+func (x *AddBotsReply) ProtoReflect() protoreflect.Message {
+	mi := &file_game_protos_game_proto_msgTypes[42]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AddBotsReply.ProtoReflect.Descriptor instead.
+func (*AddBotsReply) Descriptor() ([]byte, []int) {
+	return file_game_protos_game_proto_rawDescGZIP(), []int{42}
+}
+
+func (x *AddBotsReply) GetOk() bool {
+	if x != nil {
+		return x.Ok
+	}
+	return false
+}
+
+func (x *AddBotsReply) GetEnqueued() int32 {
+	if x != nil {
+		return x.Enqueued
+	}
+	return 0
+}
+
+func (x *AddBotsReply) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+// GrantCoinsMsg 是 gm → logic 的 RPC（route "logic.logic.grantcoins"）：
+// 给指定账号加（delta>0）或扣（delta<0）金币。用户名 → accountID 的解析在 gm 侧完成。
+type GrantCoinsMsg struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	AccountId string `protobuf:"bytes,1,opt,name=account_id,json=accountId,proto3" json:"account_id,omitempty"`
+	Delta     int64  `protobuf:"varint,2,opt,name=delta,proto3" json:"delta,omitempty"`
+	AdminKey  string `protobuf:"bytes,3,opt,name=admin_key,json=adminKey,proto3" json:"admin_key,omitempty"`
+}
+
+func (x *GrantCoinsMsg) Reset() {
+	*x = GrantCoinsMsg{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_game_protos_game_proto_msgTypes[43]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *GrantCoinsMsg) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GrantCoinsMsg) ProtoMessage() {}
+
+func (x *GrantCoinsMsg) ProtoReflect() protoreflect.Message {
+	mi := &file_game_protos_game_proto_msgTypes[43]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GrantCoinsMsg.ProtoReflect.Descriptor instead.
+func (*GrantCoinsMsg) Descriptor() ([]byte, []int) {
+	return file_game_protos_game_proto_rawDescGZIP(), []int{43}
+}
+
+func (x *GrantCoinsMsg) GetAccountId() string {
+	if x != nil {
+		return x.AccountId
+	}
+	return ""
+}
+
+func (x *GrantCoinsMsg) GetDelta() int64 {
+	if x != nil {
+		return x.Delta
+	}
+	return 0
+}
+
+func (x *GrantCoinsMsg) GetAdminKey() string {
+	if x != nil {
+		return x.AdminKey
+	}
+	return ""
+}
+
+// GrantCoinsReply 是 logic.logic.grantcoins 的应答。
+// reason：forbidden | account_not_found | unauthenticated | profile_missing | internal。
+type GrantCoinsReply struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	Ok     bool   `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
+	Coins  int64  `protobuf:"varint,2,opt,name=coins,proto3" json:"coins,omitempty"` // 变更后的余额（ok=true 时有效）
+	Reason string `protobuf:"bytes,3,opt,name=reason,proto3" json:"reason,omitempty"`
+}
+
+func (x *GrantCoinsReply) Reset() {
+	*x = GrantCoinsReply{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_game_protos_game_proto_msgTypes[44]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *GrantCoinsReply) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GrantCoinsReply) ProtoMessage() {}
+
+func (x *GrantCoinsReply) ProtoReflect() protoreflect.Message {
+	mi := &file_game_protos_game_proto_msgTypes[44]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GrantCoinsReply.ProtoReflect.Descriptor instead.
+func (*GrantCoinsReply) Descriptor() ([]byte, []int) {
+	return file_game_protos_game_proto_rawDescGZIP(), []int{44}
+}
+
+func (x *GrantCoinsReply) GetOk() bool {
+	if x != nil {
+		return x.Ok
+	}
+	return false
+}
+
+func (x *GrantCoinsReply) GetCoins() int64 {
+	if x != nil {
+		return x.Coins
+	}
+	return 0
+}
+
+func (x *GrantCoinsReply) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
 var File_game_protos_game_proto protoreflect.FileDescriptor
 
 var file_game_protos_game_proto_rawDesc = []byte{
@@ -2795,9 +3051,30 @@ var file_game_protos_game_proto_rawDesc = []byte{
 	0x53, 0x6c, 0x6f, 0x74, 0x52, 0x65, 0x73, 0x75, 0x6c, 0x74, 0x52, 0x05, 0x73, 0x6c, 0x6f, 0x74,
 	0x73, 0x12, 0x29, 0x0a, 0x10, 0x64, 0x75, 0x72, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x5f, 0x73, 0x65,
 	0x63, 0x6f, 0x6e, 0x64, 0x73, 0x18, 0x04, 0x20, 0x01, 0x28, 0x05, 0x52, 0x0f, 0x64, 0x75, 0x72,
-	0x61, 0x74, 0x69, 0x6f, 0x6e, 0x53, 0x65, 0x63, 0x6f, 0x6e, 0x64, 0x73, 0x42, 0x14, 0x5a, 0x12,
-	0x6a, 0x6f, 0x6c, 0x74, 0x67, 0x6f, 0x2f, 0x67, 0x61, 0x6d, 0x65, 0x2f, 0x70, 0x72, 0x6f, 0x74,
-	0x6f, 0x73, 0x62, 0x06, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x33,
+	0x61, 0x74, 0x69, 0x6f, 0x6e, 0x53, 0x65, 0x63, 0x6f, 0x6e, 0x64, 0x73, 0x22, 0x3f, 0x0a, 0x0a,
+	0x41, 0x64, 0x64, 0x42, 0x6f, 0x74, 0x73, 0x4d, 0x73, 0x67, 0x12, 0x14, 0x0a, 0x05, 0x63, 0x6f,
+	0x75, 0x6e, 0x74, 0x18, 0x01, 0x20, 0x01, 0x28, 0x05, 0x52, 0x05, 0x63, 0x6f, 0x75, 0x6e, 0x74,
+	0x12, 0x1b, 0x0a, 0x09, 0x61, 0x64, 0x6d, 0x69, 0x6e, 0x5f, 0x6b, 0x65, 0x79, 0x18, 0x02, 0x20,
+	0x01, 0x28, 0x09, 0x52, 0x08, 0x61, 0x64, 0x6d, 0x69, 0x6e, 0x4b, 0x65, 0x79, 0x22, 0x52, 0x0a,
+	0x0c, 0x41, 0x64, 0x64, 0x42, 0x6f, 0x74, 0x73, 0x52, 0x65, 0x70, 0x6c, 0x79, 0x12, 0x0e, 0x0a,
+	0x02, 0x6f, 0x6b, 0x18, 0x01, 0x20, 0x01, 0x28, 0x08, 0x52, 0x02, 0x6f, 0x6b, 0x12, 0x1a, 0x0a,
+	0x08, 0x65, 0x6e, 0x71, 0x75, 0x65, 0x75, 0x65, 0x64, 0x18, 0x02, 0x20, 0x01, 0x28, 0x05, 0x52,
+	0x08, 0x65, 0x6e, 0x71, 0x75, 0x65, 0x75, 0x65, 0x64, 0x12, 0x16, 0x0a, 0x06, 0x72, 0x65, 0x61,
+	0x73, 0x6f, 0x6e, 0x18, 0x03, 0x20, 0x01, 0x28, 0x09, 0x52, 0x06, 0x72, 0x65, 0x61, 0x73, 0x6f,
+	0x6e, 0x22, 0x61, 0x0a, 0x0d, 0x47, 0x72, 0x61, 0x6e, 0x74, 0x43, 0x6f, 0x69, 0x6e, 0x73, 0x4d,
+	0x73, 0x67, 0x12, 0x1d, 0x0a, 0x0a, 0x61, 0x63, 0x63, 0x6f, 0x75, 0x6e, 0x74, 0x5f, 0x69, 0x64,
+	0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x09, 0x61, 0x63, 0x63, 0x6f, 0x75, 0x6e, 0x74, 0x49,
+	0x64, 0x12, 0x14, 0x0a, 0x05, 0x64, 0x65, 0x6c, 0x74, 0x61, 0x18, 0x02, 0x20, 0x01, 0x28, 0x03,
+	0x52, 0x05, 0x64, 0x65, 0x6c, 0x74, 0x61, 0x12, 0x1b, 0x0a, 0x09, 0x61, 0x64, 0x6d, 0x69, 0x6e,
+	0x5f, 0x6b, 0x65, 0x79, 0x18, 0x03, 0x20, 0x01, 0x28, 0x09, 0x52, 0x08, 0x61, 0x64, 0x6d, 0x69,
+	0x6e, 0x4b, 0x65, 0x79, 0x22, 0x4f, 0x0a, 0x0f, 0x47, 0x72, 0x61, 0x6e, 0x74, 0x43, 0x6f, 0x69,
+	0x6e, 0x73, 0x52, 0x65, 0x70, 0x6c, 0x79, 0x12, 0x0e, 0x0a, 0x02, 0x6f, 0x6b, 0x18, 0x01, 0x20,
+	0x01, 0x28, 0x08, 0x52, 0x02, 0x6f, 0x6b, 0x12, 0x14, 0x0a, 0x05, 0x63, 0x6f, 0x69, 0x6e, 0x73,
+	0x18, 0x02, 0x20, 0x01, 0x28, 0x03, 0x52, 0x05, 0x63, 0x6f, 0x69, 0x6e, 0x73, 0x12, 0x16, 0x0a,
+	0x06, 0x72, 0x65, 0x61, 0x73, 0x6f, 0x6e, 0x18, 0x03, 0x20, 0x01, 0x28, 0x09, 0x52, 0x06, 0x72,
+	0x65, 0x61, 0x73, 0x6f, 0x6e, 0x42, 0x14, 0x5a, 0x12, 0x6a, 0x6f, 0x6c, 0x74, 0x67, 0x6f, 0x2f,
+	0x67, 0x61, 0x6d, 0x65, 0x2f, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x73, 0x62, 0x06, 0x70, 0x72, 0x6f,
+	0x74, 0x6f, 0x33,
 }
 
 var (
@@ -2812,7 +3089,7 @@ func file_game_protos_game_proto_rawDescGZIP() []byte {
 	return file_game_protos_game_proto_rawDescData
 }
 
-var file_game_protos_game_proto_msgTypes = make([]protoimpl.MessageInfo, 41)
+var file_game_protos_game_proto_msgTypes = make([]protoimpl.MessageInfo, 45)
 var file_game_protos_game_proto_goTypes = []any{
 	(*CommandMsg)(nil),         // 0: game.CommandMsg
 	(*JoinMsg)(nil),            // 1: game.JoinMsg
@@ -2855,6 +3132,10 @@ var file_game_protos_game_proto_goTypes = []any{
 	(*MatchCancelReply)(nil),   // 38: game.MatchCancelReply
 	(*MatchStatus)(nil),        // 39: game.MatchStatus
 	(*MatchEnded)(nil),         // 40: game.MatchEnded
+	(*AddBotsMsg)(nil),         // 41: game.AddBotsMsg
+	(*AddBotsReply)(nil),       // 42: game.AddBotsReply
+	(*GrantCoinsMsg)(nil),      // 43: game.GrantCoinsMsg
+	(*GrantCoinsReply)(nil),    // 44: game.GrantCoinsReply
 }
 var file_game_protos_game_proto_depIdxs = []int32{
 	15, // 0: game.LogicStateReply.items:type_name -> game.LogicShopItem
@@ -3370,6 +3651,54 @@ func file_game_protos_game_proto_init() {
 				return nil
 			}
 		}
+		file_game_protos_game_proto_msgTypes[41].Exporter = func(v any, i int) any {
+			switch v := v.(*AddBotsMsg); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_game_protos_game_proto_msgTypes[42].Exporter = func(v any, i int) any {
+			switch v := v.(*AddBotsReply); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_game_protos_game_proto_msgTypes[43].Exporter = func(v any, i int) any {
+			switch v := v.(*GrantCoinsMsg); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_game_protos_game_proto_msgTypes[44].Exporter = func(v any, i int) any {
+			switch v := v.(*GrantCoinsReply); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -3377,7 +3706,7 @@ func file_game_protos_game_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: file_game_protos_game_proto_rawDesc,
 			NumEnums:      0,
-			NumMessages:   41,
+			NumMessages:   45,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
