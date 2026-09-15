@@ -240,13 +240,14 @@ func TestStoreMatchesWorldWhenMatchEnds(t *testing.T) {
 		t.Fatalf("应判 0 号获胜，得到 %d", s.winner)
 	}
 
-	// 结算后到自动重开之间的每一帧都要保持一致（重开会整体重建世界）。
-	for i := 0; i < matchOverTicks+3; i++ {
+	// 胜负判定后不再自动重开（重开已随场景重置一起删除），但此后每一帧仍然要保持
+	// world 与 store 一致 —— 分数不再变化，场景继续跑。
+	for i := 0; i < 120; i++ {
 		s.Step()
 		assertStoreMatchesWorld(t, s)
 	}
-	if s.winner != -1 {
-		t.Fatalf("超时后应已自动重开，得到 winner=%d", s.winner)
+	if s.winner != 0 {
+		t.Fatalf("胜负判定后不应重开，得到 winner=%d", s.winner)
 	}
 }
 

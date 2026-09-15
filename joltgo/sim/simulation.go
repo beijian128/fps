@@ -41,7 +41,6 @@ const (
 	playerMaxHealth = 100.0 // 满血值（也是复活值）
 	playerHitDamage = 34.0  // 每发弹丸命中扣血（3 发击杀）
 	killTarget      = 10    // 先到 10 杀获胜
-	matchOverTicks  = 100   // 分出胜负后 5 秒自动重开一局（20 Hz × 5）
 	hitboxOffsetY   = 0.9   // 命中盒胶囊中心相对角色脚底的抬高量（= characterOffsetY）
 	playerSpawnY    = 0.2   // 玩家出生 / 复活点脚底高度
 )
@@ -127,7 +126,29 @@ type Simulation struct {
 	step   int
 	score  [MaxPlayers]PlayerScore // 各槽位战绩（PlayerScore 组件只是它的同步载体）
 	winner int32                   // -1 = 进行中，否则为获胜槽位
-	overAt int                     // 分出胜负的 step（0 = 尚未分出胜负）
+
+	// 结算快照：判出胜负时填充一次，由 game 侧 DrainOutcome 取走。一个实例只打一局，
+	// 所以这里最多被填充一次；取走即清（见 DrainOutcome）。
+	outcome    MatchOutcome
+	hasOutcome bool
+}
+
+// MatchOutcome 是一局分出胜负时的结算快照：胜者槽位、双方 k/d、本局时长。
+type MatchOutcome struct {
+	WinnerSlot      int
+	Kills           [MaxPlayers]int32
+	Deaths          [MaxPlayers]int32
+	DurationSeconds int32
+}
+
+// DrainOutcome 取走结算快照（取走即清）。与 DrainFrame 同一风格：调用方每 tick 调一次，
+// 拿到 ok=false 就什么都不做。取走即清保证同一局只会被上报一次。
+func (s *Simulation) DrainOutcome() (MatchOutcome, bool) {
+	if !s.hasOutcome {
+		return MatchOutcome{}, false
+	}
+	s.hasOutcome = false
+	return s.outcome, true
 }
 
 // New 创建一个空模拟。物理世界在 Init 时由 physics.Create 创建。
@@ -259,6 +280,7 @@ func (s *Simulation) init() {
 	s.game = s.world.NewEntity()
 	ecs.Add(s.world, s.game, GameState{Winner: -1})
 	s.winner = -1
+	s.hasOutcome = false
 	s.rep.Set(uint32(s.game), attrGameWinner, replication.I32(-1))
 
 	// 让角色立即着地：否则第一次跳跃会在胶囊下落结算时被吞掉。
@@ -284,7 +306,6 @@ func (s *Simulation) reset() {
 	s.step = 0
 	s.score = [MaxPlayers]PlayerScore{}
 	s.winner = -1
-	s.overAt = 0
 	s.init() // init 里统一重置对局状态并搭建场景
 }
 

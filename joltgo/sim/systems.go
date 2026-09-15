@@ -200,14 +200,12 @@ func (s *Simulation) expireProjectilesSystem() {
 	}
 }
 
-// matchSystem 对局结算：某一方击杀数先到 killTarget 即分出胜负（写 Game.Winner），
-// 再过 matchOverTicks（5 秒）自动重开一局。重开直接走 Reset —— 整张场景（箱子被
-// 推乱、弹丸还在飞）都要一并复位，比「只清计数」多不了几行，但不会留下残局。
+// matchSystem 对局结算：某一方击杀数先到 killTarget 即分出胜负（写 Game.Winner）。
+//
+// 胜负判定后**不重开**：填充一份一次性的结算快照，由 game 侧取走、推结算通知、上报
+// 战绩并终结实例。玩家要再打一局必须回大厅重新匹配（见 spec §6.1/§6.2）。
 func (s *Simulation) matchSystem() {
 	if s.winner >= 0 {
-		if s.step-s.overAt >= matchOverTicks {
-			s.reset()
-		}
 		return
 	}
 	for i := 0; i < MaxPlayers; i++ {
@@ -215,9 +213,15 @@ func (s *Simulation) matchSystem() {
 			continue
 		}
 		s.winner = int32(i)
-		s.overAt = s.step
 		s.syncGameState()
 		s.rep.Set(uint32(s.game), attrGameWinner, replication.I32(s.winner))
+		out := MatchOutcome{WinnerSlot: i, DurationSeconds: int32(s.step / 20)}
+		for slot := 0; slot < MaxPlayers; slot++ {
+			out.Kills[slot] = s.score[slot].Kills
+			out.Deaths[slot] = s.score[slot].Deaths
+		}
+		s.outcome = out
+		s.hasOutcome = true
 		return
 	}
 }

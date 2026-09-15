@@ -741,16 +741,17 @@ func TestKillTargetEndsMatch(t *testing.T) {
 		t.Fatalf("GameState 组件应同步胜者，得到 %+v", gs)
 	}
 
-	// 5 秒后自动重开：世界重建、战绩清零。
-	for i := 0; i < matchOverTicks+2; i++ {
+	// 胜负判定后**不再自动重开**：胜者与战绩都停在那里，等 game 侧终结实例。
+	// （重开一局现在只能靠玩家回大厅重新匹配，见 spec §6.1。）
+	for i := 0; i < 200; i++ {
 		s.Step()
 	}
 	st = snapshotWorld(s)
-	if st.Winner != -1 || st.Step > matchOverTicks+3 {
-		t.Fatalf("超时后应自动重开一局，得到 winner=%d step=%d", st.Winner, st.Step)
+	if st.Winner != 0 {
+		t.Fatalf("胜负判定后不应重开，得到 winner=%d", st.Winner)
 	}
-	if st.Players[0].Kills != 0 || st.Players[1].Deaths != 0 {
-		t.Fatalf("新一局战绩应清零，得到 kills=%d deaths=%d", st.Players[0].Kills, st.Players[1].Deaths)
+	if st.Players[0].Kills != killTarget {
+		t.Fatalf("胜负判定后战绩不应清零，得到 kills=%d", st.Players[0].Kills)
 	}
 }
 
