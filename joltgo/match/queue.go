@@ -14,8 +14,6 @@ package match
 
 import (
 	"context"
-	"errors"
-	"time"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -24,8 +22,11 @@ import (
 const queueKey = "match:queue"
 
 // enqueueScript 入队，score 取 Redis 服务端时钟（毫秒）。
-// 同一个 uid 重复入队只更新 score，即**重新计时** —— 排队期间断线重连会被视为
-// 重新排队，这是有意的（他确实刚刚才回来）。
+//
+// **NX**：同一 uid 重复入队是空操作，不刷新 score。客户端的 match.join 在等待期每
+// 15 秒静默重发一次（防「服务端静默丢了我」），覆盖式 ZADD 会把这 15 秒的节奏写进
+// 入队时间，服务端算出来的「已等待」就永远在 0–15 秒之间跳；改 NX 后重发幂等，
+// 等待时长在断线重连后也保持连续。取消匹配走 ZREM，所以重新排队会拿到新时间戳。
 //
 // 必须显式 `return 1`：Lua 脚本没有返回值时，服务端应答是 nil bulk，go-redis
 // 会把它报成 redis.Nil，于是「正常返回」与「真出错」在调用方看来一模一样。
@@ -34,7 +35,7 @@ const queueKey = "match:queue"
 var enqueueScript = redis.NewScript(`
 local t = redis.call('TIME')
 local ms = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
-redis.call('ZADD', KEYS[1], ms, ARGV[1])
+redis.call('ZADD', KEYS[1], 'NX', ms, ARGV[1])
 return 1
 `)
 
@@ -46,20 +47,6 @@ return 1
 var pairScript = redis.NewScript(`
 if redis.call('ZCARD', KEYS[1]) < 2 then return {} end
 return redis.call('ZPOPMIN', KEYS[1], 2)
-`)
-
-// staleScript 原子地取出「最早且已等待超过 ARGV[1] 毫秒」的那一个（单人兜底）。
-//
-// 用 ZRANGEBYSCORE + ZREM 而不是 ZPOPMIN：要取的是**最早且已超时**的，
-// 而不是单纯最早的 —— 后者会把一个刚入队的人拿去单人开局。
-var staleScript = redis.NewScript(`
-local t = redis.call('TIME')
-local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
-local cutoff = now - tonumber(ARGV[1])
-local r = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', cutoff, 'LIMIT', 0, 1)
-if #r == 0 then return nil end
-redis.call('ZREM', KEYS[1], r[1])
-return r[1]
 `)
 
 // Queue 是 Redis 上的配对队列。
@@ -96,16 +83,55 @@ func (q *Queue) PopPair(ctx context.Context) ([]string, error) {
 	return uids, nil
 }
 
-// PopStale 原子取出「最早且已等待超过 timeout」的那一个排队者（单人兜底）。
-// 返回空串表示当前没有超时的排队者。
-func (q *Queue) PopStale(ctx context.Context, timeout time.Duration) (string, error) {
-	res, err := staleScript.Run(ctx, q.rdb, []string{queueKey}, timeout.Milliseconds()).Result()
-	if errors.Is(err, redis.Nil) {
-		return "", nil
-	}
+// QueueEntry 是队列里一员的等待状态。
+type QueueEntry struct {
+	UID           string
+	WaitedSeconds int32
+}
+
+// Snapshot 返回队列总人数与逐人等待时长（按入队时间升序）。
+//
+// 时间基准用 Redis 服务端时钟，与入队保持一致 —— 多节点共享同一个时钟，
+// 否则「等了 8 秒」的定义会随节点时钟偏移而变。
+func (q *Queue) Snapshot(ctx context.Context) (int, []QueueEntry, error) {
+	members, err := q.rdb.ZRangeWithScores(ctx, queueKey, 0, -1).Result()
 	if err != nil {
-		return "", err
+		return 0, nil, err
 	}
-	s, _ := res.(string)
-	return s, nil
+	nowMillis, err := q.serverMillis(ctx)
+	if err != nil {
+		return 0, nil, err
+	}
+	entries := make([]QueueEntry, 0, len(members))
+	for _, z := range members {
+		uid, ok := z.Member.(string)
+		if !ok {
+			continue
+		}
+		waited := nowMillis - int64(z.Score)
+		if waited < 0 {
+			waited = 0
+		}
+		entries = append(entries, QueueEntry{UID: uid, WaitedSeconds: int32(waited / 1000)})
+	}
+	return len(entries), entries, nil
+}
+
+// serverMillis 读 Redis 服务端时钟（毫秒）。等待时长的定义必须与入队用同一个时钟。
+func (q *Queue) serverMillis(ctx context.Context) (int64, error) {
+	t, err := q.rdb.Time(ctx).Result()
+	if err != nil {
+		return 0, err
+	}
+	return t.UnixMilli(), nil
+}
+
+// Remove 把 uid 移出队列，返回是否真的移除了（false = 本来就不在队列里，可能是刚被
+// 别人配对走，调用方应据此去查回局）。
+func (q *Queue) Remove(ctx context.Context, uid string) (bool, error) {
+	n, err := q.rdb.ZRem(ctx, queueKey, uid).Result()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }

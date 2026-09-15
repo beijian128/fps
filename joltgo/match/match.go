@@ -25,7 +25,6 @@ const (
 	gameCreateRoute = "game.game.create"   // game 服务的创建对局 RPC route（三段式）
 	gameRejoinRoute = "game.game.rejoin"   // 回局查询 RPC route（三段式）
 	bindGameRoute   = "gate.gate.bindgame" // 请玩家所属 gate 写会话数据（三段式）
-	timeout         = 10 * time.Second     // 单人兜底开局的等待超时
 	tickInterval    = time.Second          // 抢配对的轮询间隔
 )
 
@@ -137,14 +136,15 @@ func (c *Component) tryRejoin(ctx context.Context, uid string) bool {
 	return true
 }
 
-// AfterInit 启动兜底定时器：长时间等不到第二人的玩家单人开局。
+// AfterInit 启动配对循环：每秒尝试凑满两人开局，并把队列状态推给正在等待的玩家。
+//
+// 没有单人兜底：等不到第二个人就一直等，玩家可以主动取消（见 Cancel）。
 func (c *Component) AfterInit() {
 	go func() {
 		ticker := time.NewTicker(tickInterval)
 		defer ticker.Stop()
 		for range ticker.C {
 			c.tryMatch(context.Background())
-			c.tryMatchTimeout(context.Background())
 		}
 	}()
 }
@@ -161,19 +161,6 @@ func (c *Component) tryMatch(ctx context.Context) {
 		return
 	}
 	c.startMatch(ctx, uids)
-}
-
-// tryMatchTimeout 兜底：单人等待超过 timeout 即单人开局。
-func (c *Component) tryMatchTimeout(ctx context.Context) {
-	uid, err := c.queue.PopStale(ctx, timeout)
-	if err != nil {
-		log.Printf("match: pop stale failed: %v", err)
-		return
-	}
-	if uid == "" {
-		return
-	}
-	c.startMatch(ctx, []string{uid})
 }
 
 // bindGameOn 请指定 gate 把对局归属写进玩家的会话数据。

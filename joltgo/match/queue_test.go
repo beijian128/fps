@@ -2,9 +2,7 @@ package match
 
 import (
 	"context"
-	"sync"
 	"testing"
-	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
@@ -105,85 +103,6 @@ func TestEnqueueDedupsByUid(t *testing.T) {
 	got, _ := q.PopPair(ctx)
 	if len(got) != 2 || got[0] == got[1] {
 		t.Fatalf("应弹出两个不同的人，得到 %v", got)
-	}
-}
-
-func TestPopStale(t *testing.T) {
-	q, _ := newTestQueue(t)
-	ctx := context.Background()
-
-	// 刚入队的人不该被单人兜底拿走。注意不能用 miniredis 的 FastForward 来
-	// 「等 10 秒」—— 队列的时间戳取自 Redis 的 TIME 命令，而 miniredis 的 TIME
-	// 返回真实墙钟，不受 FastForward 影响。所以这里直接写 score。
-	now, err := q.nowMs(ctx, t)
-	if err != nil {
-		t.Fatalf("取 Redis 时间报错: %v", err)
-	}
-	if err := q.rdb.ZAdd(ctx, queueKey, redis.Z{Score: float64(now), Member: "fresh"}).Err(); err != nil {
-		t.Fatalf("ZAdd 报错: %v", err)
-	}
-
-	got, err := q.PopStale(ctx, 10*time.Second)
-	if err != nil {
-		t.Fatalf("PopStale 报错: %v", err)
-	}
-	if got != "" {
-		t.Fatalf("未超时不该弹出，得到 %q", got)
-	}
-
-	// 早就入队的人（score 是 1 秒 = 1970 年）应被拿走。
-	if err := q.rdb.ZAdd(ctx, queueKey, redis.Z{Score: 1000, Member: "stale"}).Err(); err != nil {
-		t.Fatalf("ZAdd 报错: %v", err)
-	}
-	got, err = q.PopStale(ctx, 10*time.Second)
-	if err != nil {
-		t.Fatalf("PopStale 报错: %v", err)
-	}
-	if got != "stale" {
-		t.Fatalf("超时后应弹出 stale，得到 %q", got)
-	}
-	if q.queueSize(ctx, t) != 1 {
-		t.Fatalf("应只剩 fresh")
-	}
-}
-
-// 多个 match 节点并发抢同一个人时，只有一个能拿到（Lua 原子取）。
-//
-// 单轮 8 个 goroutine 太容易全错过竞态窗口 —— 评审实测：把 Lua 换成
-// 「ZRangeByScore 再 ZRem」的两趟实现，单轮版本 30 次里能过 28 次。
-// 所以这里循环多轮，每轮独立播种同一个人。
-func TestPopStaleIsAtomic(t *testing.T) {
-	q, _ := newTestQueue(t)
-	ctx := context.Background()
-
-	const rounds = 60
-	const workers = 8
-	for round := 0; round < rounds; round++ {
-		if err := q.rdb.ZAdd(ctx, queueKey, redis.Z{Score: 1000, Member: "stale"}).Err(); err != nil {
-			t.Fatalf("ZAdd 报错: %v", err)
-		}
-		results := make(chan string, workers)
-		var wg sync.WaitGroup
-		for i := 0; i < workers; i++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				got, _ := q.PopStale(context.Background(), 10*time.Second)
-				results <- got
-			}()
-		}
-		wg.Wait()
-		close(results)
-
-		hit := 0
-		for got := range results {
-			if got != "" {
-				hit++
-			}
-		}
-		if hit != 1 {
-			t.Fatalf("第 %d 轮：并发抢同一个人应恰好一个成功，得到 %d", round, hit)
-		}
 	}
 }
 
