@@ -1,6 +1,6 @@
 package main
 
-// 分布式服务端入口：单二进制按 -type 启动五种角色（gate / account / logic / match / game），
+// 分布式服务端入口：单二进制按 -type 启动六种角色（gate / account / logic / match / game / gm），
 // pitaya Cluster 模式（etcd 服务发现 + NATS RPC），共享状态放 Redis。
 //
 //   - gate（frontend）：与客户端直连（WS），把业务消息路由到后端，
@@ -9,16 +9,21 @@ package main
 //   - logic（backend）：玩家档案、钱包与库存，按会话账号提供商店与装备操作
 //   - match（backend）：对局匹配，队列在 Redis（多节点共享）
 //   - game（backend）：游戏逻辑，每个对局一个 goroutine 顺序执行、无锁
+//   - gm（backend）：GM 指令入口。自己起一个 Gin HTTP 端口 + 内嵌 Web 操作页
+//     （不对外开放、不进 gate 路由表、不监听任何 pitaya 端口），只**主动**发后端
+//     RPC：match.match.addbots（往队列塞机器人）/ logic.logic.grantcoins（发钱）。
 //
-// 启动顺序：先起 etcd + nats-server + redis-server（见 deploy/），再起五个进程：
+// 启动顺序：先起 etcd + nats-server + redis-server（见 deploy/），再起六个进程：
 //
 //	joltgo.exe -type gate
 //	joltgo.exe -type account
 //	joltgo.exe -type logic
 //	joltgo.exe -type match
 //	joltgo.exe -type game
+//	joltgo.exe -type gm -gmkey <secret>
 //
-// 只有 -type 与 -redis 两个 flag（gate 的 WS 端口 8080 目前写死在 run 里）。
+// flag：-type / -redis / -gmaddr（gm 的 HTTP 端口，默认 :8082）/ -gmkey（GM 管理密钥，
+// 也可用环境变量 GM_KEY；gm 没配密钥就拒绝启动）。gate 的 WS 端口 8080 仍写死在 run 里。
 //
 // 优雅退出由 pitaya 的 app.Start() 内部处理（SIGINT/SIGTERM → shutdownComponents）。
 
@@ -27,6 +32,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 
 	"github.com/redis/go-redis/v9"
@@ -38,6 +44,7 @@ import (
 	"joltgo/account"
 	"joltgo/game"
 	"joltgo/gate"
+	"joltgo/gm"
 	"joltgo/kv"
 	"joltgo/logic"
 	"joltgo/match"
@@ -46,9 +53,23 @@ import (
 )
 
 func main() {
-	svType := flag.String("type", "gate", "server type: gate | account | logic | match | game")
+	svType := flag.String("type", "gate", "server type: gate | account | logic | match | game | gm")
 	redisAddr := flag.String("redis", kv.DefaultAddr, "redis address (host:port)")
+	gmAddr := flag.String("gmaddr", ":8082", "gm http listen address (type=gm)")
+	gmKey := flag.String("gmkey", "", "gm admin key (type=gm; read by account|logic|match); falls back to $GM_KEY")
 	flag.Parse()
+
+	// GM 的管理密钥：GM 页面用它鉴权，account / logic / match 用它校验后端 RPC。
+	// 空密钥 = 不提供管理入口（两侧都是「拒绝」而不是「放行」）。
+	secret := *gmKey
+	if secret == "" {
+		secret = os.Getenv("GM_KEY")
+	}
+	if *svType == "gm" && secret == "" {
+		// 默认拒绝服务比默认开放安全：忘记配置的后果是服务起不来，
+		// 而不是「谁都能发指令」。
+		log.Fatalf("-type gm 需要 -gmkey 或 GM_KEY：没配密钥就不该监听管理端口")
+	}
 
 	cfg := config.NewDefaultPitayaConfig()
 	// protobuf serializer（serializertype=2），消息类型见 game/protos/game.proto；
@@ -73,14 +94,14 @@ func main() {
 	// app.Start() 收到 SIGINT/SIGTERM 时是**正常返回**的，run 也就返回 nil。
 	// 无条件 log.Fatalf 会把每一次优雅退出都打成「启动失败: <nil>」并以 1 退出，
 	// 部署脚本与冒烟测试会读到不存在的失败。
-	if err := run(svType, builder, *redisAddr); err != nil {
+	if err := run(svType, builder, *redisAddr, *gmAddr, secret); err != nil {
 		log.Fatalf("启动失败: %v", err)
 	}
 }
 
 // run 组装并启动指定角色的服务。抽成函数是为了让 flag 解析与 defer 清理分离 ——
 // main 里 log.Fatal 会跳过 defer，Redis 连接必须在这里关。
-func run(svType *string, builder *pitaya.Builder, redisAddr string) error {
+func run(svType *string, builder *pitaya.Builder, redisAddr string, gmAddr string, secret string) error {
 	// Redis 是 gate / account / logic / match 四个角色的共享依赖（gate 写会话归属、
 	// account 存取账号与凭证、logic 存玩家档案、match 存排队队列）。game 不碰 Redis，就不给它开连接 ——
 	// 否则 Redis 一挂，连纯计算的 game 节点都起不来。
@@ -141,11 +162,14 @@ func run(svType *string, builder *pitaya.Builder, redisAddr string) error {
 			logic.MustDefaultCatalog(),
 			logic.NewRedisLockFactory(rdb),
 		)
-		app.Register(logic.NewComponent(app, service),
+		// handler 与 remote 必须是**同一个组件实例**：GrantCoins（GM 发钱）要能被
+		// RPCTo 调到，而密钥状态只有一份。
+		logicComp := logic.NewComponentWithSecret(app, service, secret)
+		app.Register(logicComp,
 			component.WithName("logic"),
 			component.WithNameFunc(strings.ToLower),
 		)
-		app.RegisterRemote(logic.NewRemote(service),
+		app.RegisterRemote(logicComp,
 			component.WithName("logic"),
 			component.WithNameFunc(strings.ToLower),
 		)
@@ -153,10 +177,38 @@ func run(svType *string, builder *pitaya.Builder, redisAddr string) error {
 	case "match":
 		// 队列在 Redis（多个 match 节点共享同一条队列），开局前用 online 登记
 		// 定位每个玩家所属的 gate 并请它写会话数据（顺带探活）。
-		app.Register(match.New(app, match.NewQueue(rdb), online.NewStore(rdb)),
+		// 同 logic：handler 与 remote 共用一个实例（QueueBots 是 GM 用 RPCTo 调的）。
+		matchComp := match.New(app, match.NewQueue(rdb), online.NewStore(rdb), secret)
+		app.Register(matchComp,
 			component.WithName("match"),
 			component.WithNameFunc(strings.ToLower),
 		)
+		app.RegisterRemote(matchComp,
+			component.WithName("match"),
+			component.WithNameFunc(strings.ToLower),
+		)
+
+	case "gm":
+		// gm 是 backend：注册进 etcd 只为「主动发后端 RPC」，不注册任何 handler /
+		// remote，也不加 acceptor —— 它没有任何 pitaya 监听端口，管理流量走 Gin。
+		//
+		// 它需要 Redis 是为了「用户名 → accountID」（只读账号 Hash，不写）。
+		accountPool, err := kv.OpenRedigo(context.Background(), redisAddr)
+		if err != nil {
+			return err
+		}
+		defer accountPool.Close()
+
+		rpc := gm.NewRPC(app, secret)
+		handler := gm.NewHandler(rpc, rpc,
+			account.NewStore(rdb, persist.NewAccountStore(accountPool)), secret)
+		go func() {
+			// Run 是阻塞的：放进 goroutine，让 app.Start() 继续处理信号与优雅退出。
+			if err := handler.Router().Run(gmAddr); err != nil {
+				log.Fatalf("gm http 启动失败: %v", err)
+			}
+		}()
+		log.Printf("gm: http 监听 %s", gmAddr)
 
 	case "game":
 		// 同一个组件实例同时注册为 handler（客户端经 gate 路由来的
@@ -173,7 +225,7 @@ func run(svType *string, builder *pitaya.Builder, redisAddr string) error {
 		)
 
 	default:
-		return fmt.Errorf("unknown server type %q (want gate|account|logic|match|game)", *svType)
+		return fmt.Errorf("unknown server type %q (want gate|account|logic|match|game|gm)", *svType)
 	}
 
 	app.Start()

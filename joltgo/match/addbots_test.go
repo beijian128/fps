@@ -32,7 +32,7 @@ func TestQueueBotsAddsRequestedBots(t *testing.T) {
 	c, _ := newBotsTestComponent(t, nil)
 	ctx := context.Background()
 
-	reply, err := c.QueueBots(ctx, &protos.AddBotsMsg{Count: 2, AdminKey: "s3cret"})
+	reply, err := c.AddBots(ctx, &protos.AddBotsMsg{Count: 2, AdminKey: "s3cret"})
 	if err != nil {
 		t.Fatalf("QueueBots 报错: %v", err)
 	}
@@ -49,7 +49,7 @@ func TestQueueBotsRejectsClientCall(t *testing.T) {
 	c, _ := newBotsTestComponent(t, &joinTestSession{uid: "7"})
 	ctx := context.Background()
 
-	reply, err := c.QueueBots(ctx, &protos.AddBotsMsg{Count: 2, AdminKey: "s3cret"})
+	reply, err := c.AddBots(ctx, &protos.AddBotsMsg{Count: 2, AdminKey: "s3cret"})
 	if err != nil {
 		t.Fatalf("拒绝路径不应返回 error: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestQueueBotsRejectsWrongKey(t *testing.T) {
 	c, _ := newBotsTestComponent(t, nil)
 	ctx := context.Background()
 
-	reply, err := c.QueueBots(ctx, &protos.AddBotsMsg{Count: 2, AdminKey: "nope"})
+	reply, err := c.AddBots(ctx, &protos.AddBotsMsg{Count: 2, AdminKey: "nope"})
 	if err != nil {
 		t.Fatalf("拒绝路径不应返回 error: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestQueueBotsClampsCount(t *testing.T) {
 	c, _ := newBotsTestComponent(t, nil)
 	ctx := context.Background()
 
-	reply, err := c.QueueBots(ctx, &protos.AddBotsMsg{Count: maxBotsPerRequest + 100, AdminKey: "s3cret"})
+	reply, err := c.AddBots(ctx, &protos.AddBotsMsg{Count: maxBotsPerRequest + 100, AdminKey: "s3cret"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestQueueBotsWithZeroCountDoesNothing(t *testing.T) {
 	c, _ := newBotsTestComponent(t, nil)
 	ctx := context.Background()
 
-	reply, err := c.QueueBots(ctx, &protos.AddBotsMsg{Count: 0, AdminKey: "s3cret"})
+	reply, err := c.AddBots(ctx, &protos.AddBotsMsg{Count: 0, AdminKey: "s3cret"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +113,7 @@ func TestQueueBotsGeneratesUniqueBotUIDs(t *testing.T) {
 	c, _ := newBotsTestComponent(t, nil)
 	ctx := context.Background()
 
-	if _, err := c.QueueBots(ctx, &protos.AddBotsMsg{Count: 4, AdminKey: "s3cret"}); err != nil {
+	if _, err := c.AddBots(ctx, &protos.AddBotsMsg{Count: 4, AdminKey: "s3cret"}); err != nil {
 		t.Fatal(err)
 	}
 	members, err := c.queue.rdb.ZRange(ctx, queueKey, 0, -1).Result()

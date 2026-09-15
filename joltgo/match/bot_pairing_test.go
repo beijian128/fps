@@ -94,7 +94,7 @@ func TestStartMatchRequiresHumanOnlineButNotBot(t *testing.T) {
 	c, app, onl := newBotPairEnv(t)
 	ctx := context.Background()
 
-	if _, err := c.QueueBots(ctx, &protos.AddBotsMsg{Count: 1, AdminKey: "s3cret"}); err != nil {
+	if _, err := c.AddBots(ctx, &protos.AddBotsMsg{Count: 1, AdminKey: "s3cret"}); err != nil {
 		t.Fatal(err)
 	}
 	// 先让配对跑一次：此时队列里只有一个机器人，凑不满两人，什么都不该发生。
@@ -128,7 +128,7 @@ func TestStartMatchDropsOfflineHumanAndKeepsBotQueued(t *testing.T) {
 	c, app, _ := newBotPairEnv(t)
 	ctx := context.Background()
 
-	if _, err := c.QueueBots(ctx, &protos.AddBotsMsg{Count: 1, AdminKey: "s3cret"}); err != nil {
+	if _, err := c.AddBots(ctx, &protos.AddBotsMsg{Count: 1, AdminKey: "s3cret"}); err != nil {
 		t.Fatal(err)
 	}
 	// 这个真人没有在线登记 = 已经掉线。
@@ -149,7 +149,7 @@ func TestTryMatchDiscardsAllBotPair(t *testing.T) {
 	c, app, _ := newBotPairEnv(t)
 	ctx := context.Background()
 
-	reply, err := c.QueueBots(ctx, &protos.AddBotsMsg{Count: 2, AdminKey: "s3cret"})
+	reply, err := c.AddBots(ctx, &protos.AddBotsMsg{Count: 2, AdminKey: "s3cret"})
 	if err != nil || !reply.Ok || reply.Enqueued != 2 {
 		t.Fatalf("准备机器人失败: reply=%+v err=%v", reply, err)
 	}
@@ -168,7 +168,7 @@ func TestPushMatchStatusSkipsBotsButCountsThem(t *testing.T) {
 	c, app, _ := newBotPairEnv(t)
 	ctx := context.Background()
 
-	if _, err := c.QueueBots(ctx, &protos.AddBotsMsg{Count: 1, AdminKey: "s3cret"}); err != nil {
+	if _, err := c.AddBots(ctx, &protos.AddBotsMsg{Count: 1, AdminKey: "s3cret"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := c.queue.Enqueue(ctx, "10001"); err != nil {

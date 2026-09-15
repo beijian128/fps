@@ -16,15 +16,21 @@ import (
 // 而这一步是不可撤销的。超过就截断，并把实际入队数量回给页面。
 const maxBotsPerRequest = 8
 
-// QueueBots 是远端 RPC handler（route "match.match.addbots"）：GM 请求往匹配队列里
+// AddBots 是远端 RPC handler（route "match.match.addbots"）：GM 请求往匹配队列里
 // 塞 N 个机器人凑人数。
+//
+// **方法名就是 route**：pitaya 按「服务名 + 小写方法名」推出 route（见内置
+// component/suitableRemoteMethods），所以这里必须叫 AddBots 而不是别的名字 ——
+// 叫 QueueBots 的话 route 会变成 match.queuebots，gm 那边按 match.addbots 调就会
+// 拿到 "route not found"。这条约定在本项目里是一致的：Join → match.join、
+// Pending → match.pending。
 //
 // 两道入口检查（见 auth.go）：拒绝带会话的调用（客户端经 gate 发来的）、
 // 校验共享密钥（任何后端都能调这条 route）。
 //
 // 入队语义留在本包：gm 不碰 match:queue、也不构造 bot uid —— 队列的写入口只有
 // Queue.Enqueue 这一条路径。
-func (c *Component) QueueBots(ctx context.Context, msg *protos.AddBotsMsg) (*protos.AddBotsReply, error) {
+func (c *Component) AddBots(ctx context.Context, msg *protos.AddBotsMsg) (*protos.AddBotsReply, error) {
 	if isClientCall(ctx, c.app) {
 		log.Printf("match: addbots from client rejected")
 		return &protos.AddBotsReply{Ok: false, Reason: "forbidden"}, nil
