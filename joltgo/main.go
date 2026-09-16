@@ -161,9 +161,12 @@ func run(svType *string, builder *pitaya.Builder, redisAddr, gmAddr, gmUser, gmP
 			logic.MustDefaultCatalog(),
 			logic.NewRedisLockFactory(rdb),
 		)
-		// handler 与 remote 必须是**同一个组件实例**：GrantCoins（GM 发钱）要能被
-		// RPCTo 调到，而状态只有一份。
-		logicComp := logic.NewComponent(app, service)
+		// 一个节点只能注册一个 "logic" 组件（remote 表按服务名注册，同名会报
+		// "remote: service already defined"），所以 logic.New 把两个方法集合并到一起：
+		// 客户端 handler（state/purchase/equip/profile/grantcoins）+ 服务间 remote
+		// （online / recordmatch）。漏掉 remote 那半会让 account 的 logic.logic.online
+		// 直接拿到 route not found，登录因此失败（踩过一次）。
+		logicComp := logic.New(app, service)
 		app.Register(logicComp,
 			component.WithName("logic"),
 			component.WithNameFunc(strings.ToLower),

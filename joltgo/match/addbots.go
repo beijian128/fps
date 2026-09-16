@@ -25,9 +25,14 @@ const maxBotsPerRequest = 8
 // 拿到 "route not found"。这条约定在本项目里是一致的：Join → match.join、
 // Pending → match.pending。
 //
-// **不做调用方鉴权**（2026-09-16 的明确取舍）：客户端发不到这条 route —— 它不在
-// gate 的转发白名单里（见 joltgo/gate/routes.go 的 allowedRoutes），而 gate 是客户端
-// 唯一的入口；集群内部进程本就能调它，那不是鉴权能解决的问题。
+// ⚠️ 它**同时**在 remotes 表与客户端可达的 handlers 表里，这是 pitaya 的收录规则决定的，
+// 拆组件也躲不掉：`isHandlerMethod` 只要求「两三个入参（ctx + 指针）、两个返回值
+// （指针 + error）」，而这个签名恰好如此（见内置 component/method.go）。ExtractHandler
+// 也没有任何排除机制 —— 当初 match.addbots 对客户端可见就是这个原因。
+//
+// 所以**客户端可达性由 gate 的转发白名单负责**：gate 只放行 gate/protos/gate.proto 里
+// 定义过的 route（见 joltgo/gate/routes.go 的 allowedRoutes），match.match.addbots 不在
+// 清单里 —— 客户端发它会在 gate 被拒（通用 route not found）。集群内部进程本就能调它。
 //
 // 入队语义留在本包：gm 不碰 match:queue、也不构造 bot uid —— 队列的写入口只有
 // Queue.Enqueue 这一条路径。

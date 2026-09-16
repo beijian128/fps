@@ -52,8 +52,12 @@ func (a *botPairApp) boundUIDs() []string {
 // 调 UID() 会直接 panic（isClientCall 只判「有没有会话」）。
 func (a *botPairApp) GetSessionFromCtx(context.Context) session.Session { return nil }
 
-// newBotPairEnv 造一个「有 game 节点可分配」的 match 组件，配独立的队列 miniredis
-// 与独立的在线登记 miniredis（后者用来把真人标成在线 / 离线）。
+// newBotPairEnv 造一套「有 game 节点可分配」的 match 环境：
+//   - comp：主组件（配对逻辑都在它身上，测试里用 tryMatch 驱动）
+//   - gm：GM 组件（AddBots 在这上面 —— 它只注册 remote，见 addbots.go 的文件头）
+//   - onl：在线登记仓储（用来把真人标成在线 / 离线）
+//
+// 两者共用同一条队列（同一个 miniredis），所以 gm 塞进去的机器人 comp 看得见。
 func newBotPairEnv(t *testing.T) (*Component, *botPairApp, *online.Store) {
 	t.Helper()
 	app := &botPairApp{}
