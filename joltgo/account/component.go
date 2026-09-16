@@ -1,6 +1,6 @@
 // component.go 是 account 服务的 pitaya handler：注册、登录、凭证恢复。
 //
-// 三个 handler 都返回 (*protos.LoginReply, error) —— 返回值决定消息类型：
+// 三个 handler 都返回 (*gatepb.LoginReply, error) —— 返回值决定消息类型：
 // pitaya 的 suitableHandlerMethods 里「有返回值 = Request，无返回值 = Notify」，
 // 所以它们是 Request，客户端按 mid 收 Response。这一点是必须的，不是风格选择：
 // NATS 模式下 uid 未绑定就 push 不了（agent_remote.go 的 Push 直接返回
@@ -14,7 +14,7 @@ import (
 	pitaya "github.com/topfreegames/pitaya/v3/pkg"
 	"github.com/topfreegames/pitaya/v3/pkg/component"
 	pitayaprotos "github.com/topfreegames/pitaya/v3/pkg/protos"
-	"joltgo/game/protos"
+	gatepb "joltgo/gate/protos"
 	"joltgo/online"
 )
 
@@ -55,7 +55,7 @@ func (c *Component) boundAccount(ctx context.Context) string {
 }
 
 // Register 是 register handler（route "account.account.register"）。
-func (c *Component) Register(ctx context.Context, msg *protos.RegisterMsg) (*protos.LoginReply, error) {
+func (c *Component) Register(ctx context.Context, msg *gatepb.RegisterMsg) (*gatepb.LoginReply, error) {
 	// 注册意味着「建一个新账号并登进去」，在一个已经绑定了账号的会话上做不到。
 	// 必须在这里就挡住：Create 会**真的写出一个新账号**，等 finishLogin 再拒绝时
 	// 它已经成了无主账号 —— 用户名被永久占用、谁都登不进去，而且换个用户名就能
@@ -99,7 +99,7 @@ func (c *Component) Register(ctx context.Context, msg *protos.RegisterMsg) (*pro
 }
 
 // Login 是 login handler（route "account.account.login"）。
-func (c *Component) Login(ctx context.Context, msg *protos.LoginMsg) (*protos.LoginReply, error) {
+func (c *Component) Login(ctx context.Context, msg *gatepb.LoginMsg) (*gatepb.LoginReply, error) {
 	allowed, err := c.store.Allow(ctx, msg.Username)
 	if err != nil {
 		log.Printf("account: rate limit check failed: %v", err)
@@ -131,7 +131,7 @@ func (c *Component) Login(ctx context.Context, msg *protos.LoginMsg) (*protos.Lo
 }
 
 // Resume 是 resume handler（route "account.account.resume"）：拿凭证换回会话。
-func (c *Component) Resume(ctx context.Context, msg *protos.ResumeMsg) (*protos.LoginReply, error) {
+func (c *Component) Resume(ctx context.Context, msg *gatepb.ResumeMsg) (*gatepb.LoginReply, error) {
 	if err := ValidateToken(msg.Token); err != nil {
 		return fail(ReasonTokenInvalid), nil
 	}
@@ -167,7 +167,7 @@ func (c *Component) Resume(ctx context.Context, msg *protos.ResumeMsg) (*protos.
 // 顺序是关键。第 3 步 Bind 会把**同一个 gate 上**的旧会话同步关掉（框架的
 // sessionsByUID 逻辑），所以第 4 步只需要处理「旧会话在另一个 gate」的情况 ——
 // 而那一脚绝不会打到自己，顶号竞态因此从设计上消失，不靠自愈。
-func (c *Component) finishLogin(ctx context.Context, accountID, username string) (*protos.LoginReply, error) {
+func (c *Component) finishLogin(ctx context.Context, accountID, username string) (*gatepb.LoginReply, error) {
 	// 同一连接上的重复登录（双击、慢响应重试）会走到这里，而此时会话已经绑定过。
 	// pitaya 的 Bind 对已绑定会话返回 ErrSessionAlreadyBound，且凭证轮换发生在
 	// Bind 之前 —— 不挡的话第二次调用会先删掉第一次刚签发、客户端正在用的凭证，
@@ -193,7 +193,7 @@ func (c *Component) finishLogin(ctx context.Context, accountID, username string)
 			log.Printf("account: current token for %s unavailable: %v", accountID, err)
 			return fail(ReasonInternal), nil
 		}
-		return &protos.LoginReply{
+		return &gatepb.LoginReply{
 			Ok:        true,
 			Token:     token,
 			Username:  username,
@@ -253,7 +253,7 @@ func (c *Component) finishLogin(ctx context.Context, accountID, username string)
 		}
 	}
 
-	return &protos.LoginReply{
+	return &gatepb.LoginReply{
 		Ok:        true,
 		Token:     token,
 		Username:  username,
@@ -270,6 +270,6 @@ func (c *Component) kickOn(ctx context.Context, gateID, accountID string) error 
 }
 
 // fail 构造一个失败应答。
-func fail(reason string) *protos.LoginReply {
-	return &protos.LoginReply{Ok: false, Reason: reason}
+func fail(reason string) *gatepb.LoginReply {
+	return &gatepb.LoginReply{Ok: false, Reason: reason}
 }

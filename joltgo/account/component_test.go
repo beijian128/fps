@@ -13,7 +13,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	pitaya "github.com/topfreegames/pitaya/v3/pkg"
 	"github.com/topfreegames/pitaya/v3/pkg/session"
-	"joltgo/game/protos"
+	gatepb "joltgo/gate/protos"
 	"joltgo/online"
 	"joltgo/persist"
 )
@@ -110,7 +110,7 @@ func newTestComponent(t *testing.T) *testEnv {
 // mustRegister 建一个账号（失败直接终止用例）。
 func (e *testEnv) mustRegister(t *testing.T, username, password string) {
 	t.Helper()
-	r, err := e.comp.Register(context.Background(), &protos.RegisterMsg{Username: username, Password: password})
+	r, err := e.comp.Register(context.Background(), &gatepb.RegisterMsg{Username: username, Password: password})
 	if err != nil || !r.Ok {
 		t.Fatalf("准备账号失败: %+v err=%v", r, err)
 	}
@@ -120,7 +120,7 @@ func TestRegisterHappyPath(t *testing.T) {
 	env := newTestComponent(t)
 	ctx := context.Background()
 
-	reply, err := env.comp.Register(ctx, &protos.RegisterMsg{Username: "Alice", Password: "hunter2"})
+	reply, err := env.comp.Register(ctx, &gatepb.RegisterMsg{Username: "Alice", Password: "hunter2"})
 	if err != nil {
 		t.Fatalf("Register 不该报错: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestRegisterRejectsBadInput(t *testing.T) {
 	ctx := context.Background()
 
 	// 格式错误走 reason，不返回 Go error —— 客户端要的是可展示的原因码。
-	reply, err := env.comp.Register(ctx, &protos.RegisterMsg{Username: "ab", Password: "hunter2"})
+	reply, err := env.comp.Register(ctx, &gatepb.RegisterMsg{Username: "ab", Password: "hunter2"})
 	if err != nil {
 		t.Fatalf("格式错误不该返回 Go error: %v", err)
 	}
@@ -154,7 +154,7 @@ func TestRegisterRejectsBadInput(t *testing.T) {
 		t.Fatalf("应回 bad_username，得到 %+v", reply)
 	}
 
-	reply, _ = env.comp.Register(ctx, &protos.RegisterMsg{Username: "alice", Password: "123"})
+	reply, _ = env.comp.Register(ctx, &gatepb.RegisterMsg{Username: "alice", Password: "123"})
 	if reply.Ok || reply.Reason != ReasonBadPassword {
 		t.Fatalf("应回 bad_password，得到 %+v", reply)
 	}
@@ -170,7 +170,7 @@ func TestRegisterRejectsDuplicate(t *testing.T) {
 	// 那条路径根本走不到重名判断。
 	env.app.sess = &fakeSession{}
 
-	r, err := env.comp.Register(ctx, &protos.RegisterMsg{Username: "alice", Password: "hunter2"})
+	r, err := env.comp.Register(ctx, &gatepb.RegisterMsg{Username: "alice", Password: "hunter2"})
 	if err != nil {
 		t.Fatalf("重名不该返回 Go error: %v", err)
 	}
@@ -187,7 +187,7 @@ func TestRegisterRefusesOnAlreadyBoundSession(t *testing.T) {
 	env.mustRegister(t, "alice", "hunter2") // 会话绑到 "1"
 
 	// 同一个会话再注册一个新账号。
-	r, err := env.comp.Register(ctx, &protos.RegisterMsg{Username: "bob", Password: "hunter2"})
+	r, err := env.comp.Register(ctx, &gatepb.RegisterMsg{Username: "bob", Password: "hunter2"})
 	if err != nil {
 		t.Fatalf("不该返回 Go error: %v", err)
 	}
@@ -213,7 +213,7 @@ func TestLoginHappyPathAndWrongPassword(t *testing.T) {
 	// 换一个会话，模拟另一台设备。
 	env.app.sess = &fakeSession{}
 
-	r, err := env.comp.Login(ctx, &protos.LoginMsg{Username: "alice", Password: "hunter2"})
+	r, err := env.comp.Login(ctx, &gatepb.LoginMsg{Username: "alice", Password: "hunter2"})
 	if err != nil || !r.Ok {
 		t.Fatalf("登录应成功，得到 %+v err=%v", r, err)
 	}
@@ -222,8 +222,8 @@ func TestLoginHappyPathAndWrongPassword(t *testing.T) {
 	}
 
 	// 错密码与不存在的用户名必须给同一个 reason（不泄露账号是否存在）。
-	r1, _ := env.comp.Login(ctx, &protos.LoginMsg{Username: "alice", Password: "wrong!"})
-	r2, _ := env.comp.Login(ctx, &protos.LoginMsg{Username: "nobody", Password: "hunter2"})
+	r1, _ := env.comp.Login(ctx, &gatepb.LoginMsg{Username: "alice", Password: "wrong!"})
+	r2, _ := env.comp.Login(ctx, &gatepb.LoginMsg{Username: "nobody", Password: "hunter2"})
 	if r1.Ok || r2.Ok {
 		t.Fatal("错密码与不存在的用户都不该登录成功")
 	}
@@ -252,7 +252,7 @@ func TestLoginRotatesTokenAndKicksOldGate(t *testing.T) {
 		}
 	}}
 
-	r, err := env.comp.Login(ctx, &protos.LoginMsg{Username: "alice", Password: "hunter2"})
+	r, err := env.comp.Login(ctx, &gatepb.LoginMsg{Username: "alice", Password: "hunter2"})
 	if err != nil || !r.Ok {
 		t.Fatalf("登录应成功，得到 %+v err=%v", r, err)
 	}
@@ -284,7 +284,7 @@ func TestLoginDoesNotKickWhenSameGate(t *testing.T) {
 		_ = env.online.Set(context.Background(), uid, "gate-A")
 	}}
 
-	r, _ := env.comp.Login(ctx, &protos.LoginMsg{Username: "alice", Password: "hunter2"})
+	r, _ := env.comp.Login(ctx, &gatepb.LoginMsg{Username: "alice", Password: "hunter2"})
 	if !r.Ok {
 		t.Fatalf("登录应成功，得到 %+v", r)
 	}
@@ -297,9 +297,9 @@ func TestLoginRateLimited(t *testing.T) {
 	env := newTestComponent(t)
 	ctx := context.Background()
 	for i := 0; i < RateLimit; i++ {
-		env.comp.Login(ctx, &protos.LoginMsg{Username: "alice", Password: "wrong!"})
+		env.comp.Login(ctx, &gatepb.LoginMsg{Username: "alice", Password: "wrong!"})
 	}
-	r, _ := env.comp.Login(ctx, &protos.LoginMsg{Username: "alice", Password: "wrong!"})
+	r, _ := env.comp.Login(ctx, &gatepb.LoginMsg{Username: "alice", Password: "wrong!"})
 	if r.Ok || r.Reason != ReasonRateLimited {
 		t.Fatalf("超限应回 rate_limited，得到 %+v", r)
 	}
@@ -321,7 +321,7 @@ func TestResumeHappyPathAndInvalid(t *testing.T) {
 		t.Fatalf("准备 token 失败: %v", err)
 	}
 
-	r, err := env.comp.Resume(ctx, &protos.ResumeMsg{Token: tok})
+	r, err := env.comp.Resume(ctx, &gatepb.ResumeMsg{Token: tok})
 	if err != nil || !r.Ok {
 		t.Fatalf("resume 应成功，得到 %+v err=%v", r, err)
 	}
@@ -333,7 +333,7 @@ func TestResumeHappyPathAndInvalid(t *testing.T) {
 	}
 
 	for _, bad := range []string{"garbage", ""} {
-		r, _ := env.comp.Resume(ctx, &protos.ResumeMsg{Token: bad})
+		r, _ := env.comp.Resume(ctx, &gatepb.ResumeMsg{Token: bad})
 		if r.Ok || r.Reason != ReasonTokenInvalid {
 			t.Fatalf("无效 token %q 应回 token_invalid，得到 %+v", bad, r)
 		}
@@ -354,7 +354,7 @@ func TestResumeWithMissingAccountIsTokenInvalid(t *testing.T) {
 		t.Fatalf("删除账号 Hash 失败: %v", err)
 	}
 
-	r, err := env.comp.Resume(ctx, &protos.ResumeMsg{Token: tok})
+	r, err := env.comp.Resume(ctx, &gatepb.ResumeMsg{Token: tok})
 	if err != nil {
 		t.Fatalf("不该返回 Go error: %v", err)
 	}
@@ -395,7 +395,7 @@ func TestResumeMapsTransientStoreErrorToInternal(t *testing.T) {
 	// 分支，GetAccount 的错误映射根本没被走到 —— 假绿。
 	env.store.accounts = failingAccountPersistence{err: errors.New("boom: 模拟瞬时失败")}
 
-	r, err := env.comp.Resume(ctx, &protos.ResumeMsg{Token: tok})
+	r, err := env.comp.Resume(ctx, &gatepb.ResumeMsg{Token: tok})
 	if err != nil {
 		t.Fatalf("不该返回 Go error: %v", err)
 	}
@@ -418,7 +418,7 @@ func TestLoginReportsBindFailure(t *testing.T) {
 
 	env.app.sess = &fakeSession{bindErr: errors.New("boom")}
 
-	r, err := env.comp.Login(ctx, &protos.LoginMsg{Username: "alice", Password: "hunter2"})
+	r, err := env.comp.Login(ctx, &gatepb.LoginMsg{Username: "alice", Password: "hunter2"})
 	if err != nil {
 		t.Fatalf("不该返回 Go error: %v", err)
 	}
@@ -438,7 +438,7 @@ func TestLoginOnAlreadyBoundSessionIsIdempotent(t *testing.T) {
 		t.Fatalf("准备失败: token=%q err=%v", before, err)
 	}
 
-	r, err := env.comp.Login(ctx, &protos.LoginMsg{Username: "alice", Password: "hunter2"})
+	r, err := env.comp.Login(ctx, &gatepb.LoginMsg{Username: "alice", Password: "hunter2"})
 	if err != nil || !r.Ok {
 		t.Fatalf("重复登录应幂等成功，得到 %+v err=%v", r, err)
 	}
@@ -461,7 +461,7 @@ func TestLoginOnSessionBoundToAnotherAccountFails(t *testing.T) {
 
 	before, _ := env.store.CurrentToken(ctx, "1")
 
-	r, err := env.comp.Login(ctx, &protos.LoginMsg{Username: "alice", Password: "hunter2"})
+	r, err := env.comp.Login(ctx, &gatepb.LoginMsg{Username: "alice", Password: "hunter2"})
 	if err != nil {
 		t.Fatalf("不该返回 Go error: %v", err)
 	}
@@ -489,7 +489,7 @@ func TestLoginDoesNotKickWhenSecondOnlineReadFails(t *testing.T) {
 	env.app.sess = &fakeSession{onBind: func(string) { env.mr.SetError("boom") }}
 	t.Cleanup(func() { env.mr.SetError("") })
 
-	r, err := env.comp.Login(ctx, &protos.LoginMsg{Username: "alice", Password: "hunter2"})
+	r, err := env.comp.Login(ctx, &gatepb.LoginMsg{Username: "alice", Password: "hunter2"})
 	if err != nil || !r.Ok {
 		t.Fatalf("复读失败不该影响登录本身，得到 %+v err=%v", r, err)
 	}
@@ -510,7 +510,7 @@ func TestLogicOnlineFailureDoesNotRotateToken(t *testing.T) {
 	env.sess = &fakeSession{}
 	env.app.sess = env.sess
 	env.notifier.err = errors.New("logic down")
-	reply, err := env.comp.Login(ctx, &protos.LoginMsg{Username: "alice", Password: "hunter2"})
+	reply, err := env.comp.Login(ctx, &gatepb.LoginMsg{Username: "alice", Password: "hunter2"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -542,7 +542,7 @@ func TestLoginOnAlreadyBoundSessionStillNotifiesLogic(t *testing.T) {
 		t.Fatal("首次登录/注册应向 logic 发出 online 事件")
 	}
 
-	reply, err := env.comp.Login(ctx, &protos.LoginMsg{Username: "alice", Password: "hunter2"})
+	reply, err := env.comp.Login(ctx, &gatepb.LoginMsg{Username: "alice", Password: "hunter2"})
 	if err != nil || !reply.Ok {
 		t.Fatalf("reply=%+v err=%v", reply, err)
 	}
