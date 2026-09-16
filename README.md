@@ -97,13 +97,13 @@ cd joltgo\deploy
 cd joltgo
 .\joltgo.exe -type gate      # frontend，监听 ws://localhost:8080
 .\joltgo.exe -type account   # 账号注册/登录/凭证恢复
-.\joltgo.exe -type logic     -gmkey <secret>   # 玩家档案 / 钱包 / 背包 / 商城 / 装备
-.\joltgo.exe -type match     -gmkey <secret>   # 匹配服务
+.\joltgo.exe -type logic     # 玩家档案 / 钱包 / 背包 / 商城 / 装备
+.\joltgo.exe -type match     # 匹配服务
 .\joltgo.exe -type game      # 游戏逻辑（对局实例）
-.\joltgo.exe -type gm -gmkey <secret>          # GM：http://localhost:8082 + Web 操作页
+.\joltgo.exe -type gm -gmpass <pass>            # GM：http://localhost:8082 + Web 操作页（账号 admin）
 ```
 
-flag 是 `-type` / `-redis`（默认 `localhost:6379`）/ `-gmaddr` / `-gmkey`；
+flag 是 `-type` / `-redis`（默认 `localhost:6379`）/ `-gmaddr` / `-gmuser` / `-gmpass` / `-gmsecret`；
 gate/account/logic/match/gm 启动时会 Ping 一次 Redis，连不上就退出。
 `gm` 的密钥要和 `logic` / `match` 配成同一个值（详见 [docs/BUILD.md](docs/BUILD.md)）。
 
@@ -163,7 +163,9 @@ fps/
 │   ├── wrapper/
 │   │   ├── jolt_c.h         # C ABI 声明（extern "C"，纯物理桥、无业务）
 │   │   └── jolt_c.cpp       # Jolt C++ 原生 API → C ABI 实现
-│   ├── main.go              # 入口：解析 -type(gate|account|logic|match|game|gm) / -redis / -gmaddr / -gmkey，按角色装配
+│   ├── main.go              # 入口：解析 -type(gate|account|logic|match|game|gm) 与各 flag，按角色装配
+│   ├── gate/protos/         # ★ 客户端主动请求 + 响应（gate 转发白名单的唯一来源）
+│   ├── match/protos/        # ★ match 推给客户端的消息
 │   ├── gate/                # gate 服务：AddRoute 路由（account.* / logic.* / match.* 轮询 / game.* 定点）
 │   ├── account/             # account 服务：注册/登录/resume，bcrypt + token 轮换
 │   ├── logic/               # logic 服务：玩家档案 / 钱包 / 背包 / 商城 / 装备

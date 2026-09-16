@@ -146,10 +146,10 @@ cd joltgo\deploy
 cd joltgo
 .\joltgo.exe -type gate      # frontend，监听 ws://localhost:8080
 .\joltgo.exe -type account   # 账号注册/登录/凭证恢复
-.\joltgo.exe -type logic     -gmkey <secret>   # 玩家档案 / 钱包 / 背包 / 商城 / 装备
-.\joltgo.exe -type match     -gmkey <secret>   # 匹配服务
+.\joltgo.exe -type logic     # 玩家档案 / 钱包 / 背包 / 商城 / 装备
+.\joltgo.exe -type match     # 匹配服务
 .\joltgo.exe -type game      # 游戏逻辑（对局实例）
-.\joltgo.exe -type gm -gmkey <secret>          # GM：http://localhost:8082 + Web 操作页
+.\joltgo.exe -type gm -gmpass <pass>            # GM：http://localhost:8082 + Web 操作页（账号 admin）
 ```
 
 **四个 flag**（gate 的 WS 端口 8080 目前写死在 `main.go` 里，没有 `-port`）：
@@ -158,11 +158,37 @@ cd joltgo
 |---|---|---|
 | `-type` | `gate` | 角色：`gate` / `account` / `logic` / `match` / `game` / `gm`，其它值直接报错退出 |
 | `-redis` | `localhost:6379` | Redis 地址。`gate` / `account` / `logic` / `match` / `gm` 启动时 Ping 一次，**连不上就退出**；`game` 不碰 Redis，这个 flag 对它无效 |
-| `-gmkey` | 空（回落到 `$GM_KEY`） | GM 管理密钥。`gm` 用它给页面鉴权、`logic` / `match` 用它校验 GM 发来的 RPC —— **三个角色必须配同一个值**。`gm` 没配就拒绝启动 |
+| `-gmuser` | `admin` | 仅 `gm` 有效：GM 控制台的登录账号。 |
+| `-gmpass` | 空 | 仅 `gm` 有效：GM 控制台的登录密码。**为空则 `gm` 拒绝启动**（默认拒绝服务）。 |
+| `-gmsecret` | 空（回落到 `-gmpass`） | 仅 `gm` 有效：会话 cookie 的 HMAC 签名密钥。 |
 | `-gmaddr` | `:8082` | 仅 `gm` 有效：它的 HTTP 监听地址。 |
 
 gate 监听 <ws://localhost:8080/>，用 Godot 客户端连接游玩（见根目录 README）。
-GM 页面在 <http://localhost:8082/>（页面里填 `-gmkey` 即可发钱 / 加机器人）。
+GM 页面在 <http://localhost:8082/>（用 `-gmuser` / `-gmpass` 登录后即可发钱 / 加机器人）。
+**别的角色不需要任何 GM 相关配置** —— 客户端可达性由 gate 的转发白名单保证（见下）。
+
+### protobuf 消息的三份文件
+
+协议按归属拆成三份，各自是独立的 Go 包（彼此**没有 import**）：
+
+| 文件 | 内容 | Go 包 |
+| --- | --- | --- |
+| `joltgo/gate/protos/gate.proto` | 客户端主动请求 + 响应（gate 转发白名单的唯一来源） | `gatepb` |
+| `joltgo/match/protos/match.proto` | match 推给客户端的 | `matchpb` |
+| `joltgo/game/protos/game.proto` | game 推给客户端的 + 服务内部消息 | `protos` |
+
+```bash
+cd joltgo
+protoc --go_out=. --go_opt=paths=source_relative -I . game/protos/game.proto
+protoc --go_out=. --go_opt=paths=source_relative -I . gate/protos/gate.proto
+protoc --go_out=. --go_opt=paths=source_relative -I . match/protos/match.proto
+```
+
+### gate 的转发白名单
+
+`joltgo/gate/routes.go` 的 `allowedRoutes` 是**客户端上行白名单**：只有清单里的 route 会被 gate 转发，
+其余回通用的 `route not found`。新增客户端 route 必须同时改 `gate/protos/gate.proto`（定义消息）与
+这份清单，`gate/routes_test.go` 会校验两者一致。
 停服务用 `deploy\stop-infra.ps1`（它不删任何数据目录）。
 
 ## 常见问题

@@ -19,7 +19,7 @@
 ```
 fps/
 ├── joltgo/                  # 服务端（Go，单二进制六角色）
-│   ├── main.go              # 入口：解析 -type(gate|account|logic|match|game|gm) / -redis / -gmaddr / -gmkey，按角色装配 pitaya app
+│   ├── main.go              # 入口：解析 -type(gate|account|logic|match|game|gm) / -redis / -gmaddr / -gmuser / -gmpass / -gmsecret，按角色装配
 │   ├── bot/                 # ★ 机器人 uid 前缀的唯一真相（bot:），match 与 game 共用
 │   ├── gm/                  # ★ GM 服务：Gin HTTP 端口 + 内嵌 Web 操作页 + 两个后端 RPC 客户端（不经过 gate）
 │   ├── gate/                # gate 服务：AddRoute 路由（account.*/match.* 轮询 / logic.* 均匀随机 / game.* 按会话数据定点）
@@ -37,7 +37,11 @@ fps/
 │   ├── game/                # game 服务：对局实例生命周期 + 远端 handler
 │   │   ├── instance.go      # ★ 每个对局一条 goroutine，顺序执行、无锁；每 tick 按槽位下发增量/全量帧
 │   │   ├── component.go     # game.create/cmd/resync/rejoin handler + 同步帧 → protobuf 转换
-│   │   └── protos/          # protobuf 消息定义 + 生成码（wire 契约；新增同步属性无需改此文件）
+│   │   └── protos/          # ★ game 推给客户端的消息 + 服务内部消息（生成码；新增同步属性无需改此文件）
+│   ├── gate/
+│   │   ├── protos/          # ★ 客户端主动请求 + 响应（C/S 契约；gate 转发白名单的唯一来源）
+│   │   └── routes.go        # ★ 客户端上行白名单（只有清单里的 route 才转发）
+│   ├── match/protos/        # ★ match 推给客户端的消息（推送按发送方归文件）
 │   ├── replication/         # 与 ECS 解耦的实体-属性同步层：终值表 + 本帧脏集（不 import ecs）
 │   ├── physics/             # ★ 唯一 cgo 包：sim.Physics 的 Jolt 实现 + id 翻译
 │   ├── sim/                 # ECS 玩法层（纯 Go，无 cgo，单线程所有）
@@ -84,7 +88,7 @@ fps/
    `inputSystem → hitboxFollowSystem → physics.Step → step++ → syncSystem → projectileSystem → expireProjectilesSystem → matchSystem`。
    命中全部靠**刚体接触事件**，不做距离判定。`hitboxFollowSystem` 必须在 `Step` **之前**：弹丸的接触判定用的是步进开始时的刚体位置，晚一步贴命中盒就是拿上一 tick 的旧位置判命中。
    **玩家不是刚体**（是 `CharacterVirtual`），弹丸看不见它 —— 每个玩家配一个跟随角色的**命中盒刚体**（`PlayerHitbox`）承担「可被击中体积」，并让两个角色都忽略两个命中盒（`CharacterIgnoreBody`），细节见 §3.9 与 `docs/ARCHITECTURE.md`。
-5. **同步协议是通用「实体-属性」帧**：wire 契约仍是 `game/protos/game.proto`（protobuf），但**新增一个同步属性不需要改 proto、不需要重生成 Go 码、也不需要动客户端解码**——只有三步：
+5. **同步协议是通用「实体-属性」帧**：帧的消息定义在 `game/protos/game.proto`（protobuf；**协议按归属分三份**，见 §5 的「协议按归属拆三份」），但**新增一个同步属性不需要改 proto、不需要重生成 Go 码、也不需要动客户端解码**——只有三步：
    - 在 `sim/replicate.go` 的 `declareAttributes` 里加一行 `Declare`（属性表必须完整稳定，见 §5）；
    - 在每个「值会变的地方」**就近** `rep.Set`（同步层只做终值去重，不做任何 ECS 遍历）；
    - 客户端按**属性名**取值（`WorldStore.attr(id, "名字")`）。
@@ -134,7 +138,13 @@ fps/
 
 - **C 包装层**：函数 `extern "C"`，只用 C 类型/定长数组/opaque 指针，禁止跨边界传 `std::string`/`vector`/C++ 对象/异常。
 - **cgo**：显式 `C.float(...)` / `C.uint32_t(...)` 转换；`physics/` 之外的 Go 代码不出现 `import "C"`。
-- **pitaya**：框架源码内置在 `joltgo/third_party/pitaya/`（`go.mod` 用 `replace` 指向本地目录），不在其上改业务。**Cluster 模式**需本地 etcd（服务发现）+ nats-server（RPC），共享状态另需 redis-server，见 `deploy/`。协议是 pomelo 帧 + **protobuf** payload（不是 raw JSON 文本帧），客户端编解码在 `fps_client.gd`。改动 wire 契约 `game.proto` 后重跑 `protoc --go_out`;持久化 proto 则跑 `gen-redis.ps1`，两者不要混用。
+- **pitaya**：框架源码内置在 `joltgo/third_party/pitaya/`（`go.mod` 用 `replace` 指向本地目录），不在其上改业务。**Cluster 模式**需本地 etcd（服务发现）+ nats-server（RPC），共享状态另需 redis-server，见 `deploy/`。协议是 pomelo 帧 + **protobuf** payload（不是 raw JSON 文本帧），客户端编解码在 `fps_client.gd`。改协议后重跑 `protoc --go_out`（三份 proto 三条命令，见 `docs/BUILD.md`）；持久化 proto 则跑 `gen-redis.ps1`，两者不要混用。
+- **协议按归属拆三份**（新增客户端 route 必须同时改两处）：
+  - `gate/protos/gate.proto` —— **客户端主动请求 + 响应**。它同时是 gate 转发白名单的**唯一来源**。
+  - `match/protos/match.proto` / `game/protos/game.proto` —— **服务端推送按发送方归文件**（谁发的写谁的），服务内部消息（`CreateGameMsg` / `BindGameMsg` / `RecordMatchMsg` / GM 的两条等）留在 `game.proto`。
+  - 三份之间**没有 import**（`SlotResult` 与它的两个使用者 `MatchEnded` / `RecordMatchMsg` 都在 game.proto）。
+  - **新增一条客户端 route = `gate.proto` 定义消息 + `gate/routes.go` 的 `allowedRoutes` 加一行**；漏了后者客户端会被拒（`route not found`），漏了前者会被 `gate/routes_test.go` 的一致性测试挡下。
+- **gate 是客户端唯一入口，且只转发白名单**：pitaya 的 `AddRoute` 是「前缀 → 挑节点」，**不校验具体 route**；「客户端能不能打到某个方法」取决于目标节点有没有注册同名 handler —— 这是个隐式规则。更麻烦的是 pitaya 的 `ExtractHandler` 会把任何 `(ctx, *Msg) (*Reply, error)` 形状的方法收进客户端可达的 handlers 表，**没有任何排除机制**（`match.addbots` / `logic.grantcoins` 就是这样同时出现在 remotes 与 handlers 两张表里的）。所以 gate 在四个路由函数里显式校验 `allowedRoutes`，不在清单里的回通用的 `route not found`（与「route 不存在」不可区分，不给探测反馈）。白名单**管不到**服务端推送与集群内部 RPC —— 它们不经路由函数。
   - **⚠️ 本地改动（重新 vendor / 升级 pitaya 时必须重新打上，否则凭证会重新明文进日志）**：上游把**原始请求载荷**打进日志（`logger.Debugf("SID=%d, Data=%s", session.ID(), data)`），而 account 的 register/login 载荷里是**明文密码**、resume 里是 **bearer token**；日志级别又硬编码为 debug（`pkg/logger/logger.go`），`deploy/*.log` 里因此直接躺着玩家密码。已把这三处改为只打**长度**（`DataLen=%d`，保留「载荷到没到、形状对不对」的排查能力，不牺牲 debug 流的其余价值）：
     - `pkg/service/handler_pool.go`（后端 RPC 的 handler 调用路径）
     - `pkg/service/util.go`（同一条日志的本地副本）
@@ -175,7 +185,7 @@ fps/
 - **主题取值集中在 `theme/tokens.gd`**：`theme/build_theme.gd` 把它写成 `theme/tactical_theme.tres`，`tests/theme_test.gd` 校验两者一致（改了 tokens 要重跑生成，否则测试红）。界面优先用 `theme_type_variation` 挑样式；只有必须参与运算的取值（按血量取色、按用户名取头像色）才 import tokens。要加新样式就在 `build_theme.gd` 里加变体，别在界面代码里 `duplicate()` 出界面私有的样式盒。
 - **`ui/*.tscn` 是手写的**：结构与样式直接在编辑器里改，没有生成器要同步。布局用锚点 + Container；HUD 的四个贴边面板用「锚点 + `offset_*` 贴角」（`offset_*` 在贴边元素上是正确工具，在普通内容里会被窗口拉伸拉坏）。
 - **多进程部署**：单二进制 `joltgo.exe -type gate|account|logic|match|game|gm` 六角色（flag 是 `-type` / `-redis` /
-  `-gmaddr` / `-gmkey`，gate 的 WS 端口 8080 仍写死），先起 etcd + nats + redis（`deploy/start-all.ps1` 一把梭）；
+  `-gmaddr` / `-gmuser` / `-gmpass` / `-gmsecret`，gate 的 WS 端口 8080 仍写死），先起 etcd + nats + redis（`deploy/start-all.ps1` 一把梭）；
   服务日志在 `deploy/gate.log` / `account.log` / `logic.log` / `match.log` / `game.log` / `gm.log`
   （pitaya 写 stderr，`*.out.log` 是 stdout 基本为空）。
   `gate` / `account` / `logic` / `match` / `gm` 启动时 Ping 一次 Redis，连不上直接退出；`game` 不碰 Redis。
@@ -183,9 +193,15 @@ fps/
   gate 的路由表里没有 `gm.*`，它也不监听任何 pitaya 端口、不注册 handler / remote。它只**主动**发后端 RPC
   （`match.match.addbots` / `logic.logic.grantcoins`），能这么做的前提是它以 `pitaya.Cluster` 构建 app ——
   **能不能发 `app.RPCTo` 取决于 app 的模式，与 frontend/backend 无关**（`pkg/client/client.go` 是 acceptor
-  客户端，它发不出后端 RPC，别混）。两条 route 都要求「调用方没有会话」+ 共享密钥（`-gmkey` / `GM_KEY`）：
-  前者挡客户端经 gate 发来的调用（**route 名不是权限**），后者挡其它后端；密钥为空 = 不提供管理入口。
-  三个进程（`gm` / `logic` / `match`）必须配同一个密钥，`start-all.ps1` 统一传。GM 操作**不审计**，只写 `gm.log`。
+  客户端，它发不出后端 RPC，别混）。两条 GM route **不做 handler 侧鉴权** —— 客户端可达性由 gate 的转发白名单
+  保证（它们不在 `allowedRoutes` 里），集群内部进程本就能调它们。GM 页面本身用账号密码登录
+  （`-gmuser` 默认 `admin`、`-gmpass` 必填、`-gmsecret` 为 cookie 签名密钥），会话是 HMAC 签名的无状态 cookie
+  （HttpOnly，8 小时），登录失败按 IP 限速。**密码不再落 localStorage**。GM 操作**不审计**，只写 `gm.log`。
+- **logic 节点只能注册一个组件**：pitaya 的 remote 表按服务名注册（同名报 `remote: service already defined`），
+  而客户端 handler 与服务间 remote 都得挂在 "logic" 名下。所以 `logic.New()` 用嵌入把两个方法集合并起来：
+  `Component`（state / purchase / equip / profile / grantcoins）+ `Remote`（online / recordmatch）。
+  漏掉任何一半都会静默坏掉（漏 remote → account 的 `logic.logic.online` 拿 route not found，登录失败）。
+  `logic/registration_test.go` 钉住了这张表。
 - **机器人是队列里的普通成员**：uid 前缀 `bot:`（唯一真相在 `joltgo/bot/`），由 `match` 自己入队
   （`gm` 不碰 `match:queue`，也不构造 bot uid）。配对时机器人跳过「读在线登记 + 请 gate 写会话数据」；
   全机器人配对直接丢弃且**不放回**（放回会让它们反复被弹出、反复重置等待时间）；「机器人 + 掉线真人」这一对

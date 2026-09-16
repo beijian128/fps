@@ -529,6 +529,39 @@ Jolt 的 Release 构建定义 `NDEBUG`、`JPH_DEBUG_RENDERER`、`JPH_PROFILE_ENA
 
 ## GM 与机器人（`gm/` + `bot/`）
 
+### 协议边界：gate 白名单（客户端唯一入口）
+
+协议按归属拆成三份独立 Go 包，**彼此没有 import**：
+
+| 文件 | 内容 | 归属规则 |
+| --- | --- | --- |
+| `gate/protos/gate.proto` | 客户端主动请求 + 响应 | 请求按**接收方**（gate 是入口） |
+| `match/protos/match.proto` | match 推给客户端的 | 推送按**发送方** |
+| `game/protos/game.proto` | game 推给客户端的 + 服务内部消息 | 同上；内部消息不属于 C/S |
+
+`SlotResult` 同时被下发的 `MatchEnded` 与上报的 `RecordMatchMsg` 引用，两者都在
+`game.proto`，所以零 import。
+
+**gate 只转发 `gate/protos/gate.proto` 里定义过的 route**（13 条，写在
+`gate/routes.go` 的 `allowedRoutes`）。为什么必须显式做这件事：
+
+- pitaya 的 `AddRoute` 是「**前缀** → 挑节点函数」，gate 只按 `account` / `match` /
+  `logic` / `game` 四个前缀转发，**不校验具体 route**。于是「客户端能不能打到某个方法」
+  取决于目标节点有没有注册同名 handler —— 这是个隐式规则，没有任何代码会提醒你。
+- 更麻烦的是 pitaya 的 `ExtractHandler` 会把任何 `(ctx, *Msg) (*Reply, error)` 形状的方法
+  收进**客户端可达的 handlers 表**，而 `ExtractHandler` / `component` **没有任何排除机制**。
+  后端 RPC 方法（`match.addbots`、`logic.grantcoins`）恰好是这个形状，所以它们**必然**
+  同时出现在 remotes（后端可达）与 handlers（客户端经 gate 可达）两张表里。
+  拆组件躲不掉 —— 这是收录规则，不是注册方式的问题。
+
+结论：**客户端可达性只能由 gate 这一层显式兜住**。白名单在四个路由函数的第一行生效，
+不在清单里的 route 回通用的 `route not found`（与「route 不存在」不可区分，不给探测者
+枚举反馈）。它**管不到**服务端推送（不经路由函数）与集群内部 RPC（走 `RPCTo`）。
+
+配套的两条测试把「事实」钉住，避免以后有人误以为注册方式能解决这件事：
+`match/exposure_test.go`（断言 `addbots` 同时出现在两张表里）与
+`gate/routes_test.go`（断言路由函数拒绝白名单外的 route、且清单与 `gate.proto` 一致）。
+
 ### gm 是 backend，不占 pitaya 端口
 
 `-type gm` 以 `pitaya.Cluster` 模式构建 app（注册进 etcd、挂上 NATS），但它**不注册任何
@@ -544,10 +577,13 @@ app，与它是 frontend 还是 backend 无关** —— `match` 调 `game`、`ga
 
 身份与权限：
 
-- 页面与 `/api/*` 用共享密钥（`-gmkey` / `GM_KEY`）鉴权；**没配密钥 `gm` 直接拒绝启动**，
-  已启动的 `logic` / `match` 则按「空密钥一律拒绝」处理 —— 两个方向都是「默认拒绝」。
-- `logic` / `match` 侧的两条管理 handler 各查两道闸：**拒绝带会话的调用**（客户端经 gate
-  发的会真的到达后端）+ **校验共享密钥**（任何后端都能调）。route 名不是权限。
+- 页面本身用**账号密码**登录（`-gmuser` 默认 `admin`、`-gmpass` 必填、`-gmsecret` 为
+  cookie 签名密钥）；**没配密码 `gm` 直接拒绝启动**。会话是 HMAC-SHA256 签名的无状态
+  cookie（HttpOnly、SameSite=Lax、8 小时），登录失败按 IP 限速。这里挡的是「谁能打开
+  控制台」，与「客户端能不能打到管理指令」是两件事。
+- 管理指令的**客户端可达性由 gate 白名单保证**（见上文「协议边界」）：`match.addbots` /
+  `logic.grantcoins` 不在 `allowedRoutes` 里，客户端发它们在 gate 就被拒。
+  handler 侧**不做鉴权**（2026-09-16 的明确取舍）：集群内部进程本就能调它们。
 - GM 操作**不审计**（只写 `deploy/gm.log`），这是本功能的明确取舍。
 
 ### 机器人是队列里的普通成员

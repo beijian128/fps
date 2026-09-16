@@ -86,18 +86,19 @@ volumes:
 cd joltgo
 .\joltgo.exe -type gate      # frontend，监听 ws://localhost:8080
 .\joltgo.exe -type account   # 账号注册/登录/凭证恢复
-.\joltgo.exe -type logic     -gmkey <secret>   # 玩家档案 / 钱包 / 背包 / 商城 / 装备
-.\joltgo.exe -type match     -gmkey <secret>   # 匹配服务
+.\joltgo.exe -type logic     # 玩家档案 / 钱包 / 背包 / 商城 / 装备
+.\joltgo.exe -type match     # 匹配服务
 .\joltgo.exe -type game      # 游戏逻辑（对局实例）
-.\joltgo.exe -type gm -gmkey <secret>          # GM：http://localhost:8082 + Web 操作页
+.\joltgo.exe -type gm -gmpass <pass>            # GM：http://localhost:8082 + Web 操作页（账号 admin）
 ```
 
-`-gmkey` 是 GM 管理密钥（也可用环境变量 `GM_KEY`），**三个角色必须配同一个值**：
-`gm` 用它给页面请求鉴权，`logic` / `match` 用它校验 GM 发来的后端 RPC。
-只给 `gm` 配、忘了给 `logic` / `match` 配的话，后端会按「空密钥一律拒绝」把每条指令挡掉
-（页面上表现为 503）；只给 `logic` / `match` 配、忘了给 `gm` 配的话 `gm` 直接拒绝启动。
-不想要 GM 入口就别起 `gm` 进程，另外两个角色的密钥留空即可。
-`start-all.ps1` 默认用 `local-dev-key`（可用 `-gmKey <secret>` 覆盖）。
+GM 控制台用**账号密码**登录：账号默认 `admin`（`-gmuser`），密码来自 `-gmpass`，
+**没配密码 `gm` 就拒绝启动**；`-gmsecret` 是会话 cookie 的签名密钥（留空回落到密码）。
+`start-all.ps1` 默认用 `local-dev-pass`（可用 `-gmPass <pass>` 或环境变量 `GM_PASS` 覆盖）。
+
+**别的角色不需要任何 GM 相关配置**：客户端能不能打到管理指令，由 gate 的转发白名单保证
+（`joltgo/gate/routes.go` 的 `allowedRoutes`，只放行 `gate/protos/gate.proto` 里定义过的 route）。
+所以想关掉 GM 入口，只要不起 `gm` 进程即可。
 
 Redis 地址由 `-redis`（默认 `localhost:6379`）指定。`gate` / `account` / `logic` / `match` / `gm` 启动时会
 Ping 一次 Redis，**连不上就直接退出**（早失败比运行中途才暴露好排查）；`game` 是纯计算节点，
@@ -110,8 +111,9 @@ stdout**，所以这六个对应的是 `-RedirectStandardError`（stdout 另存�
 为空；两个流不能指向同一个文件，各自从头写会互相覆盖）。排查问题时 `tail -f deploy/game.log`
 即可；日志是 debug 级别、涨得很快（几分钟就 ~10 MB）且不轮转，长时间跑记得清一下。
 
-GM 页面在 <http://localhost:8082/>：页面上填 `-gmkey` 的值，就能给账号发钱（用户名或
-accountID 都行）、往匹配队列里塞机器人。GM 操作**不审计**，只写 `gm.log`。
+GM 页面在 <http://localhost:8082/>：用 `admin` + `-gmpass` 登录后，就能给账号发钱（用户名或
+accountID 都行）、往匹配队列里塞机器人。会话是 HMAC 签名的无状态 cookie（HttpOnly，8 小时），
+登录失败按 IP 限速。GM 操作**不审计**，只写 `gm.log`。
 
 ## etcd-data 清、redis-data 不清
 

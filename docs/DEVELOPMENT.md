@@ -61,15 +61,24 @@
 > `rep.Set` 就够（见上文）。只有增删**消息**、改 **route**、或改 `Frame` / `Schema` 的
 > 字段号时才需要下面的流程。
 
-1. 编辑 `joltgo/game/protos/game.proto`（增字段/改字段号/加消息）
+1. 编辑对应的 proto（按归属选文件，见下）：
+   - **客户端主动请求 / 响应** → `joltgo/gate/protos/gate.proto`
+   - **服务端推送** → 发送方那个文件：`joltgo/match/protos/match.proto` 或 `joltgo/game/protos/game.proto`
+   - **服务内部消息** → `joltgo/game/protos/game.proto`
 2. 在 `joltgo/` 下重生成 Go 码：
    ```bash
    protoc --go_out=. --go_opt=paths=source_relative -I . game/protos/game.proto
+   protoc --go_out=. --go_opt=paths=source_relative -I . gate/protos/gate.proto
+   protoc --go_out=. --go_opt=paths=source_relative -I . match/protos/match.proto
    ```
    （需要 `protoc` 与 `protoc-gen-go`；见 [BUILD.md](BUILD.md)）
-3. 改服务端 handler：`joltgo/game/component.go` 的入参类型与 `toFrame`
-   （`replication.Frame` → `protos.Frame` 的转换）；涉及 Logic 消息时同步改
-   `joltgo/logic/component.go`
+3. 改服务端 handler：
+   - `joltgo/game/component.go`（`toFrame` 的 `replication.Frame` → `protos.Frame` 转换、
+     `Cmd` 的入参）
+   - 客户端 route 还要在 `joltgo/gate/routes.go` 的 `allowedRoutes` 里加一行
+     （否则客户端会被 gate 拒）
+   - 涉及 Logic 消息时同步改 `joltgo/logic/component.go`（客户端契约走 `gatepb`、
+     内部消息走 `protos`）
 4. 改 `godot_client/scripts/fps_client.gd`：`_encode_*` / `_decode_*` 手写 wire 编解码
 5. 跑 `go build ./...` + 无头测试验证；改同步链路再跑 `tests/rejoin_smoke.gd`（需集群）
 
@@ -273,15 +282,29 @@ cd deploy; .\start-all.ps1           # 含 gm，密钥默认 local-dev-key
 # 浏览器打开 http://localhost:8082/，在页面上填同一个密钥
 ```
 
-**密钥必须三个角色一致**（`gm` / `logic` / `match`）。用命令行手动起时：
+GM 控制台用账号密码登录（账号默认 `admin`）。用命令行手动起时：
 
 ```powershell
-.\joltgo.exe -type logic -gmkey mykey
-.\joltgo.exe -type match -gmkey mykey
-.\joltgo.exe -type gm -gmkey mykey -gmaddr :8082
+.\joltgo.exe -type logic
+.\joltgo.exe -type match
+.\joltgo.exe -type gm -gmpass mypass -gmaddr :8082
 ```
 
-改了 `gm` 的行为后至少跑：`go test -count=1 ./gm ./match ./logic ./bot`。
+**别的角色不需要 GM 相关配置** —— 客户端可达性由 gate 的转发白名单保证，不是靠共享密钥。
+
+改了 `gm` 的行为后至少跑：`go test -count=1 ./gm ./gate ./match ./logic ./bot`。
+
+### 协议归属与 gate 白名单（改客户端协议前先读）
+
+- 客户端**主动请求 + 响应**定义在 `gate/protos/gate.proto`；服务端**推送按发送方**归文件
+  （match 推的在 `match/protos/match.proto`，game 推的在 `game/protos/game.proto`）；
+  服务内部消息留在 `game.proto`。三份之间没有 import。
+- **新增一条客户端 route 要改两处**：`gate.proto` 加消息定义 + `gate/routes.go` 的
+  `allowedRoutes` 加一行。漏了后者客户端会被 gate 拒（`route not found`），
+  漏了前者会被 `gate/routes_test.go` 的一致性测试挡下。
+- 客户端发**白名单之外**的 route 一律在 gate 被拒，且错误与「route 不存在」不可区分 ——
+  排查时如果客户端拿到 `route not found`，先去 `gate/routes.go` 核对清单，
+  不要怀疑客户端编解码。
 
 ### 加机器人这条链路的几个坑
 

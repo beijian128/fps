@@ -61,6 +61,13 @@ Response： flag (1B) ─ mid (LEB128 变长) ─ protobuf payload
 
 | route | 类型 | 方向 | payload → 应答 |
 |---|---|---|---|
+
+> 消息定义**按归属分三份**：客户端主动请求 + 响应在 `gate/protos/gate.proto`；
+> 服务端推送按发送方在同名文件（match 推的在 `match/protos/match.proto`，game 推的在
+> `game/protos/game.proto`）；服务内部消息在 `game/protos/game.proto`。
+> 客户端能发的 route 只有下面这张表里那些 —— **gate 只转发 `allowedRoutes` 里的**，
+> 见文末「gate 转发白名单」。
+
 | `account.account.register` | Request | 客户端 → account | `RegisterMsg` → `LoginReply` |
 | `account.account.login` | Request | 客户端 → account | `LoginMsg` → `LoginReply` |
 | `account.account.resume` | Request | 客户端 → account | `ResumeMsg` → `LoginReply` |
@@ -479,45 +486,68 @@ GM **不经过 gate、不进玩家协议**：`gm` 是 backend，自己起一个 
 
 | 方法 | 路径 | 鉴权 | 请求 | 成功响应 |
 | --- | --- | --- | --- | --- |
-| GET | `/` | 无（页面不含数据） | — | HTML |
-| POST | `/api/coins` | `Authorization: Bearer <gmkey>` | `{"target":"alice"\|"10001","delta":500}` | `{"ok":true,"account_id":"10001","coins":1500}` |
-| POST | `/api/bots` | 同上 | `{"count":1}` | `{"ok":true,"enqueued":1}` |
+| GET | `/` | 无（页面不含数据） | — | HTML（登录页 + 控制台） |
+| POST | `/api/login` | 无 | `{"user":"admin","password":"..."}` | `{"ok":true}` + `Set-Cookie: gm_session=...` |
+| POST | `/api/logout` | cookie | — | `{"ok":true}` + 清 cookie |
+| POST | `/api/coins` | cookie | `{"target":"alice"\|"10001","delta":500}` | `{"ok":true,"account_id":"10001","coins":1500}` |
+| POST | `/api/bots` | cookie | `{"count":1}` | `{"ok":true,"enqueued":1}` |
 
 状态码：`400 bad_request`（非法 JSON / `delta=0` / `target` 为空 / `count<=0`）、
-`401 unauthorized`（缺密钥或密钥不符）、`404 player_not_found`（用户名查不到）、
-`503 upstream_failed`（下游拒绝或集群不可达 —— 不假装成功）。
+`401 unauthorized`（没有 cookie / cookie 验签失败 / 已过期 / 账号密码不符）、
+`404 player_not_found`（用户名查不到）、`429 too_many_attempts`（同一 IP 连续失败登录
+超过 5 次后 60 秒冷却）、`503 upstream_failed`（下游拒绝或集群不可达 —— 不假装成功）。
 `target` 是纯十进制就按 accountID 处理，否则当用户名（大小写不敏感，走账号的名字映射）。
 
-两条内部 route（同样「客户端不可见」，但**客户端其实发得到** —— 所以服务端有两道闸）：
+登录凭据来自启动参数（`-gmuser` 默认 `admin`、`-gmpass` 必填、`-gmsecret` 为 cookie
+签名密钥）。会话是 HMAC-SHA256 签名的无状态 cookie（`HttpOnly`、`SameSite=Lax`、8 小时），
+**没有服务端会话存储**，也没有改密/多账号。
+
+两条内部 route：
 
 ```proto
 // gm → match，往匹配队列塞 N 个机器人（route "match.match.addbots"，remote）
 message AddBotsMsg {
-  int32 count = 1;      // 单次上限 8，超出截断
-  string admin_key = 2; // 共享密钥
+  int32 count = 1; // 单次上限 8，超出截断
 }
 message AddBotsReply { bool ok = 1; int32 enqueued = 2; string reason = 3; }
 
 // gm → logic，给账号加/扣金币（route "logic.logic.grantcoins"，remote）
 message GrantCoinsMsg {
   string account_id = 1;
-  int64 delta = 2;      // 负数表示扣
-  string admin_key = 3;
+  int64 delta = 2; // 负数表示扣
 }
 message GrantCoinsReply { bool ok = 1; int64 coins = 2; string reason = 3; }
 ```
 
-**两道入口检查（两个 handler 都有，缺一不可）**：
+**客户端可达性由 gate 的转发白名单保证**（见下文「gate 转发白名单」）：
 
-1. **拒绝带会话的调用**。gate 把 `match.*` / `logic.*` 按前缀转发，客户端发出的
-   `match.match.addbots` / `logic.logic.grantcoins` 会真的到达后端（RPCType_Sys，
-   ctx 里带 Remote 会话）；而 `gm` 用 `RPCTo` 发的（RPCType_User）不带会话。
-   **route 名不是权限**。
-2. **校验共享密钥**（`-gmkey` / `GM_KEY`，常数时间比对）。任何后端都能调这两条 route。
-   密钥为空 = 不提供管理入口（拒绝，而不是放行）。
+- 这两条 route **不在 `allowedRoutes` 里**，客户端发它们在 gate 就被拒（通用 `route not found`）。
+- handler 侧**不做鉴权**（2026-09-16 的明确取舍）：集群内部进程本就能调它们，那不是鉴权能解决的问题。
+- 需要知道的事实：pitaya 的 `ExtractHandler` 会把任何 `(ctx, *Msg) (*Reply, error)` 形状的方法
+  收进客户端可达的 handlers 表，**没有排除机制** —— 所以这两个方法同时出现在 remotes 与
+  handlers 两张表里。客户端够不到它们，靠的是 gate 白名单，不是注册表。
 
-原因码：`forbidden`（两道闸任一不过）、`account_not_found`（发钱目标账号不存在，
+原因码：`account_not_found`（发钱目标账号不存在，
 **不隐式建档**）、`internal`、`noop`（`count<=0` 的空操作，`ok` 仍为 true）。
+
+### gate 转发白名单（客户端上行）
+
+`joltgo/gate/routes.go` 的 `allowedRoutes` 是客户端**唯一**能发的 route 清单，
+共 13 条（与 `gate/protos/gate.proto` 的定义一一对应，`game.game.resync` 因空 payload 例外）：
+
+```text
+account.account.register  account.account.login     account.account.resume
+logic.logic.state         logic.logic.purchase      logic.logic.equip
+logic.logic.profile
+match.match.join          match.match.pending       match.match.abandon
+match.match.cancel
+game.game.cmd             game.game.resync
+```
+
+不在清单里的 route，gate 在**转发之前**就拒绝，回通用的 `route not found` ——
+与「这条 route 根本不存在」在客户端看来完全一样，不给探测者枚举反馈。
+白名单**管不到**服务端推送（`onMatched` / `onFrame` / `onMatchEnded` / `onMatchStatus` 不经路由函数）
+与集群内部 RPC。
 
 机器人 uid 形如 `bot:<nuid>`（唯一真相在 `joltgo/bot/`）：配对时跳过在线探活与会话数据写入，
 对局内不推帧、不进实例注册表，结算走既有的「空槽位」规则（见 [ARCHITECTURE.md](ARCHITECTURE.md)）。
