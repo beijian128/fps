@@ -6,6 +6,7 @@ import (
 
 	pitaya "github.com/topfreegames/pitaya/v3/pkg"
 	"github.com/topfreegames/pitaya/v3/pkg/cluster"
+	"github.com/topfreegames/pitaya/v3/pkg/route"
 	"github.com/topfreegames/pitaya/v3/pkg/router"
 )
 
@@ -40,11 +41,17 @@ func TestRouteRandom(t *testing.T) {
 		"logic-a": {ID: "logic-a"},
 		"logic-b": {ID: "logic-b"},
 	}
-	got, err := routeRandom(context.Background(), nil, nil, servers)
+	// 必须传一条白名单内的 route：路由函数现在先过白名单（见 routes.go），
+	// 传 nil 会被判成 route not found。
+	rt, err := route.Decode("logic.logic.state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := routeRandom(context.Background(), rt, nil, servers)
 	if err != nil || got == nil || (got.ID != "logic-a" && got.ID != "logic-b") {
 		t.Fatalf("got=%+v err=%v", got, err)
 	}
-	if _, err := routeRandom(context.Background(), nil, nil, nil); err == nil {
+	if _, err := routeRandom(context.Background(), rt, nil, nil); err == nil {
 		t.Fatal("无节点应报错")
 	}
 }

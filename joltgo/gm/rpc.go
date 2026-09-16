@@ -25,20 +25,18 @@ var ErrNoServer = errors.New("gm: no server available")
 // RPC 是 gm 到后端的最小客户端：两个能力各一条 RPC。
 //
 // 它只发不收 —— gm 不注册 handler / remote，因此不存在「客户端能调到 gm」这件事。
-// 密钥在构造时固定，由它注入到每条请求里（HTTP 层因此不需要知道 admin_key 的存在）。
 //
 // 能不能发 app.RPCTo 只取决于「这个进程有没有以 pitaya.Cluster 模式构建 app」，
 // 与 frontend / backend 无关：gm 是 backend，照样能主动调别的后端。
 // 而 pkg/client/client.go 是 acceptor 客户端（连 frontend 的 WS 口、说 pomelo 握手），
 // 它发不出后端 RPC —— 这是两回事。
 type RPC struct {
-	app    pitaya.Pitaya
-	secret string
+	app pitaya.Pitaya
 }
 
 // NewRPC 构造 RPC 客户端。
-func NewRPC(app pitaya.Pitaya, secret string) *RPC {
-	return &RPC{app: app, secret: secret}
+func NewRPC(app pitaya.Pitaya) *RPC {
+	return &RPC{app: app}
 }
 
 // GrantCoins 转给任意一个 logic 节点，返回变更后的余额。
@@ -51,7 +49,6 @@ func (r *RPC) GrantCoins(ctx context.Context, accountID string, delta int64) (in
 	if err := r.app.RPCTo(ctx, serverID, grantCoinsRoute, reply, &protos.GrantCoinsMsg{
 		AccountId: accountID,
 		Delta:     delta,
-		AdminKey:  r.secret,
 	}); err != nil {
 		return 0, err
 	}
@@ -69,8 +66,7 @@ func (r *RPC) AddBots(ctx context.Context, count int32) (int32, error) {
 	}
 	reply := &protos.AddBotsReply{}
 	if err := r.app.RPCTo(ctx, serverID, addBotsRoute, reply, &protos.AddBotsMsg{
-		Count:    count,
-		AdminKey: r.secret,
+		Count: count,
 	}); err != nil {
 		return 0, err
 	}

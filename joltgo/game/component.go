@@ -16,6 +16,7 @@ import (
 	"github.com/topfreegames/pitaya/v3/pkg/component"
 	"joltgo/bot"
 	"joltgo/game/protos"
+	gatepb "joltgo/gate/protos"
 	"joltgo/replication"
 	"joltgo/sim"
 )
@@ -211,7 +212,7 @@ func (c *Component) Leave(ctx context.Context, msg *protos.LeaveMsg) (*protos.Le
 
 // Cmd 是远端 RPC handler（route "game.cmd"）：一帧上行命令。
 // 输入、射击、重置合并成一条消息，减少消息数（帧是最小发送单位）。
-func (c *Component) Cmd(ctx context.Context, msg *protos.CommandMsg) {
+func (c *Component) Cmd(ctx context.Context, msg *gatepb.CommandMsg) {
 	inst, idx, ok := c.lookup(ctx)
 	if !ok {
 		return

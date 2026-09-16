@@ -43,6 +43,12 @@ func (s *stubBots) AddBots(_ context.Context, count int32) (int32, error) {
 	return s.enqueued, nil
 }
 
+// GM 控制台的测试凭据。cookie 签名密钥与密码用同一个值（secret 回落到 pass）。
+const (
+	testUser = "admin"
+	testPass = "s3cret"
+)
+
 // newTestHandler 用真 account.Store（跑在 miniredis 上）而不是 stub 解析器：
 // 「用户名 → accountID」这条路径的坑全在规范化与键名里，用真的才有意义。
 func newTestHandler(t *testing.T) (*Handler, *stubCoins, *stubBots) {
@@ -69,23 +75,38 @@ func newTestHandler(t *testing.T) (*Handler, *stubCoins, *stubBots) {
 
 	coins := &stubCoins{coins: 1500}
 	bots := &stubBots{enqueued: 1}
-	handler := NewHandler(coins, bots, account.NewStore(rdb, accounts), "s3cret")
+	handler := NewHandler(coins, bots, account.NewStore(rdb, accounts), testUser, testPass, testPass)
 	return handler, coins, bots
 }
 
-func postJSON(t *testing.T, router *gin.Engine, path, body, key string) *httptest.ResponseRecorder {
+// postJSON 发一个 JSON POST。session 非空时带上会话 cookie
+// （用 newLoggedInHandler 拿到的值）。
+func postJSON(t *testing.T, router *gin.Engine, path, body, session string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	if key != "" {
-		req.Header.Set("Authorization", "Bearer "+key)
+	if session != "" {
+		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: session})
 	}
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 	return w
 }
 
+// newLoggedInHandler 返回 handler 与一个有效会话 cookie 的值，
+// 以及两个 stub 以便断言下游收到了什么。
+func newLoggedInHandler(t *testing.T) (*Handler, string, *stubCoins, *stubBots) {
+	t.Helper()
+	h, coins, bots := newTestHandler(t)
+	w := login(t, h, testUser, testPass)
+	if w.Code != http.StatusOK {
+		t.Fatalf("铺垫失败：登录 = %d，body=%s", w.Code, w.Body.String())
+	}
+	return h, cookieOf(t, w, sessionCookie).Value, coins, bots
+}
+
 func TestIndexServesHTMLWithoutAuth(t *testing.T) {
+	// 首页放行（它本身不含数据），所以这里不需要登录。
 	h, _, _ := newTestHandler(t)
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	w := httptest.NewRecorder()
@@ -98,31 +119,9 @@ func TestIndexServesHTMLWithoutAuth(t *testing.T) {
 	}
 }
 
-func TestCoinsRejectsMissingKey(t *testing.T) {
-	h, coins, _ := newTestHandler(t)
-	w := postJSON(t, h.Router(), "/api/coins", `{"target":"alice","delta":500}`, "")
-	if w.Code != http.StatusUnauthorized {
-		t.Fatalf("缺密钥 = %d，期望 401", w.Code)
-	}
-	if coins.gotID != "" {
-		t.Fatal("鉴权失败的请求不该触达下游服务")
-	}
-}
-
-func TestCoinsRejectsWrongKey(t *testing.T) {
-	h, coins, _ := newTestHandler(t)
-	w := postJSON(t, h.Router(), "/api/coins", `{"target":"alice","delta":500}`, "wrong")
-	if w.Code != http.StatusUnauthorized {
-		t.Fatalf("错密钥 = %d，期望 401", w.Code)
-	}
-	if coins.gotID != "" {
-		t.Fatal("鉴权失败的请求不该触达下游服务")
-	}
-}
-
 func TestCoinsByUsername(t *testing.T) {
-	h, coins, _ := newTestHandler(t)
-	w := postJSON(t, h.Router(), "/api/coins", `{"target":"alice","delta":500}`, "s3cret")
+	h, session, coins, _ := newLoggedInHandler(t)
+	w := postJSON(t, h.Router(), "/api/coins", `{"target":"alice","delta":500}`, session)
 	if w.Code != http.StatusOK {
 		t.Fatalf("= %d，body=%s", w.Code, w.Body.String())
 	}
@@ -142,8 +141,8 @@ func TestCoinsByUsername(t *testing.T) {
 }
 
 func TestCoinsByUsernameIsCaseInsensitive(t *testing.T) {
-	h, coins, _ := newTestHandler(t)
-	w := postJSON(t, h.Router(), "/api/coins", `{"target":"ALICE","delta":1}`, "s3cret")
+	h, session, coins, _ := newLoggedInHandler(t)
+	w := postJSON(t, h.Router(), "/api/coins", `{"target":"ALICE","delta":1}`, session)
 	if w.Code != http.StatusOK {
 		t.Fatalf("= %d，body=%s", w.Code, w.Body.String())
 	}
@@ -153,8 +152,8 @@ func TestCoinsByUsernameIsCaseInsensitive(t *testing.T) {
 }
 
 func TestCoinsByAccountID(t *testing.T) {
-	h, coins, _ := newTestHandler(t)
-	w := postJSON(t, h.Router(), "/api/coins", `{"target":"10001","delta":500}`, "s3cret")
+	h, session, coins, _ := newLoggedInHandler(t)
+	w := postJSON(t, h.Router(), "/api/coins", `{"target":"10001","delta":500}`, session)
 	if w.Code != http.StatusOK {
 		t.Fatalf("= %d，body=%s", w.Code, w.Body.String())
 	}
@@ -164,8 +163,8 @@ func TestCoinsByAccountID(t *testing.T) {
 }
 
 func TestCoinsUnknownUsername(t *testing.T) {
-	h, coins, _ := newTestHandler(t)
-	w := postJSON(t, h.Router(), "/api/coins", `{"target":"nobody","delta":1}`, "s3cret")
+	h, session, coins, _ := newLoggedInHandler(t)
+	w := postJSON(t, h.Router(), "/api/coins", `{"target":"nobody","delta":1}`, session)
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("未知用户名 = %d，期望 404", w.Code)
 	}
@@ -175,44 +174,33 @@ func TestCoinsUnknownUsername(t *testing.T) {
 }
 
 func TestCoinsRejectsZeroDelta(t *testing.T) {
-	h, _, _ := newTestHandler(t)
-	w := postJSON(t, h.Router(), "/api/coins", `{"target":"alice","delta":0}`, "s3cret")
+	h, session, _, _ := newLoggedInHandler(t)
+	w := postJSON(t, h.Router(), "/api/coins", `{"target":"alice","delta":0}`, session)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("delta=0 = %d，期望 400", w.Code)
 	}
 }
 
 func TestCoinsRejectsEmptyTarget(t *testing.T) {
-	h, _, _ := newTestHandler(t)
-	w := postJSON(t, h.Router(), "/api/coins", `{"target":"  ","delta":5}`, "s3cret")
+	h, session, _, _ := newLoggedInHandler(t)
+	w := postJSON(t, h.Router(), "/api/coins", `{"target":"  ","delta":5}`, session)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("空目标 = %d，期望 400", w.Code)
 	}
 }
 
 func TestCoinsUpstreamFailure(t *testing.T) {
-	h, coins, _ := newTestHandler(t)
+	h, session, coins, _ := newLoggedInHandler(t)
 	coins.err = errors.New("rpc down")
-	w := postJSON(t, h.Router(), "/api/coins", `{"target":"alice","delta":5}`, "s3cret")
+	w := postJSON(t, h.Router(), "/api/coins", `{"target":"alice","delta":5}`, session)
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("上游失败 = %d，期望 503", w.Code)
 	}
 }
 
-func TestBotsRejectsMissingKey(t *testing.T) {
-	h, _, bots := newTestHandler(t)
-	w := postJSON(t, h.Router(), "/api/bots", `{"count":1}`, "")
-	if w.Code != http.StatusUnauthorized {
-		t.Fatalf("缺密钥 = %d，期望 401", w.Code)
-	}
-	if bots.gotCount != 0 {
-		t.Fatal("鉴权失败的请求不该触达下游")
-	}
-}
-
 func TestBotsAddsRequestedCount(t *testing.T) {
-	h, _, bots := newTestHandler(t)
-	w := postJSON(t, h.Router(), "/api/bots", `{"count":3}`, "s3cret")
+	h, session, _, bots := newLoggedInHandler(t)
+	w := postJSON(t, h.Router(), "/api/bots", `{"count":3}`, session)
 	if w.Code != http.StatusOK {
 		t.Fatalf("= %d，body=%s", w.Code, w.Body.String())
 	}
@@ -222,9 +210,9 @@ func TestBotsAddsRequestedCount(t *testing.T) {
 }
 
 func TestBotsRejectsNonPositiveCount(t *testing.T) {
-	h, _, bots := newTestHandler(t)
+	h, session, _, bots := newLoggedInHandler(t)
 	for _, body := range []string{`{"count":0}`, `{"count":-2}`} {
-		if w := postJSON(t, h.Router(), "/api/bots", body, "s3cret"); w.Code != http.StatusBadRequest {
+		if w := postJSON(t, h.Router(), "/api/bots", body, session); w.Code != http.StatusBadRequest {
 			t.Fatalf("%s = %d，期望 400", body, w.Code)
 		}
 	}
@@ -234,9 +222,9 @@ func TestBotsRejectsNonPositiveCount(t *testing.T) {
 }
 
 func TestBotsUpstreamFailure(t *testing.T) {
-	h, _, bots := newTestHandler(t)
+	h, session, _, bots := newLoggedInHandler(t)
 	bots.err = errors.New("rpc down")
-	w := postJSON(t, h.Router(), "/api/bots", `{"count":1}`, "s3cret")
+	w := postJSON(t, h.Router(), "/api/bots", `{"count":1}`, session)
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("上游失败 = %d，期望 503", w.Code)
 	}

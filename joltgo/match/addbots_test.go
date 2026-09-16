@@ -11,10 +11,10 @@ import (
 	"joltgo/online"
 )
 
-// newBotsTestComponent 造一个带真队列与真密钥的 match 组件。
+// newBotsTestComponent 造一个带真队列的 match 组件。
 //
 // app 传 joinTestApp：它的 GetServersByType 恒返回错误，正好让 handler 收尾那次
-// tryMatch 变成无害的空转 —— 本文件只验证「入队与入口检查」，配对行为由
+// tryMatch 变成无害的空转 —— 本文件只验证「入队与参数边界」，配对行为由
 // bot_pairing_test.go 用带 game 节点的 startMatchTestApp 单独覆盖。
 func newBotsTestComponent(t *testing.T, sess *joinTestSession) (*Component, *miniredis.Miniredis) {
 	t.Helper()
@@ -25,14 +25,14 @@ func newBotsTestComponent(t *testing.T, sess *joinTestSession) (*Component, *min
 	if sess != nil {
 		app.sess = sess
 	}
-	return New(app, NewQueue(rdb), online.NewStore(rdb), "s3cret"), mr
+	return New(app, NewQueue(rdb), online.NewStore(rdb)), mr
 }
 
 func TestQueueBotsAddsRequestedBots(t *testing.T) {
 	c, _ := newBotsTestComponent(t, nil)
 	ctx := context.Background()
 
-	reply, err := c.AddBots(ctx, &protos.AddBotsMsg{Count: 2, AdminKey: "s3cret"})
+	reply, err := c.AddBots(ctx, &protos.AddBotsMsg{Count: 2})
 	if err != nil {
 		t.Fatalf("QueueBots 报错: %v", err)
 	}
@@ -44,36 +44,19 @@ func TestQueueBotsAddsRequestedBots(t *testing.T) {
 	}
 }
 
-func TestQueueBotsRejectsClientCall(t *testing.T) {
-	// 客户端经 gate 转发来的调用带会话；管理入口必须拒绝，且**不动队列**。
+func TestQueueBotsDoesNotCheckCaller(t *testing.T) {
+	// 带会话的调用（客户端经 gate 转发时的形状）现在也照常执行：
+	// 可达性由 gate 的转发白名单负责（match.addbots 不在白名单里，客户端发不过来），
+	// handler 不再判调用方。这是 2026-09-16 的明确取舍。
 	c, _ := newBotsTestComponent(t, &joinTestSession{uid: "7"})
 	ctx := context.Background()
 
-	reply, err := c.AddBots(ctx, &protos.AddBotsMsg{Count: 2, AdminKey: "s3cret"})
+	reply, err := c.AddBots(ctx, &protos.AddBotsMsg{Count: 1})
 	if err != nil {
-		t.Fatalf("拒绝路径不应返回 error: %v", err)
+		t.Fatal(err)
 	}
-	if reply.Ok || reply.Reason != "forbidden" {
-		t.Fatalf("reply=%+v，期望 forbidden", reply)
-	}
-	if got := c.queue.queueSize(ctx, t); got != 0 {
-		t.Fatalf("被拒绝的调用不该动队列，实际 %d 人", got)
-	}
-}
-
-func TestQueueBotsRejectsWrongKey(t *testing.T) {
-	c, _ := newBotsTestComponent(t, nil)
-	ctx := context.Background()
-
-	reply, err := c.AddBots(ctx, &protos.AddBotsMsg{Count: 2, AdminKey: "nope"})
-	if err != nil {
-		t.Fatalf("拒绝路径不应返回 error: %v", err)
-	}
-	if reply.Ok || reply.Reason != "forbidden" {
-		t.Fatalf("reply=%+v，期望 forbidden", reply)
-	}
-	if got := c.queue.queueSize(ctx, t); got != 0 {
-		t.Fatalf("被拒绝的调用不该动队列，实际 %d 人", got)
+	if !reply.Ok || reply.Enqueued != 1 {
+		t.Fatalf("reply=%+v，期望 ok 且 1", reply)
 	}
 }
 
@@ -81,7 +64,7 @@ func TestQueueBotsClampsCount(t *testing.T) {
 	c, _ := newBotsTestComponent(t, nil)
 	ctx := context.Background()
 
-	reply, err := c.AddBots(ctx, &protos.AddBotsMsg{Count: maxBotsPerRequest + 100, AdminKey: "s3cret"})
+	reply, err := c.AddBots(ctx, &protos.AddBotsMsg{Count: maxBotsPerRequest + 100})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +80,7 @@ func TestQueueBotsWithZeroCountDoesNothing(t *testing.T) {
 	c, _ := newBotsTestComponent(t, nil)
 	ctx := context.Background()
 
-	reply, err := c.AddBots(ctx, &protos.AddBotsMsg{Count: 0, AdminKey: "s3cret"})
+	reply, err := c.AddBots(ctx, &protos.AddBotsMsg{Count: 0})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +96,7 @@ func TestQueueBotsGeneratesUniqueBotUIDs(t *testing.T) {
 	c, _ := newBotsTestComponent(t, nil)
 	ctx := context.Background()
 
-	if _, err := c.AddBots(ctx, &protos.AddBotsMsg{Count: 4, AdminKey: "s3cret"}); err != nil {
+	if _, err := c.AddBots(ctx, &protos.AddBotsMsg{Count: 4}); err != nil {
 		t.Fatal(err)
 	}
 	members, err := c.queue.rdb.ZRange(ctx, queueKey, 0, -1).Result()

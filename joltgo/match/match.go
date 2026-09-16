@@ -9,7 +9,6 @@ import (
 	"context"
 	"errors"
 	"log"
-	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nuid"
@@ -18,6 +17,8 @@ import (
 	"github.com/topfreegames/pitaya/v3/pkg/component"
 	"joltgo/bot"
 	"joltgo/game/protos"
+	gatepb "joltgo/gate/protos"
+	matchpb "joltgo/match/protos"
 	"joltgo/online"
 )
 
@@ -63,30 +64,11 @@ type Component struct {
 	app    pitaya.Pitaya
 	queue  *Queue
 	online *online.Store
-
-	// secret 是 GM 管理指令的共享密钥（来自 -gmkey）。为空 = 不提供管理入口，
-	// 因此 adminKeyAllowed 对空密钥一律拒绝。启动时由 main.go 写入。
-	//
-	// 用 atomic.Value 而不是裸字段：它由 main.go 在 app.Start() 之前写入、
-	// 由 RPC handler goroutine 读取，两者之间没有 happens-before（pitaya 的 RPC
-	// 走 NATS 回调），裸字段在这里是数据竞争。
-	secret atomic.Value // string
 }
 
-// UpdateSecret 更新 GM 管理密钥。
-func (c *Component) UpdateSecret(secret string) { c.secret.Store(secret) }
-
-// adminSecret 读当前密钥，未设置时返回空串（adminKeyAllowed 会因此拒绝一切请求）。
-func (c *Component) adminSecret() string {
-	v, _ := c.secret.Load().(string)
-	return v
-}
-
-// New 构造 match 组件。secret 为空表示本节点不提供 GM 管理入口。
-func New(app pitaya.Pitaya, queue *Queue, onl *online.Store, secret string) *Component {
-	c := &Component{app: app, queue: queue, online: onl}
-	c.UpdateSecret(secret)
-	return c
+// New 构造 match 组件。
+func New(app pitaya.Pitaya, queue *Queue, onl *online.Store) *Component {
+	return &Component{app: app, queue: queue, online: onl}
 }
 
 // Join 是远端 RPC handler（route "match.join"）：把已登录的会话加入匹配队列。
@@ -94,7 +76,7 @@ func New(app pitaya.Pitaya, queue *Queue, onl *online.Store, secret string) *Com
 // 身份来自会话绑定 —— account 服务在登录成功时做过 s.Bind(ctx, accountID)，
 // 这里只读会话 UID，不再看任何客户端传来的凭证。未绑定的会话说明客户端没登录
 // （或登录失败后擅自发了 join），静默忽略并记日志。
-func (c *Component) Join(ctx context.Context, msg *protos.JoinMsg) {
+func (c *Component) Join(ctx context.Context, msg *gatepb.JoinMsg) {
 	s := c.app.GetSessionFromCtx(ctx)
 	uid := s.UID()
 	if uid == "" {
@@ -200,7 +182,7 @@ func (c *Component) pushMatchStatus(ctx context.Context) {
 			// 对等待中的真人来说，队列里有几个机器人确实是「排队人数」。
 			continue
 		}
-		status := &protos.MatchStatus{
+		status := &matchpb.MatchStatus{
 			QueuedPlayers: int32(total),
 			WaitedSeconds: entry.WaitedSeconds,
 		}
@@ -216,20 +198,20 @@ func (c *Component) pushMatchStatus(ctx context.Context) {
 // 与 match.join 的回局分支共用一份查询（findInstance），但**故意什么都不改**：
 // 不写会话数据、不推 onMatched、不入队。进大厅只是想知道「要不要弹这个框」——
 // 在这里顺手把人塞回对局，就等于把「询问」变成「强制重连」，玩家没得选。
-func (c *Component) Pending(ctx context.Context, _ *protos.PendingMatchMsg) (*protos.PendingMatchReply, error) {
+func (c *Component) Pending(ctx context.Context, _ *gatepb.PendingMatchMsg) (*gatepb.PendingMatchReply, error) {
 	s := c.app.GetSessionFromCtx(ctx)
 	if s == nil || s.UID() == "" {
 		// 未登录的会话问不出任何东西（也没有 uid 可查）。查询类接口不报错，回 found=false。
 		log.Printf("match: pending rejected: session not bound")
-		return &protos.PendingMatchReply{Found: false}, nil
+		return &gatepb.PendingMatchReply{Found: false}, nil
 	}
 	hit, ok := c.findInstance(ctx, s.UID())
 	if !ok {
-		return &protos.PendingMatchReply{Found: false}, nil
+		return &gatepb.PendingMatchReply{Found: false}, nil
 	}
 	log.Printf("match: uid %s has pending match %s on game %s as slot %d",
 		s.UID(), hit.MatchID, hit.GameServerID, hit.PlayerIdx)
-	return &protos.PendingMatchReply{Found: true, MatchId: hit.MatchID}, nil
+	return &gatepb.PendingMatchReply{Found: true, MatchId: hit.MatchID}, nil
 }
 
 // Abandon 是客户端请求 handler（route "match.abandon"）：放弃那场没打完的局。
@@ -240,28 +222,28 @@ func (c *Component) Pending(ctx context.Context, _ *protos.PendingMatchMsg) (*pr
 //
 // reason：released（已释放）/ not_found（此刻查不到他的存量对局）/ unauthenticated /
 // internal（RPC 不通）。ok=false 时客户端保留询问框、提示失败，不假装成功。
-func (c *Component) Abandon(ctx context.Context, _ *protos.AbandonMatchMsg) (*protos.AbandonMatchReply, error) {
+func (c *Component) Abandon(ctx context.Context, _ *gatepb.AbandonMatchMsg) (*gatepb.AbandonMatchReply, error) {
 	s := c.app.GetSessionFromCtx(ctx)
 	if s == nil || s.UID() == "" {
 		log.Printf("match: abandon rejected: session not bound")
-		return &protos.AbandonMatchReply{Ok: false, Reason: "unauthenticated"}, nil
+		return &gatepb.AbandonMatchReply{Ok: false, Reason: "unauthenticated"}, nil
 	}
 	uid := s.UID()
 
 	hit, ok := c.findInstance(ctx, uid)
 	if !ok {
-		return &protos.AbandonMatchReply{Ok: false, Reason: "not_found"}, nil
+		return &gatepb.AbandonMatchReply{Ok: false, Reason: "not_found"}, nil
 	}
 	reply := &protos.LeaveReply{}
 	if err := c.app.RPCTo(ctx, hit.GameServerID, gameLeaveRoute, reply,
 		&protos.LeaveMsg{Uid: uid}); err != nil {
 		log.Printf("match: abandon %s: leave on %s failed: %v", uid, hit.GameServerID, err)
-		return &protos.AbandonMatchReply{Ok: false, Reason: "internal"}, nil
+		return &gatepb.AbandonMatchReply{Ok: false, Reason: "internal"}, nil
 	}
 	if !reply.Ok {
 		// 节点在、但此刻已经没有他的实例（刚好打完了 / 已经释放过）。语义上等同 not_found。
 		log.Printf("match: abandon %s: game %s has no instance anymore", uid, hit.GameServerID)
-		return &protos.AbandonMatchReply{Ok: false, Reason: "not_found"}, nil
+		return &gatepb.AbandonMatchReply{Ok: false, Reason: "not_found"}, nil
 	}
 	log.Printf("match: uid %s abandoned match %s on game %s (slot %d)",
 		uid, hit.MatchID, hit.GameServerID, hit.PlayerIdx)
@@ -274,7 +256,7 @@ func (c *Component) Abandon(ctx context.Context, _ *protos.AbandonMatchMsg) (*pr
 	} else if err := c.bindGameOn(ctx, gateID, uid, "", "", 0); err != nil {
 		log.Printf("match: abandon %s: clear game binding failed: %v", uid, err)
 	}
-	return &protos.AbandonMatchReply{Ok: true, Reason: "released"}, nil
+	return &gatepb.AbandonMatchReply{Ok: true, Reason: "released"}, nil
 }
 
 // Cancel 是客户端请求 handler（route "match.cancel"）：把已登录会话移出匹配队列。
@@ -282,28 +264,28 @@ func (c *Component) Abandon(ctx context.Context, _ *protos.AbandonMatchMsg) (*pr
 // 三态语义（见 spec §5.3）：真的移出了才 ok=true；ZREM 返回 0 说明人已经不在这条队列里
 // —— 可能是 tick 刚把他配对走（那就顺手走一次回局查询，把他带进已经开好的对局，而不是
 // 从局里拽出来），也可能只是从来没排过队。
-func (c *Component) Cancel(ctx context.Context, _ *protos.MatchCancelMsg) (*protos.MatchCancelReply, error) {
+func (c *Component) Cancel(ctx context.Context, _ *gatepb.MatchCancelMsg) (*gatepb.MatchCancelReply, error) {
 	s := c.app.GetSessionFromCtx(ctx)
 	if s == nil || s.UID() == "" {
 		log.Printf("match: cancel rejected: session not bound")
-		return &protos.MatchCancelReply{Ok: false, Reason: "unauthenticated"}, nil
+		return &gatepb.MatchCancelReply{Ok: false, Reason: "unauthenticated"}, nil
 	}
 	uid := s.UID()
 	removed, err := c.queue.Remove(ctx, uid)
 	if err != nil {
 		log.Printf("match: cancel %s failed: %v", uid, err)
-		return &protos.MatchCancelReply{Ok: false, Reason: "internal"}, nil
+		return &gatepb.MatchCancelReply{Ok: false, Reason: "internal"}, nil
 	}
 	if removed {
 		log.Printf("match: uid %s cancelled matchmaking", uid)
-		return &protos.MatchCancelReply{Ok: true, Reason: "cancelled"}, nil
+		return &gatepb.MatchCancelReply{Ok: true, Reason: "cancelled"}, nil
 	}
 	// 竞态窗口：tick 可能刚把他弹出去、实例还没建好。这里查不到就返回 not_queued，
 	// 紧接着 onMatched 会照常到达，客户端切进对局 —— 不会出现「悬空玩家」。
 	if c.tryRejoin(ctx, uid) {
-		return &protos.MatchCancelReply{Ok: false, Reason: "already_matched"}, nil
+		return &gatepb.MatchCancelReply{Ok: false, Reason: "already_matched"}, nil
 	}
-	return &protos.MatchCancelReply{Ok: false, Reason: "not_queued"}, nil
+	return &gatepb.MatchCancelReply{Ok: false, Reason: "not_queued"}, nil
 }
 
 // tryMatch 尝试配对：队列凑满 2 人即开局。多个 match 节点同时抢也只有一个
@@ -353,7 +335,7 @@ func (c *Component) bindGameOn(ctx context.Context, gateID, uid, matchID, gameSe
 // 走全局 SendPushToUsers（发布到 pitaya/gate/user/{uid}/push）而不是定点 RPC：
 // 推送与玩家连在哪个 gate 无关，NATS 会投给持有该会话的那个 gate。
 func (c *Component) pushMatched(uid, matchID, gameServerID string, playerIdx int) {
-	if _, err := c.app.SendPushToUsers(matchedRoute, &protos.MatchResult{
+	if _, err := c.app.SendPushToUsers(matchedRoute, &matchpb.MatchResult{
 		MatchId:      matchID,
 		GameServerId: gameServerID,
 		PlayerIdx:    int32(playerIdx),

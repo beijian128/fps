@@ -6,7 +6,7 @@ import (
 
 	pitaya "github.com/topfreegames/pitaya/v3/pkg"
 	"github.com/topfreegames/pitaya/v3/pkg/session"
-	"joltgo/game/protos"
+	gatepb "joltgo/gate/protos"
 )
 
 type fakeSession struct {
@@ -40,7 +40,7 @@ func TestLogicComponentUsesSessionUID(t *testing.T) {
 	if _, err := env.svc.Purchase(ctx, "7", "medkit", 1); err != nil {
 		t.Fatal(err)
 	}
-	reply, err := component.State(ctx, &protos.LogicStateMsg{})
+	reply, err := component.State(ctx, &gatepb.LogicStateMsg{})
 	if err != nil || !reply.Ok {
 		t.Fatalf("State: %+v err=%v", reply, err)
 	}
@@ -51,7 +51,7 @@ func TestLogicComponentUsesSessionUID(t *testing.T) {
 
 func TestLogicComponentMapsErrors(t *testing.T) {
 	component, _ := newComponentTestEnv(t, "")
-	reply, err := component.Purchase(context.Background(), &protos.PurchaseMsg{ItemId: "rifle", Quantity: 1})
+	reply, err := component.Purchase(context.Background(), &gatepb.PurchaseMsg{ItemId: "rifle", Quantity: 1})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -33,55 +33,68 @@ button:hover { filter: brightness(1.08); }
 <h1>GM 控制台</h1>
 <p class="sub">直接调用 match / logic 服务，不经过玩家协议。</p>
 
-<div class="panel">
-  <h2>管理密钥</h2>
-  <label for="gmkey">密钥（要与服务端 -gmkey / GM_KEY 一致，只存在本机浏览器里）</label>
-  <input id="gmkey" type="password" autocomplete="off" placeholder="与服务端 -gmkey 一致">
+<div class="panel" id="loginpanel">
+  <h2>登录</h2>
+  <label for="user">账号</label>
+  <input id="user" autocomplete="username" placeholder="与服务端 -gmuser 一致">
+  <label for="password">密码</label>
+  <input id="password" type="password" autocomplete="current-password" placeholder="与服务端 -gmpass 一致">
+  <button id="loginbtn" type="button">登录</button>
 </div>
 
-<div class="panel">
-  <h2>发钱</h2>
-  <label for="target">目标（用户名或 accountID 都可以）</label>
-  <input id="target" placeholder="alice 或 10001">
-  <label for="delta">数量（正数是加，负数是扣）</label>
-  <input id="delta" type="number" value="500">
-  <button id="coinbtn" type="button">发送</button>
-</div>
+<div id="console" hidden>
+  <div class="panel">
+    <h2>发钱</h2>
+    <label for="target">目标（用户名或 accountID 都可以）</label>
+    <input id="target" placeholder="alice 或 10001">
+    <label for="delta">数量（正数是加，负数是扣）</label>
+    <input id="delta" type="number" value="500">
+    <button id="coinbtn" type="button">发送</button>
+  </div>
 
-<div class="panel">
-  <h2>机器人</h2>
-  <label for="botcount">数量（单次上限 8）</label>
-  <input id="botcount" type="number" value="1" min="1" max="8">
-  <button id="botbtn" type="button">加入匹配队列</button>
-  <p class="hint">机器人会与下一位入队的真人配对：进对局后全程不动、不开火，被打死原地复活。
-  两个机器人不会互打（那一对会被直接丢弃），所以要等真人入队才会开一局。</p>
+  <div class="panel">
+    <h2>机器人</h2>
+    <label for="botcount">数量（单次上限 8）</label>
+    <input id="botcount" type="number" value="1" min="1" max="8">
+    <button id="botbtn" type="button">加入匹配队列</button>
+    <button id="logoutbtn" type="button">退出登录</button>
+    <p class="hint">机器人会与下一位入队的真人配对：进对局后全程不动、不开火，被打死原地复活。
+    两个机器人不会互打（那一对会被直接丢弃），所以要等真人入队才会开一局。</p>
+  </div>
 </div>
 
 <div id="result">等待操作…</div>
 
 <script>
-const keyEl = document.getElementById('gmkey');
 const outEl = document.getElementById('result');
-
-keyEl.value = localStorage.getItem('gmkey') || '';
-keyEl.addEventListener('change', () => localStorage.setItem('gmkey', keyEl.value));
+const loginPanel = document.getElementById('loginpanel');
+const consoleEl = document.getElementById('console');
 
 function show(ok, text) {
   outEl.className = ok ? 'ok' : 'bad';
   outEl.textContent = text;
 }
 
-async function call(path, payload) {
-  const key = keyEl.value.trim();
-  if (!key) { show(false, '请先填管理密钥'); return null; }
-  localStorage.setItem('gmkey', key);
+function setLoggedIn(on) {
+  loginPanel.hidden = on;
+  consoleEl.hidden = !on;
+}
+
+// post 统一走同源 cookie（HttpOnly，页面脚本读不到，也不需要读）。
+async function post(path, payload) {
   try {
     const resp = await fetch(path, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key },
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
       body: JSON.stringify(payload),
     });
     const body = await resp.json().catch(() => ({}));
+    if (resp.status === 401) {
+      setLoggedIn(false);
+      show(false, '会话已失效，请重新登录');
+      return null;
+    }
     if (!resp.ok || body.ok === false) {
       show(false, '失败：' + (body.reason || resp.status));
       return null;
@@ -93,11 +106,28 @@ async function call(path, payload) {
   }
 }
 
+document.getElementById('loginbtn').addEventListener('click', async () => {
+  const body = await post('/api/login', {
+    user: document.getElementById('user').value.trim(),
+    password: document.getElementById('password').value,
+  });
+  if (!body) return;
+  document.getElementById('password').value = '';
+  setLoggedIn(true);
+  show(true, '已登录');
+});
+
+document.getElementById('logoutbtn').addEventListener('click', async () => {
+  await post('/api/logout', {});
+  setLoggedIn(false);
+  show(true, '已退出登录');
+});
+
 document.getElementById('coinbtn').addEventListener('click', async () => {
   const target = document.getElementById('target').value.trim();
   const delta = parseInt(document.getElementById('delta').value, 10) || 0;
   if (!target || delta === 0) { show(false, '请填目标和非零数量'); return; }
-  const body = await call('/api/coins', { target, delta });
+  const body = await post('/api/coins', { target, delta });
   if (body) {
     show(true, target + '（accountID ' + body.account_id + '）余额 ' + body.coins);
   }
@@ -106,7 +136,7 @@ document.getElementById('coinbtn').addEventListener('click', async () => {
 document.getElementById('botbtn').addEventListener('click', async () => {
   const count = parseInt(document.getElementById('botcount').value, 10) || 0;
   if (count <= 0) { show(false, '数量必须大于 0'); return; }
-  const body = await call('/api/bots', { count });
+  const body = await post('/api/bots', { count });
   if (body) {
     show(true, '已入队 ' + body.enqueued + ' 个机器人，等待真人入队配对。');
   }

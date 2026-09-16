@@ -20,6 +20,7 @@ import (
 	"github.com/topfreegames/pitaya/v3/pkg/cluster"
 	"github.com/topfreegames/pitaya/v3/pkg/session"
 	"joltgo/game/protos"
+	gatepb "joltgo/gate/protos"
 	"joltgo/online"
 )
 
@@ -83,7 +84,7 @@ func newPendingAbandonComponent(t *testing.T, app *pendingAbandonApp) (*Componen
 	qrdb := redis.NewClient(&redis.Options{Addr: qmr.Addr()})
 	ordb := redis.NewClient(&redis.Options{Addr: omr.Addr()})
 	t.Cleanup(func() { _ = qrdb.Close(); _ = ordb.Close() })
-	return New(app, NewQueue(qrdb), online.NewStore(ordb), ""), ordb
+	return New(app, NewQueue(qrdb), online.NewStore(ordb)), ordb
 }
 
 // 命中存量对局：只回 match_id，一个字节的副作用都不许有。
@@ -95,7 +96,7 @@ func TestPendingReportsExistingMatchWithoutSideEffects(t *testing.T) {
 	}
 	c, _ := newPendingAbandonComponent(t, app)
 
-	reply, err := c.Pending(context.Background(), &protos.PendingMatchMsg{})
+	reply, err := c.Pending(context.Background(), &gatepb.PendingMatchMsg{})
 	if err != nil {
 		t.Fatalf("Pending: %v", err)
 	}
@@ -118,7 +119,7 @@ func TestPendingReportsNoMatch(t *testing.T) {
 	app := &pendingAbandonApp{sess: &joinTestSession{uid: "7"}}
 	c, _ := newPendingAbandonComponent(t, app)
 
-	reply, err := c.Pending(context.Background(), &protos.PendingMatchMsg{})
+	reply, err := c.Pending(context.Background(), &gatepb.PendingMatchMsg{})
 	if err != nil || reply.Found {
 		t.Fatalf("没有存量对局时应回 found=false，得到 %+v err=%v", reply, err)
 	}
@@ -129,7 +130,7 @@ func TestPendingRejectsUnboundSession(t *testing.T) {
 	app := &pendingAbandonApp{sess: &joinTestSession{uid: ""}}
 	c, _ := newPendingAbandonComponent(t, app)
 
-	reply, err := c.Pending(context.Background(), &protos.PendingMatchMsg{})
+	reply, err := c.Pending(context.Background(), &gatepb.PendingMatchMsg{})
 	if err != nil || reply.Found {
 		t.Fatalf("未绑定会话应回 found=false，得到 %+v err=%v", reply, err)
 	}
@@ -153,7 +154,7 @@ func TestAbandonReleasesAndClearsSessionBinding(t *testing.T) {
 		t.Fatalf("online.Set: %v", err)
 	}
 
-	reply, err := c.Abandon(ctx, &protos.AbandonMatchMsg{})
+	reply, err := c.Abandon(ctx, &gatepb.AbandonMatchMsg{})
 	if err != nil {
 		t.Fatalf("Abandon: %v", err)
 	}
@@ -180,7 +181,7 @@ func TestAbandonReportsNotFoundWhenNoInstance(t *testing.T) {
 	app := &pendingAbandonApp{sess: &joinTestSession{uid: "7"}}
 	c, _ := newPendingAbandonComponent(t, app)
 
-	reply, err := c.Abandon(context.Background(), &protos.AbandonMatchMsg{})
+	reply, err := c.Abandon(context.Background(), &gatepb.AbandonMatchMsg{})
 	if err != nil {
 		t.Fatalf("Abandon 不该报错: %v", err)
 	}
@@ -201,7 +202,7 @@ func TestAbandonReportsInternalWhenLeaveRPCFails(t *testing.T) {
 	}
 	c, _ := newPendingAbandonComponent(t, app)
 
-	reply, err := c.Abandon(context.Background(), &protos.AbandonMatchMsg{})
+	reply, err := c.Abandon(context.Background(), &gatepb.AbandonMatchMsg{})
 	if err != nil {
 		t.Fatalf("Abandon 不该把传输错误抛给调用方: %v", err)
 	}
@@ -219,7 +220,7 @@ func TestAbandonReportsNotFoundWhenGameHasNoInstance(t *testing.T) {
 	}
 	c, _ := newPendingAbandonComponent(t, app)
 
-	reply, err := c.Abandon(context.Background(), &protos.AbandonMatchMsg{})
+	reply, err := c.Abandon(context.Background(), &gatepb.AbandonMatchMsg{})
 	if err != nil {
 		t.Fatalf("Abandon 不该报错: %v", err)
 	}
@@ -233,7 +234,7 @@ func TestAbandonRejectsUnboundSession(t *testing.T) {
 	app := &pendingAbandonApp{sess: &joinTestSession{uid: ""}}
 	c, _ := newPendingAbandonComponent(t, app)
 
-	reply, err := c.Abandon(context.Background(), &protos.AbandonMatchMsg{})
+	reply, err := c.Abandon(context.Background(), &gatepb.AbandonMatchMsg{})
 	if err != nil {
 		t.Fatalf("Abandon 不该报错: %v", err)
 	}
@@ -257,7 +258,7 @@ func TestAbandonSucceedsEvenIfBindingClearFails(t *testing.T) {
 		t.Fatalf("online.Set: %v", err)
 	}
 
-	reply, err := c.Abandon(ctx, &protos.AbandonMatchMsg{})
+	reply, err := c.Abandon(ctx, &gatepb.AbandonMatchMsg{})
 	if err != nil || !reply.Ok || reply.Reason != "released" {
 		t.Fatalf("清归属失败不该改变结论，得到 %+v err=%v", reply, err)
 	}

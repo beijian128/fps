@@ -32,7 +32,6 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"os"
 	"strings"
 
 	"github.com/redis/go-redis/v9"
@@ -56,23 +55,23 @@ func main() {
 	svType := flag.String("type", "gate", "server type: gate | account | logic | match | game | gm")
 	redisAddr := flag.String("redis", kv.DefaultAddr, "redis address (host:port)")
 	gmAddr := flag.String("gmaddr", ":8082", "gm http listen address (type=gm)")
-	gmKey := flag.String("gmkey", "", "gm admin key (type=gm; read by account|logic|match); falls back to $GM_KEY")
+	gmUser := flag.String("gmuser", "admin", "gm console account (type=gm)")
+	gmPass := flag.String("gmpass", "", "gm console password (type=gm); empty refuses to start")
+	gmSecret := flag.String("gmsecret", "", "gm session cookie signing key (type=gm); falls back to -gmpass")
 	flag.Parse()
 
-	// GM 的管理密钥：GM 页面用它鉴权，account / logic / match 用它校验后端 RPC。
-	// 空密钥 = 不提供管理入口（两侧都是「拒绝」而不是「放行」）。
-	secret := *gmKey
-	if secret == "" {
-		secret = os.Getenv("GM_KEY")
-	}
-	if *svType == "gm" && secret == "" {
+	// GM 控制台的登录凭据。客户端可达性**不靠它** —— 那由 gate 的转发白名单保证
+	// （见 gate/routes.go）：客户端根本发不到 match.addbots / logic.grantcoins。
+	// 这里的账号密码只保护 GM 页面本身（谁能用这台控制台）。
+	if *svType == "gm" && *gmPass == "" {
 		// 默认拒绝服务比默认开放安全：忘记配置的后果是服务起不来，
-		// 而不是「谁都能发指令」。
-		log.Fatalf("-type gm 需要 -gmkey 或 GM_KEY：没配密钥就不该监听管理端口")
+		// 而不是「谁都能登控制台」。
+		log.Fatalf("-type gm 需要 -gmpass（GM 控制台密码）")
 	}
 
 	cfg := config.NewDefaultPitayaConfig()
-	// protobuf serializer（serializertype=2），消息类型见 game/protos/game.proto；
+	// protobuf serializer（serializertype=2）；消息定义按归属分三份：
+	// 客户端请求在 gate/protos/gate.proto，推送按发送方在 match/protos 与 game/protos。
 	// 关消息压缩：客户端用纯 GDScript 解码，不引入 gzip。
 	cfg.SerializerType = 2
 	cfg.Handler.Messages.Compression = false
@@ -94,14 +93,14 @@ func main() {
 	// app.Start() 收到 SIGINT/SIGTERM 时是**正常返回**的，run 也就返回 nil。
 	// 无条件 log.Fatalf 会把每一次优雅退出都打成「启动失败: <nil>」并以 1 退出，
 	// 部署脚本与冒烟测试会读到不存在的失败。
-	if err := run(svType, builder, *redisAddr, *gmAddr, secret); err != nil {
+	if err := run(svType, builder, *redisAddr, *gmAddr, *gmUser, *gmPass, *gmSecret); err != nil {
 		log.Fatalf("启动失败: %v", err)
 	}
 }
 
 // run 组装并启动指定角色的服务。抽成函数是为了让 flag 解析与 defer 清理分离 ——
 // main 里 log.Fatal 会跳过 defer，Redis 连接必须在这里关。
-func run(svType *string, builder *pitaya.Builder, redisAddr string, gmAddr string, secret string) error {
+func run(svType *string, builder *pitaya.Builder, redisAddr, gmAddr, gmUser, gmPass, gmSecret string) error {
 	// Redis 是 gate / account / logic / match 四个角色的共享依赖（gate 写会话归属、
 	// account 存取账号与凭证、logic 存玩家档案、match 存排队队列）。game 不碰 Redis，就不给它开连接 ——
 	// 否则 Redis 一挂，连纯计算的 game 节点都起不来。
@@ -163,8 +162,8 @@ func run(svType *string, builder *pitaya.Builder, redisAddr string, gmAddr strin
 			logic.NewRedisLockFactory(rdb),
 		)
 		// handler 与 remote 必须是**同一个组件实例**：GrantCoins（GM 发钱）要能被
-		// RPCTo 调到，而密钥状态只有一份。
-		logicComp := logic.NewComponentWithSecret(app, service, secret)
+		// RPCTo 调到，而状态只有一份。
+		logicComp := logic.NewComponent(app, service)
 		app.Register(logicComp,
 			component.WithName("logic"),
 			component.WithNameFunc(strings.ToLower),
@@ -177,8 +176,8 @@ func run(svType *string, builder *pitaya.Builder, redisAddr string, gmAddr strin
 	case "match":
 		// 队列在 Redis（多个 match 节点共享同一条队列），开局前用 online 登记
 		// 定位每个玩家所属的 gate 并请它写会话数据（顺带探活）。
-		// 同 logic：handler 与 remote 共用一个实例（QueueBots 是 GM 用 RPCTo 调的）。
-		matchComp := match.New(app, match.NewQueue(rdb), online.NewStore(rdb), secret)
+		// 同 logic：handler 与 remote 共用一个实例（AddBots 是 GM 用 RPCTo 调的）。
+		matchComp := match.New(app, match.NewQueue(rdb), online.NewStore(rdb))
 		app.Register(matchComp,
 			component.WithName("match"),
 			component.WithNameFunc(strings.ToLower),
@@ -199,9 +198,9 @@ func run(svType *string, builder *pitaya.Builder, redisAddr string, gmAddr strin
 		}
 		defer accountPool.Close()
 
-		rpc := gm.NewRPC(app, secret)
+		rpc := gm.NewRPC(app)
 		handler := gm.NewHandler(rpc, rpc,
-			account.NewStore(rdb, persist.NewAccountStore(accountPool)), secret)
+			account.NewStore(rdb, persist.NewAccountStore(accountPool)), gmUser, gmPass, gmSecret)
 		go func() {
 			// Run 是阻塞的：放进 goroutine，让 app.Start() 继续处理信号与优雅退出。
 			if err := handler.Router().Run(gmAddr); err != nil {

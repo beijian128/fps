@@ -11,7 +11,8 @@ import (
 	pitaya "github.com/topfreegames/pitaya/v3/pkg"
 	"github.com/topfreegames/pitaya/v3/pkg/cluster"
 	"github.com/topfreegames/pitaya/v3/pkg/session"
-	"joltgo/game/protos"
+	gatepb "joltgo/gate/protos"
+	matchpb "joltgo/match/protos"
 	"joltgo/online"
 )
 
@@ -46,7 +47,7 @@ func newPushTestComponent(t *testing.T, sess session.Session) (*Component, *push
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { _ = rdb.Close() })
 	app := &pushRecordingApp{sess: sess}
-	return New(app, NewQueue(rdb), online.NewStore(rdb), ""), app
+	return New(app, NewQueue(rdb), online.NewStore(rdb)), app
 }
 
 func TestCancelRemovesFromQueue(t *testing.T) {
@@ -56,7 +57,7 @@ func TestCancelRemovesFromQueue(t *testing.T) {
 		t.Fatalf("Enqueue: %v", err)
 	}
 
-	reply, err := c.Cancel(ctx, &protos.MatchCancelMsg{})
+	reply, err := c.Cancel(ctx, &gatepb.MatchCancelMsg{})
 	if err != nil {
 		t.Fatalf("Cancel: %v", err)
 	}
@@ -71,7 +72,7 @@ func TestCancelRemovesFromQueue(t *testing.T) {
 func TestCancelReportsNotQueued(t *testing.T) {
 	c, _ := newPushTestComponent(t, &joinTestSession{uid: "7"})
 
-	reply, err := c.Cancel(context.Background(), &protos.MatchCancelMsg{})
+	reply, err := c.Cancel(context.Background(), &gatepb.MatchCancelMsg{})
 	if err != nil {
 		t.Fatalf("Cancel: %v", err)
 	}
@@ -83,7 +84,7 @@ func TestCancelReportsNotQueued(t *testing.T) {
 func TestCancelRejectsUnboundSession(t *testing.T) {
 	c, _ := newPushTestComponent(t, &joinTestSession{uid: ""})
 
-	reply, err := c.Cancel(context.Background(), &protos.MatchCancelMsg{})
+	reply, err := c.Cancel(context.Background(), &gatepb.MatchCancelMsg{})
 	if err != nil {
 		t.Fatalf("Cancel: %v", err)
 	}
@@ -120,7 +121,7 @@ func TestPushMatchStatusCoversQueue(t *testing.T) {
 		if route != statusRoute {
 			t.Fatalf("第 %d 条 route = %s，期望 %s", i, route, statusRoute)
 		}
-		status, ok := app.args[i].(*protos.MatchStatus)
+		status, ok := app.args[i].(*matchpb.MatchStatus)
 		if !ok {
 			t.Fatalf("第 %d 条载荷类型不对: %T", i, app.args[i])
 		}
@@ -128,8 +129,8 @@ func TestPushMatchStatusCoversQueue(t *testing.T) {
 			t.Fatalf("第 %d 条队列人数 = %d，期望 2", i, status.QueuedPlayers)
 		}
 	}
-	first := app.args[0].(*protos.MatchStatus)
-	second := app.args[1].(*protos.MatchStatus)
+	first := app.args[0].(*matchpb.MatchStatus)
+	second := app.args[1].(*matchpb.MatchStatus)
 	if first.WaitedSeconds != 6 || second.WaitedSeconds != 2 {
 		t.Fatalf("等待时长不对: 第一条=%d 第二条=%d", first.WaitedSeconds, second.WaitedSeconds)
 	}

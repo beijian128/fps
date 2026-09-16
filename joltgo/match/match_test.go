@@ -13,6 +13,7 @@ import (
 	"github.com/topfreegames/pitaya/v3/pkg/cluster"
 	"github.com/topfreegames/pitaya/v3/pkg/session"
 	"joltgo/game/protos"
+	gatepb "joltgo/gate/protos"
 	"joltgo/online"
 )
 
@@ -63,7 +64,7 @@ func newTestComponent(t *testing.T, sess session.Session) (*Component, *miniredi
 	mr := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { _ = rdb.Close() })
-	return New(&joinTestApp{sess: sess}, NewQueue(rdb), online.NewStore(rdb), ""), mr
+	return New(&joinTestApp{sess: sess}, NewQueue(rdb), online.NewStore(rdb)), mr
 }
 
 // 排队等待期间断线重连：同一个 uid 再 Join 一次，队列里必须还是只有一条
@@ -73,11 +74,11 @@ func TestJoinDedupsQueuedUid(t *testing.T) {
 	c, _ := newTestComponent(t, &joinTestSession{uid: "T"})
 	ctx := context.Background()
 
-	c.Join(ctx, &protos.JoinMsg{})
+	c.Join(ctx, &gatepb.JoinMsg{})
 	if n, _ := c.queue.rdb.ZCard(ctx, queueKey).Result(); n != 1 {
 		t.Fatalf("首次 Join 应入队一条，得到 %d", n)
 	}
-	c.Join(ctx, &protos.JoinMsg{})
+	c.Join(ctx, &gatepb.JoinMsg{})
 	if n, _ := c.queue.rdb.ZCard(ctx, queueKey).Result(); n != 1 {
 		t.Fatalf("同 uid 重连不应重复入队，得到 %d", n)
 	}
@@ -91,7 +92,7 @@ func TestJoinRejectsUnboundSession(t *testing.T) {
 	c, _ := newTestComponent(t, &joinTestSession{uid: ""})
 	ctx := context.Background()
 
-	c.Join(ctx, &protos.JoinMsg{})
+	c.Join(ctx, &gatepb.JoinMsg{})
 	if n, _ := c.queue.rdb.ZCard(ctx, queueKey).Result(); n != 0 {
 		t.Fatalf("未绑定会话不应入队，得到 %d 条", n)
 	}
@@ -169,7 +170,7 @@ func newStartMatchComponent(t *testing.T, app *startMatchTestApp) (*Component, *
 	qrdb := redis.NewClient(&redis.Options{Addr: qmr.Addr()})
 	ordb := redis.NewClient(&redis.Options{Addr: omr.Addr()})
 	t.Cleanup(func() { _ = qrdb.Close(); _ = ordb.Close() })
-	return New(app, NewQueue(qrdb), online.NewStore(ordb), ""), omr
+	return New(app, NewQueue(qrdb), online.NewStore(ordb)), omr
 }
 
 // queued 返回队列里现有的 uid（升序）。

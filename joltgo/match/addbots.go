@@ -25,21 +25,13 @@ const maxBotsPerRequest = 8
 // 拿到 "route not found"。这条约定在本项目里是一致的：Join → match.join、
 // Pending → match.pending。
 //
-// 两道入口检查（见 auth.go）：拒绝带会话的调用（客户端经 gate 发来的）、
-// 校验共享密钥（任何后端都能调这条 route）。
+// **不做调用方鉴权**（2026-09-16 的明确取舍）：客户端发不到这条 route —— 它不在
+// gate 的转发白名单里（见 joltgo/gate/routes.go 的 allowedRoutes），而 gate 是客户端
+// 唯一的入口；集群内部进程本就能调它，那不是鉴权能解决的问题。
 //
 // 入队语义留在本包：gm 不碰 match:queue、也不构造 bot uid —— 队列的写入口只有
 // Queue.Enqueue 这一条路径。
 func (c *Component) AddBots(ctx context.Context, msg *protos.AddBotsMsg) (*protos.AddBotsReply, error) {
-	if isClientCall(ctx, c.app) {
-		log.Printf("match: addbots from client rejected")
-		return &protos.AddBotsReply{Ok: false, Reason: "forbidden"}, nil
-	}
-	if !adminKeyAllowed(c.adminSecret(), msg.GetAdminKey()) {
-		log.Printf("match: addbots rejected: bad admin key")
-		return &protos.AddBotsReply{Ok: false, Reason: "forbidden"}, nil
-	}
-
 	count := int(msg.GetCount())
 	if count <= 0 {
 		return &protos.AddBotsReply{Ok: true, Reason: "noop"}, nil

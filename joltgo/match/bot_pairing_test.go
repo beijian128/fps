@@ -58,14 +58,14 @@ func newBotPairEnv(t *testing.T) (*Component, *botPairApp, *online.Store) {
 	t.Helper()
 	app := &botPairApp{}
 	app.servers = map[string]*cluster.Server{"g1": {ID: "g1", Type: gameServerType}}
-	comp, _, onl := newRawMatchEnv(t, app, "s3cret")
+	comp, _, onl := newRawMatchEnv(t, app)
 	return comp, app, onl
 }
 
-// newRawMatchEnv 与 newStartMatchComponent 同款，但分开返回组件与在线登记仓储，
-// 并允许指定管理密钥。不复用 newStartMatchComponent 是因为它把 app 与 secret
-// 都写死了（""），而本文件的用例需要一个有效密钥、并把 app 换成记录版 stub。
-func newRawMatchEnv(t *testing.T, app *botPairApp, secret string) (*Component, *miniredis.Miniredis, *online.Store) {
+// newRawMatchEnv 与 newStartMatchComponent 同款，但分开返回组件与在线登记仓储。
+// 不复用 newStartMatchComponent 是因为它把 app 写死了，而本文件的用例要把 app
+// 换成记录版 stub。
+func newRawMatchEnv(t *testing.T, app *botPairApp) (*Component, *miniredis.Miniredis, *online.Store) {
 	t.Helper()
 	qmr := miniredis.RunT(t)
 	omr := miniredis.RunT(t)
@@ -73,7 +73,7 @@ func newRawMatchEnv(t *testing.T, app *botPairApp, secret string) (*Component, *
 	ordb := redis.NewClient(&redis.Options{Addr: omr.Addr()})
 	t.Cleanup(func() { _ = qrdb.Close(); _ = ordb.Close() })
 	onl := online.NewStore(ordb)
-	comp := New(app, NewQueue(qrdb), onl, secret)
+	comp := New(app, NewQueue(qrdb), onl)
 	comp.app = app
 	return comp, omr, onl
 }
@@ -94,7 +94,7 @@ func TestStartMatchRequiresHumanOnlineButNotBot(t *testing.T) {
 	c, app, onl := newBotPairEnv(t)
 	ctx := context.Background()
 
-	if _, err := c.AddBots(ctx, &protos.AddBotsMsg{Count: 1, AdminKey: "s3cret"}); err != nil {
+	if _, err := c.AddBots(ctx, &protos.AddBotsMsg{Count: 1}); err != nil {
 		t.Fatal(err)
 	}
 	// 先让配对跑一次：此时队列里只有一个机器人，凑不满两人，什么都不该发生。
@@ -128,7 +128,7 @@ func TestStartMatchDropsOfflineHumanAndKeepsBotQueued(t *testing.T) {
 	c, app, _ := newBotPairEnv(t)
 	ctx := context.Background()
 
-	if _, err := c.AddBots(ctx, &protos.AddBotsMsg{Count: 1, AdminKey: "s3cret"}); err != nil {
+	if _, err := c.AddBots(ctx, &protos.AddBotsMsg{Count: 1}); err != nil {
 		t.Fatal(err)
 	}
 	// 这个真人没有在线登记 = 已经掉线。
@@ -149,7 +149,7 @@ func TestTryMatchDiscardsAllBotPair(t *testing.T) {
 	c, app, _ := newBotPairEnv(t)
 	ctx := context.Background()
 
-	reply, err := c.AddBots(ctx, &protos.AddBotsMsg{Count: 2, AdminKey: "s3cret"})
+	reply, err := c.AddBots(ctx, &protos.AddBotsMsg{Count: 2})
 	if err != nil || !reply.Ok || reply.Enqueued != 2 {
 		t.Fatalf("准备机器人失败: reply=%+v err=%v", reply, err)
 	}
@@ -168,7 +168,7 @@ func TestPushMatchStatusSkipsBotsButCountsThem(t *testing.T) {
 	c, app, _ := newBotPairEnv(t)
 	ctx := context.Background()
 
-	if _, err := c.AddBots(ctx, &protos.AddBotsMsg{Count: 1, AdminKey: "s3cret"}); err != nil {
+	if _, err := c.AddBots(ctx, &protos.AddBotsMsg{Count: 1}); err != nil {
 		t.Fatal(err)
 	}
 	if err := c.queue.Enqueue(ctx, "10001"); err != nil {

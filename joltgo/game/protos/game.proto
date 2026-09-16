@@ -185,16 +185,14 @@ message UserOnlineReply {
 // AddBotsMsg 是 gm → match 的 RPC（route "match.match.addbots"）：往匹配队列里
 // 塞 N 个机器人凑人数。
 //
-// admin_key 是共享密钥。这条 route 会被 gate 按前缀路由到 match 节点，
-// **客户端也能发到**，所以服务端不能靠「route 是内部的」来假设调用方可信：
-// 除了密钥，还要拒绝任何「带着会话」的调用（那是客户端经 gate 转发来的）。
+// 这条 route 不会从客户端到达（不在 gate 的转发白名单里），因此不做调用方鉴权；
+// 集群内部进程本就能调它，那不是鉴权能解决的问题。
 message AddBotsMsg {
-  int32 count = 1;     // 期望入队的机器人数量，服务端另有单次上限
-  string admin_key = 2;
+  int32 count = 1; // 期望入队的机器人数量，服务端另有单次上限
 }
 
 // AddBotsReply 是 match.match.addbots 的应答。
-// reason：forbidden | internal | noop（count<=0 时的空操作，ok 仍为 true）。
+// reason：internal | noop（count<=0 时的空操作，ok 仍为 true）。
 message AddBotsReply {
   bool ok = 1;
   int32 enqueued = 2; // 实际入队数量
@@ -206,11 +204,10 @@ message AddBotsReply {
 message GrantCoinsMsg {
   string account_id = 1;
   int64 delta = 2;
-  string admin_key = 3;
 }
 
 // GrantCoinsReply 是 logic.logic.grantcoins 的应答。
-// reason：forbidden | account_not_found | unauthenticated | profile_missing | internal。
+// reason：account_not_found | unauthenticated | profile_missing | internal。
 message GrantCoinsReply {
   bool ok = 1;
   int64 coins = 2; // 变更后的余额（ok=true 时有效）
