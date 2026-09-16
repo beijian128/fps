@@ -1,20 +1,26 @@
-// 游戏协议消息（wire 契约）。gate / account / logic / match / game 等服务与
-// Godot 客户端都遵守。
-// 线上 route 一律是三段式 `server.service.method`（pitaya 的路由格式）：
-//   - 客户端 → gate → account：account.account.register / account.account.login /
-//     account.account.resume（Request/Response，不是 Notify/Push —— 见 docs/API.md）
-//   - 客户端 → gate → logic：logic.logic.state / logic.logic.purchase /
-//     logic.logic.equip（Request/Response）
-//   - 客户端 → gate → match：match.match.join（JoinMsg，Notify）
-//   - 客户端 → gate → match：match.match.pending（PendingMatchMsg）/ match.match.abandon
-//     （AbandonMatchMsg）（Request/Response：进大厅时问「我有没有没打完的局」、
-//     以及放弃那场对局 —— 放弃只是把该玩家从实例里释放出来，实例照常打完）
-//   - match → 客户端：onMatched（MatchResult，Push —— 推送用 route 名，不是三段式）
-//   - match → game（RPC）：game.game.create（CreateGameMsg）/ game.game.rejoin（RejoinMsg）
+// game 的协议定义：game 推给客户端的消息 + 服务内部消息。
+//
+// 归属规则（与 gate/protos/gate.proto、match/protos/match.proto 一致，三份文件
+// 之间**没有 import 关系**）：
+//   - 客户端主动请求 → gate/protos/gate.proto
+//   - match 推给客户端的 → match/protos/match.proto
+//   - game 推给客户端的、以及服务之间的内部消息 → 本文件
+//
+// 内部消息留在这里是因为它们的双方（game ↔ logic / gate、gm → game）不涉及客户端；
+// 其中 SlotResult 同时被下发的 MatchEnded 与上报的 RecordMatchMsg 使用，两个消息
+// 都在本文件，所以零 import。
+//
+// 内部 RPC 的 route 一览（都是三段式，用 RegisterRemote 注册）：
+//   - match → game：game.game.create（CreateGameMsg）/ game.game.rejoin（RejoinMsg）
 //     / game.game.leave（LeaveMsg，放弃对局时把玩家从实例里摘出来）
-//   - match → gate（RPC）：gate.gate.bindgame（BindGameMsg）
-//   - 客户端 → gate → game：game.game.cmd（CommandMsg）/ game.game.resync（空，Notify）
-//   - game → 客户端：onFrame（Frame，Push）
+//   - match → gate：gate.gate.bindgame（BindGameMsg）
+//   - game → logic：logic.logic.recordmatch（RecordMatchMsg，战绩上报）
+//   - account → logic：logic.logic.online（UserOnlineMsg）
+//   - gm → match：match.match.addbots（AddBotsMsg）
+//   - gm → logic：logic.logic.grantcoins（GrantCoinsMsg）
+//
+// 这些 route 客户端**发不到**：gate 只转发 gate/protos/gate.proto 里定义过的 route
+// （见 joltgo/gate/routes.go 的 allowedRoutes）。
 //
 // 同步不走手写快照，走通用「实体-属性」增量：属性表（Schema）在 full 帧里下发一次，
 // 之后所有帧都是 (实体, 属性, 终值) 的 op。新增属性不需要改动本文件的字段定义。
@@ -43,1476 +49,6 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// CommandMsg 是一帧的上行命令：把输入与射击合并成一条消息发送（帧是最小发送单位）。
-// shoot 是边沿触发，未触发时为 false。
-type CommandMsg struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-
-	Move   []float32 `protobuf:"fixed32,1,rep,packed,name=move,proto3" json:"move,omitempty"`     // [wx, wz]，世界空间水平期望速度（m/s）
-	Yaw    float32   `protobuf:"fixed32,2,opt,name=yaw,proto3" json:"yaw,omitempty"`              // 水平朝向（弧度，绕 Y 轴）
-	Jump   bool      `protobuf:"varint,3,opt,name=jump,proto3" json:"jump,omitempty"`             // 跳跃边沿触发（服务端下一 tick 消费）
-	Shoot  bool      `protobuf:"varint,4,opt,name=shoot,proto3" json:"shoot,omitempty"`           // 射击边沿触发
-	Origin []float32 `protobuf:"fixed32,5,rep,packed,name=origin,proto3" json:"origin,omitempty"` // [x, y, z] 枪口位置（shoot 为 true 时有效）
-	Dir    []float32 `protobuf:"fixed32,6,rep,packed,name=dir,proto3" json:"dir,omitempty"`       // [x, y, z] 射击方向（服务端会归一化）
-}
-
-func (x *CommandMsg) Reset() {
-	*x = CommandMsg{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_game_protos_game_proto_msgTypes[0]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
-}
-
-func (x *CommandMsg) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*CommandMsg) ProtoMessage() {}
-
-func (x *CommandMsg) ProtoReflect() protoreflect.Message {
-	mi := &file_game_protos_game_proto_msgTypes[0]
-	if protoimpl.UnsafeEnabled && x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use CommandMsg.ProtoReflect.Descriptor instead.
-func (*CommandMsg) Descriptor() ([]byte, []int) {
-	return file_game_protos_game_proto_rawDescGZIP(), []int{0}
-}
-
-func (x *CommandMsg) GetMove() []float32 {
-	if x != nil {
-		return x.Move
-	}
-	return nil
-}
-
-func (x *CommandMsg) GetYaw() float32 {
-	if x != nil {
-		return x.Yaw
-	}
-	return 0
-}
-
-func (x *CommandMsg) GetJump() bool {
-	if x != nil {
-		return x.Jump
-	}
-	return false
-}
-
-func (x *CommandMsg) GetShoot() bool {
-	if x != nil {
-		return x.Shoot
-	}
-	return false
-}
-
-func (x *CommandMsg) GetOrigin() []float32 {
-	if x != nil {
-		return x.Origin
-	}
-	return nil
-}
-
-func (x *CommandMsg) GetDir() []float32 {
-	if x != nil {
-		return x.Dir
-	}
-	return nil
-}
-
-// JoinMsg 是加入匹配的请求。身份来自会话绑定（account 服务在登录时做的），
-// 这里不再携带任何凭证 —— 字段清空后 route 与 handler 签名都不变。
-type JoinMsg struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-}
-
-func (x *JoinMsg) Reset() {
-	*x = JoinMsg{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_game_protos_game_proto_msgTypes[1]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
-}
-
-func (x *JoinMsg) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*JoinMsg) ProtoMessage() {}
-
-func (x *JoinMsg) ProtoReflect() protoreflect.Message {
-	mi := &file_game_protos_game_proto_msgTypes[1]
-	if protoimpl.UnsafeEnabled && x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use JoinMsg.ProtoReflect.Descriptor instead.
-func (*JoinMsg) Descriptor() ([]byte, []int) {
-	return file_game_protos_game_proto_rawDescGZIP(), []int{1}
-}
-
-// PendingMatchMsg 是「我有没有没打完的局」的查询请求（route "match.match.pending"）。
-// 客户端登录成功、刚进大厅时问一次：命中就弹「回到对局 / 放弃对局」的询问框。
-// 身份来自会话，payload 为空。
-type PendingMatchMsg struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-}
-
-func (x *PendingMatchMsg) Reset() {
-	*x = PendingMatchMsg{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_game_protos_game_proto_msgTypes[2]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
-}
-
-func (x *PendingMatchMsg) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*PendingMatchMsg) ProtoMessage() {}
-
-func (x *PendingMatchMsg) ProtoReflect() protoreflect.Message {
-	mi := &file_game_protos_game_proto_msgTypes[2]
-	if protoimpl.UnsafeEnabled && x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use PendingMatchMsg.ProtoReflect.Descriptor instead.
-func (*PendingMatchMsg) Descriptor() ([]byte, []int) {
-	return file_game_protos_game_proto_rawDescGZIP(), []int{2}
-}
-
-// PendingMatchReply 是 match.match.pending 的应答。
-// found=false 时 match_id 无意义（空串）。
-type PendingMatchReply struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-
-	Found   bool   `protobuf:"varint,1,opt,name=found,proto3" json:"found,omitempty"`
-	MatchId string `protobuf:"bytes,2,opt,name=match_id,json=matchId,proto3" json:"match_id,omitempty"`
-}
-
-func (x *PendingMatchReply) Reset() {
-	*x = PendingMatchReply{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_game_protos_game_proto_msgTypes[3]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
-}
-
-func (x *PendingMatchReply) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*PendingMatchReply) ProtoMessage() {}
-
-func (x *PendingMatchReply) ProtoReflect() protoreflect.Message {
-	mi := &file_game_protos_game_proto_msgTypes[3]
-	if protoimpl.UnsafeEnabled && x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use PendingMatchReply.ProtoReflect.Descriptor instead.
-func (*PendingMatchReply) Descriptor() ([]byte, []int) {
-	return file_game_protos_game_proto_rawDescGZIP(), []int{3}
-}
-
-func (x *PendingMatchReply) GetFound() bool {
-	if x != nil {
-		return x.Found
-	}
-	return false
-}
-
-func (x *PendingMatchReply) GetMatchId() string {
-	if x != nil {
-		return x.MatchId
-	}
-	return ""
-}
-
-// AbandonMatchMsg 是「放弃那场没打完的局」的请求（route "match.match.abandon"）。
-// 语义：**只把当前玩家从对局里释放出来**（不再收帧、不再参与结算），对局实例本身
-// 照常推进 —— 对手还在打，他的那一局不因为有人放弃而中断。身份来自会话。
-type AbandonMatchMsg struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-}
-
-func (x *AbandonMatchMsg) Reset() {
-	*x = AbandonMatchMsg{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_game_protos_game_proto_msgTypes[4]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
-}
-
-func (x *AbandonMatchMsg) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*AbandonMatchMsg) ProtoMessage() {}
-
-func (x *AbandonMatchMsg) ProtoReflect() protoreflect.Message {
-	mi := &file_game_protos_game_proto_msgTypes[4]
-	if protoimpl.UnsafeEnabled && x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use AbandonMatchMsg.ProtoReflect.Descriptor instead.
-func (*AbandonMatchMsg) Descriptor() ([]byte, []int) {
-	return file_game_protos_game_proto_rawDescGZIP(), []int{4}
-}
-
-// AbandonMatchReply 是 match.match.abandon 的应答。
-// reason：released | not_found | unauthenticated | internal。
-type AbandonMatchReply struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-
-	Ok     bool   `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
-	Reason string `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`
-}
-
-func (x *AbandonMatchReply) Reset() {
-	*x = AbandonMatchReply{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_game_protos_game_proto_msgTypes[5]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
-}
-
-func (x *AbandonMatchReply) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*AbandonMatchReply) ProtoMessage() {}
-
-func (x *AbandonMatchReply) ProtoReflect() protoreflect.Message {
-	mi := &file_game_protos_game_proto_msgTypes[5]
-	if protoimpl.UnsafeEnabled && x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use AbandonMatchReply.ProtoReflect.Descriptor instead.
-func (*AbandonMatchReply) Descriptor() ([]byte, []int) {
-	return file_game_protos_game_proto_rawDescGZIP(), []int{5}
-}
-
-func (x *AbandonMatchReply) GetOk() bool {
-	if x != nil {
-		return x.Ok
-	}
-	return false
-}
-
-func (x *AbandonMatchReply) GetReason() string {
-	if x != nil {
-		return x.Reason
-	}
-	return ""
-}
-
-// RegisterMsg 是注册请求。用户名 3-16 位 [a-zA-Z0-9_]，密码 6-64 位。
-type RegisterMsg struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-
-	Username string `protobuf:"bytes,1,opt,name=username,proto3" json:"username,omitempty"`
-	Password string `protobuf:"bytes,2,opt,name=password,proto3" json:"password,omitempty"`
-}
-
-func (x *RegisterMsg) Reset() {
-	*x = RegisterMsg{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_game_protos_game_proto_msgTypes[6]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
-}
-
-func (x *RegisterMsg) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*RegisterMsg) ProtoMessage() {}
-
-func (x *RegisterMsg) ProtoReflect() protoreflect.Message {
-	mi := &file_game_protos_game_proto_msgTypes[6]
-	if protoimpl.UnsafeEnabled && x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use RegisterMsg.ProtoReflect.Descriptor instead.
-func (*RegisterMsg) Descriptor() ([]byte, []int) {
-	return file_game_protos_game_proto_rawDescGZIP(), []int{6}
-}
-
-func (x *RegisterMsg) GetUsername() string {
-	if x != nil {
-		return x.Username
-	}
-	return ""
-}
-
-func (x *RegisterMsg) GetPassword() string {
-	if x != nil {
-		return x.Password
-	}
-	return ""
-}
-
-// LoginMsg 是登录请求。
-type LoginMsg struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-
-	Username string `protobuf:"bytes,1,opt,name=username,proto3" json:"username,omitempty"`
-	Password string `protobuf:"bytes,2,opt,name=password,proto3" json:"password,omitempty"`
-}
-
-func (x *LoginMsg) Reset() {
-	*x = LoginMsg{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_game_protos_game_proto_msgTypes[7]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
-}
-
-func (x *LoginMsg) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*LoginMsg) ProtoMessage() {}
-
-func (x *LoginMsg) ProtoReflect() protoreflect.Message {
-	mi := &file_game_protos_game_proto_msgTypes[7]
-	if protoimpl.UnsafeEnabled && x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use LoginMsg.ProtoReflect.Descriptor instead.
-func (*LoginMsg) Descriptor() ([]byte, []int) {
-	return file_game_protos_game_proto_rawDescGZIP(), []int{7}
-}
-
-func (x *LoginMsg) GetUsername() string {
-	if x != nil {
-		return x.Username
-	}
-	return ""
-}
-
-func (x *LoginMsg) GetPassword() string {
-	if x != nil {
-		return x.Password
-	}
-	return ""
-}
-
-// ResumeMsg 是凭证恢复请求：客户端持有 token，换回会话。
-type ResumeMsg struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-
-	Token string `protobuf:"bytes,1,opt,name=token,proto3" json:"token,omitempty"`
-}
-
-func (x *ResumeMsg) Reset() {
-	*x = ResumeMsg{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_game_protos_game_proto_msgTypes[8]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
-}
-
-func (x *ResumeMsg) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ResumeMsg) ProtoMessage() {}
-
-func (x *ResumeMsg) ProtoReflect() protoreflect.Message {
-	mi := &file_game_protos_game_proto_msgTypes[8]
-	if protoimpl.UnsafeEnabled && x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ResumeMsg.ProtoReflect.Descriptor instead.
-func (*ResumeMsg) Descriptor() ([]byte, []int) {
-	return file_game_protos_game_proto_rawDescGZIP(), []int{8}
-}
-
-func (x *ResumeMsg) GetToken() string {
-	if x != nil {
-		return x.Token
-	}
-	return ""
-}
-
-// LoginReply 是 register / login / resume 的统一应答，客户端用同一段代码处理。
-// ok=false 时 reason 是机器可读的原因码（bad_credentials / name_taken /
-// bad_username / bad_password / rate_limited / token_invalid / internal）。
-type LoginReply struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-
-	Ok        bool   `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
-	Token     string `protobuf:"bytes,2,opt,name=token,proto3" json:"token,omitempty"`                          // ok=true 时有效
-	Username  string `protobuf:"bytes,3,opt,name=username,proto3" json:"username,omitempty"`                    // 保留用户输入的原始大小写，供 UI 显示
-	AccountId string `protobuf:"bytes,4,opt,name=account_id,json=accountId,proto3" json:"account_id,omitempty"` // 十进制字符串，仅供诊断
-	Reason    string `protobuf:"bytes,5,opt,name=reason,proto3" json:"reason,omitempty"`                        // ok=false 时的原因码
-}
-
-func (x *LoginReply) Reset() {
-	*x = LoginReply{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_game_protos_game_proto_msgTypes[9]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
-}
-
-func (x *LoginReply) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*LoginReply) ProtoMessage() {}
-
-func (x *LoginReply) ProtoReflect() protoreflect.Message {
-	mi := &file_game_protos_game_proto_msgTypes[9]
-	if protoimpl.UnsafeEnabled && x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use LoginReply.ProtoReflect.Descriptor instead.
-func (*LoginReply) Descriptor() ([]byte, []int) {
-	return file_game_protos_game_proto_rawDescGZIP(), []int{9}
-}
-
-func (x *LoginReply) GetOk() bool {
-	if x != nil {
-		return x.Ok
-	}
-	return false
-}
-
-func (x *LoginReply) GetToken() string {
-	if x != nil {
-		return x.Token
-	}
-	return ""
-}
-
-func (x *LoginReply) GetUsername() string {
-	if x != nil {
-		return x.Username
-	}
-	return ""
-}
-
-func (x *LoginReply) GetAccountId() string {
-	if x != nil {
-		return x.AccountId
-	}
-	return ""
-}
-
-func (x *LoginReply) GetReason() string {
-	if x != nil {
-		return x.Reason
-	}
-	return ""
-}
-
-type LogicStateMsg struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-}
-
-func (x *LogicStateMsg) Reset() {
-	*x = LogicStateMsg{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_game_protos_game_proto_msgTypes[10]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
-}
-
-func (x *LogicStateMsg) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*LogicStateMsg) ProtoMessage() {}
-
-func (x *LogicStateMsg) ProtoReflect() protoreflect.Message {
-	mi := &file_game_protos_game_proto_msgTypes[10]
-	if protoimpl.UnsafeEnabled && x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use LogicStateMsg.ProtoReflect.Descriptor instead.
-func (*LogicStateMsg) Descriptor() ([]byte, []int) {
-	return file_game_protos_game_proto_rawDescGZIP(), []int{10}
-}
-
-type PurchaseMsg struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-
-	ItemId   string `protobuf:"bytes,1,opt,name=item_id,json=itemId,proto3" json:"item_id,omitempty"`
-	Quantity int32  `protobuf:"varint,2,opt,name=quantity,proto3" json:"quantity,omitempty"`
-}
-
-func (x *PurchaseMsg) Reset() {
-	*x = PurchaseMsg{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_game_protos_game_proto_msgTypes[11]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
-}
-
-func (x *PurchaseMsg) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*PurchaseMsg) ProtoMessage() {}
-
-func (x *PurchaseMsg) ProtoReflect() protoreflect.Message {
-	mi := &file_game_protos_game_proto_msgTypes[11]
-	if protoimpl.UnsafeEnabled && x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use PurchaseMsg.ProtoReflect.Descriptor instead.
-func (*PurchaseMsg) Descriptor() ([]byte, []int) {
-	return file_game_protos_game_proto_rawDescGZIP(), []int{11}
-}
-
-func (x *PurchaseMsg) GetItemId() string {
-	if x != nil {
-		return x.ItemId
-	}
-	return ""
-}
-
-func (x *PurchaseMsg) GetQuantity() int32 {
-	if x != nil {
-		return x.Quantity
-	}
-	return 0
-}
-
-type EquipMsg struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-
-	ItemId string `protobuf:"bytes,1,opt,name=item_id,json=itemId,proto3" json:"item_id,omitempty"`
-}
-
-func (x *EquipMsg) Reset() {
-	*x = EquipMsg{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_game_protos_game_proto_msgTypes[12]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
-}
-
-func (x *EquipMsg) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*EquipMsg) ProtoMessage() {}
-
-func (x *EquipMsg) ProtoReflect() protoreflect.Message {
-	mi := &file_game_protos_game_proto_msgTypes[12]
-	if protoimpl.UnsafeEnabled && x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use EquipMsg.ProtoReflect.Descriptor instead.
-func (*EquipMsg) Descriptor() ([]byte, []int) {
-	return file_game_protos_game_proto_rawDescGZIP(), []int{12}
-}
-
-func (x *EquipMsg) GetItemId() string {
-	if x != nil {
-		return x.ItemId
-	}
-	return ""
-}
-
-type UserOnlineMsg struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-
-	AccountId string `protobuf:"bytes,1,opt,name=account_id,json=accountId,proto3" json:"account_id,omitempty"`
-}
-
-func (x *UserOnlineMsg) Reset() {
-	*x = UserOnlineMsg{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_game_protos_game_proto_msgTypes[13]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
-}
-
-func (x *UserOnlineMsg) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*UserOnlineMsg) ProtoMessage() {}
-
-func (x *UserOnlineMsg) ProtoReflect() protoreflect.Message {
-	mi := &file_game_protos_game_proto_msgTypes[13]
-	if protoimpl.UnsafeEnabled && x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use UserOnlineMsg.ProtoReflect.Descriptor instead.
-func (*UserOnlineMsg) Descriptor() ([]byte, []int) {
-	return file_game_protos_game_proto_rawDescGZIP(), []int{13}
-}
-
-func (x *UserOnlineMsg) GetAccountId() string {
-	if x != nil {
-		return x.AccountId
-	}
-	return ""
-}
-
-type UserOnlineReply struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-
-	Ok     bool   `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
-	Reason string `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`
-}
-
-func (x *UserOnlineReply) Reset() {
-	*x = UserOnlineReply{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_game_protos_game_proto_msgTypes[14]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
-}
-
-func (x *UserOnlineReply) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*UserOnlineReply) ProtoMessage() {}
-
-func (x *UserOnlineReply) ProtoReflect() protoreflect.Message {
-	mi := &file_game_protos_game_proto_msgTypes[14]
-	if protoimpl.UnsafeEnabled && x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use UserOnlineReply.ProtoReflect.Descriptor instead.
-func (*UserOnlineReply) Descriptor() ([]byte, []int) {
-	return file_game_protos_game_proto_rawDescGZIP(), []int{14}
-}
-
-func (x *UserOnlineReply) GetOk() bool {
-	if x != nil {
-		return x.Ok
-	}
-	return false
-}
-
-func (x *UserOnlineReply) GetReason() string {
-	if x != nil {
-		return x.Reason
-	}
-	return ""
-}
-
-type LogicShopItem struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-
-	ItemId        string `protobuf:"bytes,1,opt,name=item_id,json=itemId,proto3" json:"item_id,omitempty"`
-	DisplayName   string `protobuf:"bytes,2,opt,name=display_name,json=displayName,proto3" json:"display_name,omitempty"`
-	Price         int64  `protobuf:"varint,3,opt,name=price,proto3" json:"price,omitempty"`
-	EquipSlot     string `protobuf:"bytes,4,opt,name=equip_slot,json=equipSlot,proto3" json:"equip_slot,omitempty"`
-	OwnedQuantity int64  `protobuf:"varint,5,opt,name=owned_quantity,json=ownedQuantity,proto3" json:"owned_quantity,omitempty"`
-}
-
-func (x *LogicShopItem) Reset() {
-	*x = LogicShopItem{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_game_protos_game_proto_msgTypes[15]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
-}
-
-func (x *LogicShopItem) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*LogicShopItem) ProtoMessage() {}
-
-func (x *LogicShopItem) ProtoReflect() protoreflect.Message {
-	mi := &file_game_protos_game_proto_msgTypes[15]
-	if protoimpl.UnsafeEnabled && x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use LogicShopItem.ProtoReflect.Descriptor instead.
-func (*LogicShopItem) Descriptor() ([]byte, []int) {
-	return file_game_protos_game_proto_rawDescGZIP(), []int{15}
-}
-
-func (x *LogicShopItem) GetItemId() string {
-	if x != nil {
-		return x.ItemId
-	}
-	return ""
-}
-
-func (x *LogicShopItem) GetDisplayName() string {
-	if x != nil {
-		return x.DisplayName
-	}
-	return ""
-}
-
-func (x *LogicShopItem) GetPrice() int64 {
-	if x != nil {
-		return x.Price
-	}
-	return 0
-}
-
-func (x *LogicShopItem) GetEquipSlot() string {
-	if x != nil {
-		return x.EquipSlot
-	}
-	return ""
-}
-
-func (x *LogicShopItem) GetOwnedQuantity() int64 {
-	if x != nil {
-		return x.OwnedQuantity
-	}
-	return 0
-}
-
-type LogicStateReply struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-
-	Ok                    bool             `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
-	Reason                string           `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`
-	Coins                 int64            `protobuf:"varint,3,opt,name=coins,proto3" json:"coins,omitempty"`
-	Items                 []*LogicShopItem `protobuf:"bytes,4,rep,name=items,proto3" json:"items,omitempty"`
-	EquippedPrimaryWeapon string           `protobuf:"bytes,5,opt,name=equipped_primary_weapon,json=equippedPrimaryWeapon,proto3" json:"equipped_primary_weapon,omitempty"`
-}
-
-func (x *LogicStateReply) Reset() {
-	*x = LogicStateReply{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_game_protos_game_proto_msgTypes[16]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
-}
-
-func (x *LogicStateReply) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*LogicStateReply) ProtoMessage() {}
-
-func (x *LogicStateReply) ProtoReflect() protoreflect.Message {
-	mi := &file_game_protos_game_proto_msgTypes[16]
-	if protoimpl.UnsafeEnabled && x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use LogicStateReply.ProtoReflect.Descriptor instead.
-func (*LogicStateReply) Descriptor() ([]byte, []int) {
-	return file_game_protos_game_proto_rawDescGZIP(), []int{16}
-}
-
-func (x *LogicStateReply) GetOk() bool {
-	if x != nil {
-		return x.Ok
-	}
-	return false
-}
-
-func (x *LogicStateReply) GetReason() string {
-	if x != nil {
-		return x.Reason
-	}
-	return ""
-}
-
-func (x *LogicStateReply) GetCoins() int64 {
-	if x != nil {
-		return x.Coins
-	}
-	return 0
-}
-
-func (x *LogicStateReply) GetItems() []*LogicShopItem {
-	if x != nil {
-		return x.Items
-	}
-	return nil
-}
-
-func (x *LogicStateReply) GetEquippedPrimaryWeapon() string {
-	if x != nil {
-		return x.EquippedPrimaryWeapon
-	}
-	return ""
-}
-
-// BindGameMsg 是 match → gate 的 RPC 请求（route "gate.gate.bindgame"）：请玩家
-// 所属的 gate 把对局归属写进它自己的会话数据（gate 据 gameServerId 定点路由
-// game.*）。game_server_id 为空表示回滚（清掉归属）。
-type BindGameMsg struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-
-	Uid          string `protobuf:"bytes,1,opt,name=uid,proto3" json:"uid,omitempty"`
-	GameServerId string `protobuf:"bytes,2,opt,name=game_server_id,json=gameServerId,proto3" json:"game_server_id,omitempty"`
-	MatchId      string `protobuf:"bytes,3,opt,name=match_id,json=matchId,proto3" json:"match_id,omitempty"`
-	PlayerIdx    int32  `protobuf:"varint,4,opt,name=player_idx,json=playerIdx,proto3" json:"player_idx,omitempty"`
-}
-
-func (x *BindGameMsg) Reset() {
-	*x = BindGameMsg{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_game_protos_game_proto_msgTypes[17]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
-}
-
-func (x *BindGameMsg) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*BindGameMsg) ProtoMessage() {}
-
-func (x *BindGameMsg) ProtoReflect() protoreflect.Message {
-	mi := &file_game_protos_game_proto_msgTypes[17]
-	if protoimpl.UnsafeEnabled && x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use BindGameMsg.ProtoReflect.Descriptor instead.
-func (*BindGameMsg) Descriptor() ([]byte, []int) {
-	return file_game_protos_game_proto_rawDescGZIP(), []int{17}
-}
-
-func (x *BindGameMsg) GetUid() string {
-	if x != nil {
-		return x.Uid
-	}
-	return ""
-}
-
-func (x *BindGameMsg) GetGameServerId() string {
-	if x != nil {
-		return x.GameServerId
-	}
-	return ""
-}
-
-func (x *BindGameMsg) GetMatchId() string {
-	if x != nil {
-		return x.MatchId
-	}
-	return ""
-}
-
-func (x *BindGameMsg) GetPlayerIdx() int32 {
-	if x != nil {
-		return x.PlayerIdx
-	}
-	return 0
-}
-
-// BindGameReply 是 gate.gate.bindgame 的应答。found=false 表示该 gate 上没有
-// 这个会话（玩家已掉线）。
-type BindGameReply struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-
-	Found bool `protobuf:"varint,1,opt,name=found,proto3" json:"found,omitempty"`
-}
-
-func (x *BindGameReply) Reset() {
-	*x = BindGameReply{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_game_protos_game_proto_msgTypes[18]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
-}
-
-func (x *BindGameReply) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*BindGameReply) ProtoMessage() {}
-
-func (x *BindGameReply) ProtoReflect() protoreflect.Message {
-	mi := &file_game_protos_game_proto_msgTypes[18]
-	if protoimpl.UnsafeEnabled && x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use BindGameReply.ProtoReflect.Descriptor instead.
-func (*BindGameReply) Descriptor() ([]byte, []int) {
-	return file_game_protos_game_proto_rawDescGZIP(), []int{18}
-}
-
-func (x *BindGameReply) GetFound() bool {
-	if x != nil {
-		return x.Found
-	}
-	return false
-}
-
-// MatchResult 是匹配成功结果（match → 客户端 push route "onMatched"）。
-type MatchResult struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-
-	MatchId      string `protobuf:"bytes,1,opt,name=match_id,json=matchId,proto3" json:"match_id,omitempty"`                  // 对局 id
-	GameServerId string `protobuf:"bytes,2,opt,name=game_server_id,json=gameServerId,proto3" json:"game_server_id,omitempty"` // 分配到的 game 节点 id
-	PlayerIdx    int32  `protobuf:"varint,3,opt,name=player_idx,json=playerIdx,proto3" json:"player_idx,omitempty"`           // 本客户端在局内的玩家槽位（0/1）
-}
-
-func (x *MatchResult) Reset() {
-	*x = MatchResult{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_game_protos_game_proto_msgTypes[19]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
-}
-
-func (x *MatchResult) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*MatchResult) ProtoMessage() {}
-
-func (x *MatchResult) ProtoReflect() protoreflect.Message {
-	mi := &file_game_protos_game_proto_msgTypes[19]
-	if protoimpl.UnsafeEnabled && x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use MatchResult.ProtoReflect.Descriptor instead.
-func (*MatchResult) Descriptor() ([]byte, []int) {
-	return file_game_protos_game_proto_rawDescGZIP(), []int{19}
-}
-
-func (x *MatchResult) GetMatchId() string {
-	if x != nil {
-		return x.MatchId
-	}
-	return ""
-}
-
-func (x *MatchResult) GetGameServerId() string {
-	if x != nil {
-		return x.GameServerId
-	}
-	return ""
-}
-
-func (x *MatchResult) GetPlayerIdx() int32 {
-	if x != nil {
-		return x.PlayerIdx
-	}
-	return 0
-}
-
-// CreateGameMsg 是 match → game 创建对局的 RPC 请求（route "game.create"）。
-// uids 按槽位顺序（下标即 player_idx），1 个 = 单人兜底局。
-type CreateGameMsg struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-
-	MatchId string   `protobuf:"bytes,1,opt,name=match_id,json=matchId,proto3" json:"match_id,omitempty"`
-	Uids    []string `protobuf:"bytes,2,rep,name=uids,proto3" json:"uids,omitempty"`
-}
-
-func (x *CreateGameMsg) Reset() {
-	*x = CreateGameMsg{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_game_protos_game_proto_msgTypes[20]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
-}
-
-func (x *CreateGameMsg) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*CreateGameMsg) ProtoMessage() {}
-
-func (x *CreateGameMsg) ProtoReflect() protoreflect.Message {
-	mi := &file_game_protos_game_proto_msgTypes[20]
-	if protoimpl.UnsafeEnabled && x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use CreateGameMsg.ProtoReflect.Descriptor instead.
-func (*CreateGameMsg) Descriptor() ([]byte, []int) {
-	return file_game_protos_game_proto_rawDescGZIP(), []int{20}
-}
-
-func (x *CreateGameMsg) GetMatchId() string {
-	if x != nil {
-		return x.MatchId
-	}
-	return ""
-}
-
-func (x *CreateGameMsg) GetUids() []string {
-	if x != nil {
-		return x.Uids
-	}
-	return nil
-}
-
-// CreateGameReply 是 game.create 的 RPC 应答（0 = 成功）。
-type CreateGameReply struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-
-	Code int32 `protobuf:"varint,1,opt,name=code,proto3" json:"code,omitempty"`
-}
-
-func (x *CreateGameReply) Reset() {
-	*x = CreateGameReply{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_game_protos_game_proto_msgTypes[21]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
-}
-
-func (x *CreateGameReply) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*CreateGameReply) ProtoMessage() {}
-
-func (x *CreateGameReply) ProtoReflect() protoreflect.Message {
-	mi := &file_game_protos_game_proto_msgTypes[21]
-	if protoimpl.UnsafeEnabled && x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use CreateGameReply.ProtoReflect.Descriptor instead.
-func (*CreateGameReply) Descriptor() ([]byte, []int) {
-	return file_game_protos_game_proto_rawDescGZIP(), []int{21}
-}
-
-func (x *CreateGameReply) GetCode() int32 {
-	if x != nil {
-		return x.Code
-	}
-	return 0
-}
-
-// RejoinMsg 是 match → game 的回局查询（route "game.rejoin"）：问这个 game 节点
-// 是否托管着该 token 的存量实例。
-type RejoinMsg struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-
-	Token string `protobuf:"bytes,1,opt,name=token,proto3" json:"token,omitempty"`
-}
-
-func (x *RejoinMsg) Reset() {
-	*x = RejoinMsg{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_game_protos_game_proto_msgTypes[22]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
-}
-
-func (x *RejoinMsg) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*RejoinMsg) ProtoMessage() {}
-
-func (x *RejoinMsg) ProtoReflect() protoreflect.Message {
-	mi := &file_game_protos_game_proto_msgTypes[22]
-	if protoimpl.UnsafeEnabled && x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use RejoinMsg.ProtoReflect.Descriptor instead.
-func (*RejoinMsg) Descriptor() ([]byte, []int) {
-	return file_game_protos_game_proto_rawDescGZIP(), []int{22}
-}
-
-func (x *RejoinMsg) GetToken() string {
-	if x != nil {
-		return x.Token
-	}
-	return ""
-}
-
-// RejoinReply 是 game.rejoin 的应答。
-type RejoinReply struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-
-	Found     bool   `protobuf:"varint,1,opt,name=found,proto3" json:"found,omitempty"`
-	MatchId   string `protobuf:"bytes,2,opt,name=match_id,json=matchId,proto3" json:"match_id,omitempty"`
-	PlayerIdx int32  `protobuf:"varint,3,opt,name=player_idx,json=playerIdx,proto3" json:"player_idx,omitempty"` // 原本的玩家槽位（0/1）
-}
-
-func (x *RejoinReply) Reset() {
-	*x = RejoinReply{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_game_protos_game_proto_msgTypes[23]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
-}
-
-func (x *RejoinReply) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*RejoinReply) ProtoMessage() {}
-
-func (x *RejoinReply) ProtoReflect() protoreflect.Message {
-	mi := &file_game_protos_game_proto_msgTypes[23]
-	if protoimpl.UnsafeEnabled && x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use RejoinReply.ProtoReflect.Descriptor instead.
-func (*RejoinReply) Descriptor() ([]byte, []int) {
-	return file_game_protos_game_proto_rawDescGZIP(), []int{23}
-}
-
-func (x *RejoinReply) GetFound() bool {
-	if x != nil {
-		return x.Found
-	}
-	return false
-}
-
-func (x *RejoinReply) GetMatchId() string {
-	if x != nil {
-		return x.MatchId
-	}
-	return ""
-}
-
-func (x *RejoinReply) GetPlayerIdx() int32 {
-	if x != nil {
-		return x.PlayerIdx
-	}
-	return 0
-}
-
-// LeaveMsg 是 match → game 的 RPC（route "game.game.leave"）：请托管该实例的 game
-// 节点把这个玩家从对局里释放出来（见 AbandonMatchMsg 的语义）。uid 是会话 UID。
-type LeaveMsg struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-
-	Uid string `protobuf:"bytes,1,opt,name=uid,proto3" json:"uid,omitempty"`
-}
-
-func (x *LeaveMsg) Reset() {
-	*x = LeaveMsg{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_game_protos_game_proto_msgTypes[24]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
-}
-
-func (x *LeaveMsg) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*LeaveMsg) ProtoMessage() {}
-
-func (x *LeaveMsg) ProtoReflect() protoreflect.Message {
-	mi := &file_game_protos_game_proto_msgTypes[24]
-	if protoimpl.UnsafeEnabled && x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use LeaveMsg.ProtoReflect.Descriptor instead.
-func (*LeaveMsg) Descriptor() ([]byte, []int) {
-	return file_game_protos_game_proto_rawDescGZIP(), []int{24}
-}
-
-func (x *LeaveMsg) GetUid() string {
-	if x != nil {
-		return x.Uid
-	}
-	return ""
-}
-
-// LeaveReply 是 game.leave 的应答。ok=false 表示这个 game 节点上没有该 uid 的实例
-// （已经离场、或本来就不在这个节点上）。
-type LeaveReply struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-
-	Ok bool `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
-}
-
-func (x *LeaveReply) Reset() {
-	*x = LeaveReply{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_game_protos_game_proto_msgTypes[25]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
-}
-
-func (x *LeaveReply) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*LeaveReply) ProtoMessage() {}
-
-func (x *LeaveReply) ProtoReflect() protoreflect.Message {
-	mi := &file_game_protos_game_proto_msgTypes[25]
-	if protoimpl.UnsafeEnabled && x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use LeaveReply.ProtoReflect.Descriptor instead.
-func (*LeaveReply) Descriptor() ([]byte, []int) {
-	return file_game_protos_game_proto_rawDescGZIP(), []int{25}
-}
-
-func (x *LeaveReply) GetOk() bool {
-	if x != nil {
-		return x.Ok
-	}
-	return false
-}
-
 // SchemaField 是一个同步属性的声明。
 type SchemaField struct {
 	state         protoimpl.MessageState
@@ -1527,7 +63,7 @@ type SchemaField struct {
 func (x *SchemaField) Reset() {
 	*x = SchemaField{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_game_protos_game_proto_msgTypes[26]
+		mi := &file_game_protos_game_proto_msgTypes[0]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -1540,7 +76,7 @@ func (x *SchemaField) String() string {
 func (*SchemaField) ProtoMessage() {}
 
 func (x *SchemaField) ProtoReflect() protoreflect.Message {
-	mi := &file_game_protos_game_proto_msgTypes[26]
+	mi := &file_game_protos_game_proto_msgTypes[0]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1553,7 +89,7 @@ func (x *SchemaField) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SchemaField.ProtoReflect.Descriptor instead.
 func (*SchemaField) Descriptor() ([]byte, []int) {
-	return file_game_protos_game_proto_rawDescGZIP(), []int{26}
+	return file_game_protos_game_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *SchemaField) GetId() uint32 {
@@ -1590,7 +126,7 @@ type Schema struct {
 func (x *Schema) Reset() {
 	*x = Schema{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_game_protos_game_proto_msgTypes[27]
+		mi := &file_game_protos_game_proto_msgTypes[1]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -1603,7 +139,7 @@ func (x *Schema) String() string {
 func (*Schema) ProtoMessage() {}
 
 func (x *Schema) ProtoReflect() protoreflect.Message {
-	mi := &file_game_protos_game_proto_msgTypes[27]
+	mi := &file_game_protos_game_proto_msgTypes[1]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1616,7 +152,7 @@ func (x *Schema) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Schema.ProtoReflect.Descriptor instead.
 func (*Schema) Descriptor() ([]byte, []int) {
-	return file_game_protos_game_proto_rawDescGZIP(), []int{27}
+	return file_game_protos_game_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *Schema) GetFields() []*SchemaField {
@@ -1649,7 +185,7 @@ type AttrValue struct {
 func (x *AttrValue) Reset() {
 	*x = AttrValue{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_game_protos_game_proto_msgTypes[28]
+		mi := &file_game_protos_game_proto_msgTypes[2]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -1662,7 +198,7 @@ func (x *AttrValue) String() string {
 func (*AttrValue) ProtoMessage() {}
 
 func (x *AttrValue) ProtoReflect() protoreflect.Message {
-	mi := &file_game_protos_game_proto_msgTypes[28]
+	mi := &file_game_protos_game_proto_msgTypes[2]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1675,7 +211,7 @@ func (x *AttrValue) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AttrValue.ProtoReflect.Descriptor instead.
 func (*AttrValue) Descriptor() ([]byte, []int) {
-	return file_game_protos_game_proto_rawDescGZIP(), []int{28}
+	return file_game_protos_game_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *AttrValue) GetId() uint32 {
@@ -1728,7 +264,7 @@ type EntityDelta struct {
 func (x *EntityDelta) Reset() {
 	*x = EntityDelta{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_game_protos_game_proto_msgTypes[29]
+		mi := &file_game_protos_game_proto_msgTypes[3]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -1741,7 +277,7 @@ func (x *EntityDelta) String() string {
 func (*EntityDelta) ProtoMessage() {}
 
 func (x *EntityDelta) ProtoReflect() protoreflect.Message {
-	mi := &file_game_protos_game_proto_msgTypes[29]
+	mi := &file_game_protos_game_proto_msgTypes[3]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1754,7 +290,7 @@ func (x *EntityDelta) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EntityDelta.ProtoReflect.Descriptor instead.
 func (*EntityDelta) Descriptor() ([]byte, []int) {
-	return file_game_protos_game_proto_rawDescGZIP(), []int{29}
+	return file_game_protos_game_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *EntityDelta) GetId() uint32 {
@@ -1801,7 +337,7 @@ type Frame struct {
 func (x *Frame) Reset() {
 	*x = Frame{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_game_protos_game_proto_msgTypes[30]
+		mi := &file_game_protos_game_proto_msgTypes[4]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -1814,7 +350,7 @@ func (x *Frame) String() string {
 func (*Frame) ProtoMessage() {}
 
 func (x *Frame) ProtoReflect() protoreflect.Message {
-	mi := &file_game_protos_game_proto_msgTypes[30]
+	mi := &file_game_protos_game_proto_msgTypes[4]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1827,7 +363,7 @@ func (x *Frame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Frame.ProtoReflect.Descriptor instead.
 func (*Frame) Descriptor() ([]byte, []int) {
-	return file_game_protos_game_proto_rawDescGZIP(), []int{30}
+	return file_game_protos_game_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *Frame) GetStep() int32 {
@@ -1877,7 +413,7 @@ type SlotResult struct {
 func (x *SlotResult) Reset() {
 	*x = SlotResult{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_game_protos_game_proto_msgTypes[31]
+		mi := &file_game_protos_game_proto_msgTypes[5]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -1890,7 +426,7 @@ func (x *SlotResult) String() string {
 func (*SlotResult) ProtoMessage() {}
 
 func (x *SlotResult) ProtoReflect() protoreflect.Message {
-	mi := &file_game_protos_game_proto_msgTypes[31]
+	mi := &file_game_protos_game_proto_msgTypes[5]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1903,7 +439,7 @@ func (x *SlotResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SlotResult.ProtoReflect.Descriptor instead.
 func (*SlotResult) Descriptor() ([]byte, []int) {
-	return file_game_protos_game_proto_rawDescGZIP(), []int{31}
+	return file_game_protos_game_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *SlotResult) GetUid() string {
@@ -1934,6 +470,517 @@ func (x *SlotResult) GetLeft() bool {
 	return false
 }
 
+// onMatchEnded 推送载荷：一局结束的权威信号。
+type MatchEnded struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	MatchId         string        `protobuf:"bytes,1,opt,name=match_id,json=matchId,proto3" json:"match_id,omitempty"`
+	WinnerSlot      int32         `protobuf:"varint,2,opt,name=winner_slot,json=winnerSlot,proto3" json:"winner_slot,omitempty"`
+	Slots           []*SlotResult `protobuf:"bytes,3,rep,name=slots,proto3" json:"slots,omitempty"`
+	DurationSeconds int32         `protobuf:"varint,4,opt,name=duration_seconds,json=durationSeconds,proto3" json:"duration_seconds,omitempty"`
+}
+
+func (x *MatchEnded) Reset() {
+	*x = MatchEnded{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_game_protos_game_proto_msgTypes[6]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *MatchEnded) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MatchEnded) ProtoMessage() {}
+
+func (x *MatchEnded) ProtoReflect() protoreflect.Message {
+	mi := &file_game_protos_game_proto_msgTypes[6]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MatchEnded.ProtoReflect.Descriptor instead.
+func (*MatchEnded) Descriptor() ([]byte, []int) {
+	return file_game_protos_game_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *MatchEnded) GetMatchId() string {
+	if x != nil {
+		return x.MatchId
+	}
+	return ""
+}
+
+func (x *MatchEnded) GetWinnerSlot() int32 {
+	if x != nil {
+		return x.WinnerSlot
+	}
+	return 0
+}
+
+func (x *MatchEnded) GetSlots() []*SlotResult {
+	if x != nil {
+		return x.Slots
+	}
+	return nil
+}
+
+func (x *MatchEnded) GetDurationSeconds() int32 {
+	if x != nil {
+		return x.DurationSeconds
+	}
+	return 0
+}
+
+// BindGameMsg 是 match → gate 的 RPC 请求（route "gate.gate.bindgame"）：请玩家
+// 所属的 gate 把对局归属写进它自己的会话数据（gate 据 gameServerId 定点路由
+// game.*）。game_server_id 为空表示回滚（清掉归属）。
+type BindGameMsg struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	Uid          string `protobuf:"bytes,1,opt,name=uid,proto3" json:"uid,omitempty"`
+	GameServerId string `protobuf:"bytes,2,opt,name=game_server_id,json=gameServerId,proto3" json:"game_server_id,omitempty"`
+	MatchId      string `protobuf:"bytes,3,opt,name=match_id,json=matchId,proto3" json:"match_id,omitempty"`
+	PlayerIdx    int32  `protobuf:"varint,4,opt,name=player_idx,json=playerIdx,proto3" json:"player_idx,omitempty"`
+}
+
+func (x *BindGameMsg) Reset() {
+	*x = BindGameMsg{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_game_protos_game_proto_msgTypes[7]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *BindGameMsg) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BindGameMsg) ProtoMessage() {}
+
+func (x *BindGameMsg) ProtoReflect() protoreflect.Message {
+	mi := &file_game_protos_game_proto_msgTypes[7]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BindGameMsg.ProtoReflect.Descriptor instead.
+func (*BindGameMsg) Descriptor() ([]byte, []int) {
+	return file_game_protos_game_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *BindGameMsg) GetUid() string {
+	if x != nil {
+		return x.Uid
+	}
+	return ""
+}
+
+func (x *BindGameMsg) GetGameServerId() string {
+	if x != nil {
+		return x.GameServerId
+	}
+	return ""
+}
+
+func (x *BindGameMsg) GetMatchId() string {
+	if x != nil {
+		return x.MatchId
+	}
+	return ""
+}
+
+func (x *BindGameMsg) GetPlayerIdx() int32 {
+	if x != nil {
+		return x.PlayerIdx
+	}
+	return 0
+}
+
+// BindGameReply 是 gate.gate.bindgame 的应答。found=false 表示该 gate 上没有
+// 这个会话（玩家已掉线）。
+type BindGameReply struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	Found bool `protobuf:"varint,1,opt,name=found,proto3" json:"found,omitempty"`
+}
+
+func (x *BindGameReply) Reset() {
+	*x = BindGameReply{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_game_protos_game_proto_msgTypes[8]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *BindGameReply) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BindGameReply) ProtoMessage() {}
+
+func (x *BindGameReply) ProtoReflect() protoreflect.Message {
+	mi := &file_game_protos_game_proto_msgTypes[8]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BindGameReply.ProtoReflect.Descriptor instead.
+func (*BindGameReply) Descriptor() ([]byte, []int) {
+	return file_game_protos_game_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *BindGameReply) GetFound() bool {
+	if x != nil {
+		return x.Found
+	}
+	return false
+}
+
+// CreateGameMsg 是 match → game 创建对局的 RPC 请求（route "game.create"）。
+// uids 按槽位顺序（下标即 player_idx），1 个 = 单人兜底局。
+type CreateGameMsg struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	MatchId string   `protobuf:"bytes,1,opt,name=match_id,json=matchId,proto3" json:"match_id,omitempty"`
+	Uids    []string `protobuf:"bytes,2,rep,name=uids,proto3" json:"uids,omitempty"`
+}
+
+func (x *CreateGameMsg) Reset() {
+	*x = CreateGameMsg{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_game_protos_game_proto_msgTypes[9]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *CreateGameMsg) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CreateGameMsg) ProtoMessage() {}
+
+func (x *CreateGameMsg) ProtoReflect() protoreflect.Message {
+	mi := &file_game_protos_game_proto_msgTypes[9]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CreateGameMsg.ProtoReflect.Descriptor instead.
+func (*CreateGameMsg) Descriptor() ([]byte, []int) {
+	return file_game_protos_game_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *CreateGameMsg) GetMatchId() string {
+	if x != nil {
+		return x.MatchId
+	}
+	return ""
+}
+
+func (x *CreateGameMsg) GetUids() []string {
+	if x != nil {
+		return x.Uids
+	}
+	return nil
+}
+
+// CreateGameReply 是 game.create 的 RPC 应答（0 = 成功）。
+type CreateGameReply struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	Code int32 `protobuf:"varint,1,opt,name=code,proto3" json:"code,omitempty"`
+}
+
+func (x *CreateGameReply) Reset() {
+	*x = CreateGameReply{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_game_protos_game_proto_msgTypes[10]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *CreateGameReply) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CreateGameReply) ProtoMessage() {}
+
+func (x *CreateGameReply) ProtoReflect() protoreflect.Message {
+	mi := &file_game_protos_game_proto_msgTypes[10]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CreateGameReply.ProtoReflect.Descriptor instead.
+func (*CreateGameReply) Descriptor() ([]byte, []int) {
+	return file_game_protos_game_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *CreateGameReply) GetCode() int32 {
+	if x != nil {
+		return x.Code
+	}
+	return 0
+}
+
+// RejoinMsg 是 match → game 的回局查询（route "game.rejoin"）：问这个 game 节点
+// 是否托管着该 token 的存量实例。
+type RejoinMsg struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	Token string `protobuf:"bytes,1,opt,name=token,proto3" json:"token,omitempty"`
+}
+
+func (x *RejoinMsg) Reset() {
+	*x = RejoinMsg{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_game_protos_game_proto_msgTypes[11]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *RejoinMsg) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RejoinMsg) ProtoMessage() {}
+
+func (x *RejoinMsg) ProtoReflect() protoreflect.Message {
+	mi := &file_game_protos_game_proto_msgTypes[11]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RejoinMsg.ProtoReflect.Descriptor instead.
+func (*RejoinMsg) Descriptor() ([]byte, []int) {
+	return file_game_protos_game_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *RejoinMsg) GetToken() string {
+	if x != nil {
+		return x.Token
+	}
+	return ""
+}
+
+// RejoinReply 是 game.rejoin 的应答。
+type RejoinReply struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	Found     bool   `protobuf:"varint,1,opt,name=found,proto3" json:"found,omitempty"`
+	MatchId   string `protobuf:"bytes,2,opt,name=match_id,json=matchId,proto3" json:"match_id,omitempty"`
+	PlayerIdx int32  `protobuf:"varint,3,opt,name=player_idx,json=playerIdx,proto3" json:"player_idx,omitempty"` // 原本的玩家槽位（0/1）
+}
+
+func (x *RejoinReply) Reset() {
+	*x = RejoinReply{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_game_protos_game_proto_msgTypes[12]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *RejoinReply) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RejoinReply) ProtoMessage() {}
+
+func (x *RejoinReply) ProtoReflect() protoreflect.Message {
+	mi := &file_game_protos_game_proto_msgTypes[12]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RejoinReply.ProtoReflect.Descriptor instead.
+func (*RejoinReply) Descriptor() ([]byte, []int) {
+	return file_game_protos_game_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *RejoinReply) GetFound() bool {
+	if x != nil {
+		return x.Found
+	}
+	return false
+}
+
+func (x *RejoinReply) GetMatchId() string {
+	if x != nil {
+		return x.MatchId
+	}
+	return ""
+}
+
+func (x *RejoinReply) GetPlayerIdx() int32 {
+	if x != nil {
+		return x.PlayerIdx
+	}
+	return 0
+}
+
+// LeaveMsg 是 match → game 的 RPC（route "game.game.leave"）：请托管该实例的 game
+// 节点把这个玩家从对局里释放出来（见 AbandonMatchMsg 的语义）。uid 是会话 UID。
+type LeaveMsg struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	Uid string `protobuf:"bytes,1,opt,name=uid,proto3" json:"uid,omitempty"`
+}
+
+func (x *LeaveMsg) Reset() {
+	*x = LeaveMsg{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_game_protos_game_proto_msgTypes[13]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *LeaveMsg) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LeaveMsg) ProtoMessage() {}
+
+func (x *LeaveMsg) ProtoReflect() protoreflect.Message {
+	mi := &file_game_protos_game_proto_msgTypes[13]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LeaveMsg.ProtoReflect.Descriptor instead.
+func (*LeaveMsg) Descriptor() ([]byte, []int) {
+	return file_game_protos_game_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *LeaveMsg) GetUid() string {
+	if x != nil {
+		return x.Uid
+	}
+	return ""
+}
+
+// LeaveReply 是 game.leave 的应答。ok=false 表示这个 game 节点上没有该 uid 的实例
+// （已经离场、或本来就不在这个节点上）。
+type LeaveReply struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	Ok bool `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
+}
+
+func (x *LeaveReply) Reset() {
+	*x = LeaveReply{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_game_protos_game_proto_msgTypes[14]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *LeaveReply) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LeaveReply) ProtoMessage() {}
+
+func (x *LeaveReply) ProtoReflect() protoreflect.Message {
+	mi := &file_game_protos_game_proto_msgTypes[14]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LeaveReply.ProtoReflect.Descriptor instead.
+func (*LeaveReply) Descriptor() ([]byte, []int) {
+	return file_game_protos_game_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *LeaveReply) GetOk() bool {
+	if x != nil {
+		return x.Ok
+	}
+	return false
+}
+
 // game → logic：一局分出胜负时的结算上报（remote route logic.logic.recordmatch）。
 type RecordMatchMsg struct {
 	state         protoimpl.MessageState
@@ -1949,7 +996,7 @@ type RecordMatchMsg struct {
 func (x *RecordMatchMsg) Reset() {
 	*x = RecordMatchMsg{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_game_protos_game_proto_msgTypes[32]
+		mi := &file_game_protos_game_proto_msgTypes[15]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -1962,7 +1009,7 @@ func (x *RecordMatchMsg) String() string {
 func (*RecordMatchMsg) ProtoMessage() {}
 
 func (x *RecordMatchMsg) ProtoReflect() protoreflect.Message {
-	mi := &file_game_protos_game_proto_msgTypes[32]
+	mi := &file_game_protos_game_proto_msgTypes[15]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1975,7 +1022,7 @@ func (x *RecordMatchMsg) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RecordMatchMsg.ProtoReflect.Descriptor instead.
 func (*RecordMatchMsg) Descriptor() ([]byte, []int) {
-	return file_game_protos_game_proto_rawDescGZIP(), []int{32}
+	return file_game_protos_game_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *RecordMatchMsg) GetMatchId() string {
@@ -2019,7 +1066,7 @@ type RecordMatchReply struct {
 func (x *RecordMatchReply) Reset() {
 	*x = RecordMatchReply{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_game_protos_game_proto_msgTypes[33]
+		mi := &file_game_protos_game_proto_msgTypes[16]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -2032,7 +1079,7 @@ func (x *RecordMatchReply) String() string {
 func (*RecordMatchReply) ProtoMessage() {}
 
 func (x *RecordMatchReply) ProtoReflect() protoreflect.Message {
-	mi := &file_game_protos_game_proto_msgTypes[33]
+	mi := &file_game_protos_game_proto_msgTypes[16]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2045,7 +1092,7 @@ func (x *RecordMatchReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RecordMatchReply.ProtoReflect.Descriptor instead.
 func (*RecordMatchReply) Descriptor() ([]byte, []int) {
-	return file_game_protos_game_proto_rawDescGZIP(), []int{33}
+	return file_game_protos_game_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *RecordMatchReply) GetOk() bool {
@@ -2069,39 +1116,31 @@ func (x *RecordMatchReply) GetReason() string {
 	return ""
 }
 
-// 历史里的单场战绩（下发结构，与持久化结构分开）。
-type MatchRecord struct {
+type UserOnlineMsg struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	MatchId         string `protobuf:"bytes,1,opt,name=match_id,json=matchId,proto3" json:"match_id,omitempty"`
-	Won             bool   `protobuf:"varint,2,opt,name=won,proto3" json:"won,omitempty"`
-	Kills           int32  `protobuf:"varint,3,opt,name=kills,proto3" json:"kills,omitempty"`
-	Deaths          int32  `protobuf:"varint,4,opt,name=deaths,proto3" json:"deaths,omitempty"`
-	OpponentKills   int32  `protobuf:"varint,5,opt,name=opponent_kills,json=opponentKills,proto3" json:"opponent_kills,omitempty"`
-	DurationSeconds int32  `protobuf:"varint,6,opt,name=duration_seconds,json=durationSeconds,proto3" json:"duration_seconds,omitempty"`
-	OpponentName    string `protobuf:"bytes,7,opt,name=opponent_name,json=opponentName,proto3" json:"opponent_name,omitempty"`
-	EndedAt         int64  `protobuf:"varint,8,opt,name=ended_at,json=endedAt,proto3" json:"ended_at,omitempty"`
+	AccountId string `protobuf:"bytes,1,opt,name=account_id,json=accountId,proto3" json:"account_id,omitempty"`
 }
 
-func (x *MatchRecord) Reset() {
-	*x = MatchRecord{}
+func (x *UserOnlineMsg) Reset() {
+	*x = UserOnlineMsg{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_game_protos_game_proto_msgTypes[34]
+		mi := &file_game_protos_game_proto_msgTypes[17]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
 }
 
-func (x *MatchRecord) String() string {
+func (x *UserOnlineMsg) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*MatchRecord) ProtoMessage() {}
+func (*UserOnlineMsg) ProtoMessage() {}
 
-func (x *MatchRecord) ProtoReflect() protoreflect.Message {
-	mi := &file_game_protos_game_proto_msgTypes[34]
+func (x *UserOnlineMsg) ProtoReflect() protoreflect.Message {
+	mi := &file_game_protos_game_proto_msgTypes[17]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2112,304 +1151,44 @@ func (x *MatchRecord) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use MatchRecord.ProtoReflect.Descriptor instead.
-func (*MatchRecord) Descriptor() ([]byte, []int) {
-	return file_game_protos_game_proto_rawDescGZIP(), []int{34}
+// Deprecated: Use UserOnlineMsg.ProtoReflect.Descriptor instead.
+func (*UserOnlineMsg) Descriptor() ([]byte, []int) {
+	return file_game_protos_game_proto_rawDescGZIP(), []int{17}
 }
 
-func (x *MatchRecord) GetMatchId() string {
+func (x *UserOnlineMsg) GetAccountId() string {
 	if x != nil {
-		return x.MatchId
+		return x.AccountId
 	}
 	return ""
 }
 
-func (x *MatchRecord) GetWon() bool {
-	if x != nil {
-		return x.Won
-	}
-	return false
-}
-
-func (x *MatchRecord) GetKills() int32 {
-	if x != nil {
-		return x.Kills
-	}
-	return 0
-}
-
-func (x *MatchRecord) GetDeaths() int32 {
-	if x != nil {
-		return x.Deaths
-	}
-	return 0
-}
-
-func (x *MatchRecord) GetOpponentKills() int32 {
-	if x != nil {
-		return x.OpponentKills
-	}
-	return 0
-}
-
-func (x *MatchRecord) GetDurationSeconds() int32 {
-	if x != nil {
-		return x.DurationSeconds
-	}
-	return 0
-}
-
-func (x *MatchRecord) GetOpponentName() string {
-	if x != nil {
-		return x.OpponentName
-	}
-	return ""
-}
-
-func (x *MatchRecord) GetEndedAt() int64 {
-	if x != nil {
-		return x.EndedAt
-	}
-	return 0
-}
-
-type PlayerProfileMsg struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-}
-
-func (x *PlayerProfileMsg) Reset() {
-	*x = PlayerProfileMsg{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_game_protos_game_proto_msgTypes[35]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
-}
-
-func (x *PlayerProfileMsg) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*PlayerProfileMsg) ProtoMessage() {}
-
-func (x *PlayerProfileMsg) ProtoReflect() protoreflect.Message {
-	mi := &file_game_protos_game_proto_msgTypes[35]
-	if protoimpl.UnsafeEnabled && x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use PlayerProfileMsg.ProtoReflect.Descriptor instead.
-func (*PlayerProfileMsg) Descriptor() ([]byte, []int) {
-	return file_game_protos_game_proto_rawDescGZIP(), []int{35}
-}
-
-type PlayerProfileReply struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-
-	Ok             bool           `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
-	Reason         string         `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`
-	Level          int32          `protobuf:"varint,3,opt,name=level,proto3" json:"level,omitempty"`
-	Xp             int64          `protobuf:"varint,4,opt,name=xp,proto3" json:"xp,omitempty"`
-	XpIntoLevel    int64          `protobuf:"varint,5,opt,name=xp_into_level,json=xpIntoLevel,proto3" json:"xp_into_level,omitempty"`
-	XpForNextLevel int64          `protobuf:"varint,6,opt,name=xp_for_next_level,json=xpForNextLevel,proto3" json:"xp_for_next_level,omitempty"`
-	Kills          int32          `protobuf:"varint,7,opt,name=kills,proto3" json:"kills,omitempty"`
-	Deaths         int32          `protobuf:"varint,8,opt,name=deaths,proto3" json:"deaths,omitempty"`
-	Matches        int32          `protobuf:"varint,9,opt,name=matches,proto3" json:"matches,omitempty"`
-	Wins           int32          `protobuf:"varint,10,opt,name=wins,proto3" json:"wins,omitempty"`
-	Losses         int32          `protobuf:"varint,11,opt,name=losses,proto3" json:"losses,omitempty"`
-	RecentMatches  []*MatchRecord `protobuf:"bytes,12,rep,name=recent_matches,json=recentMatches,proto3" json:"recent_matches,omitempty"`
-}
-
-func (x *PlayerProfileReply) Reset() {
-	*x = PlayerProfileReply{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_game_protos_game_proto_msgTypes[36]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
-}
-
-func (x *PlayerProfileReply) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*PlayerProfileReply) ProtoMessage() {}
-
-func (x *PlayerProfileReply) ProtoReflect() protoreflect.Message {
-	mi := &file_game_protos_game_proto_msgTypes[36]
-	if protoimpl.UnsafeEnabled && x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use PlayerProfileReply.ProtoReflect.Descriptor instead.
-func (*PlayerProfileReply) Descriptor() ([]byte, []int) {
-	return file_game_protos_game_proto_rawDescGZIP(), []int{36}
-}
-
-func (x *PlayerProfileReply) GetOk() bool {
-	if x != nil {
-		return x.Ok
-	}
-	return false
-}
-
-func (x *PlayerProfileReply) GetReason() string {
-	if x != nil {
-		return x.Reason
-	}
-	return ""
-}
-
-func (x *PlayerProfileReply) GetLevel() int32 {
-	if x != nil {
-		return x.Level
-	}
-	return 0
-}
-
-func (x *PlayerProfileReply) GetXp() int64 {
-	if x != nil {
-		return x.Xp
-	}
-	return 0
-}
-
-func (x *PlayerProfileReply) GetXpIntoLevel() int64 {
-	if x != nil {
-		return x.XpIntoLevel
-	}
-	return 0
-}
-
-func (x *PlayerProfileReply) GetXpForNextLevel() int64 {
-	if x != nil {
-		return x.XpForNextLevel
-	}
-	return 0
-}
-
-func (x *PlayerProfileReply) GetKills() int32 {
-	if x != nil {
-		return x.Kills
-	}
-	return 0
-}
-
-func (x *PlayerProfileReply) GetDeaths() int32 {
-	if x != nil {
-		return x.Deaths
-	}
-	return 0
-}
-
-func (x *PlayerProfileReply) GetMatches() int32 {
-	if x != nil {
-		return x.Matches
-	}
-	return 0
-}
-
-func (x *PlayerProfileReply) GetWins() int32 {
-	if x != nil {
-		return x.Wins
-	}
-	return 0
-}
-
-func (x *PlayerProfileReply) GetLosses() int32 {
-	if x != nil {
-		return x.Losses
-	}
-	return 0
-}
-
-func (x *PlayerProfileReply) GetRecentMatches() []*MatchRecord {
-	if x != nil {
-		return x.RecentMatches
-	}
-	return nil
-}
-
-type MatchCancelMsg struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-}
-
-func (x *MatchCancelMsg) Reset() {
-	*x = MatchCancelMsg{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_game_protos_game_proto_msgTypes[37]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
-}
-
-func (x *MatchCancelMsg) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*MatchCancelMsg) ProtoMessage() {}
-
-func (x *MatchCancelMsg) ProtoReflect() protoreflect.Message {
-	mi := &file_game_protos_game_proto_msgTypes[37]
-	if protoimpl.UnsafeEnabled && x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use MatchCancelMsg.ProtoReflect.Descriptor instead.
-func (*MatchCancelMsg) Descriptor() ([]byte, []int) {
-	return file_game_protos_game_proto_rawDescGZIP(), []int{37}
-}
-
-type MatchCancelReply struct {
+type UserOnlineReply struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
 	Ok     bool   `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
-	Reason string `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"` // cancelled | already_matched | not_queued | unauthenticated
+	Reason string `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`
 }
 
-func (x *MatchCancelReply) Reset() {
-	*x = MatchCancelReply{}
+func (x *UserOnlineReply) Reset() {
+	*x = UserOnlineReply{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_game_protos_game_proto_msgTypes[38]
+		mi := &file_game_protos_game_proto_msgTypes[18]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
 }
 
-func (x *MatchCancelReply) String() string {
+func (x *UserOnlineReply) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*MatchCancelReply) ProtoMessage() {}
+func (*UserOnlineReply) ProtoMessage() {}
 
-func (x *MatchCancelReply) ProtoReflect() protoreflect.Message {
-	mi := &file_game_protos_game_proto_msgTypes[38]
+func (x *UserOnlineReply) ProtoReflect() protoreflect.Message {
+	mi := &file_game_protos_game_proto_msgTypes[18]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2420,151 +1199,23 @@ func (x *MatchCancelReply) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use MatchCancelReply.ProtoReflect.Descriptor instead.
-func (*MatchCancelReply) Descriptor() ([]byte, []int) {
-	return file_game_protos_game_proto_rawDescGZIP(), []int{38}
+// Deprecated: Use UserOnlineReply.ProtoReflect.Descriptor instead.
+func (*UserOnlineReply) Descriptor() ([]byte, []int) {
+	return file_game_protos_game_proto_rawDescGZIP(), []int{18}
 }
 
-func (x *MatchCancelReply) GetOk() bool {
+func (x *UserOnlineReply) GetOk() bool {
 	if x != nil {
 		return x.Ok
 	}
 	return false
 }
 
-func (x *MatchCancelReply) GetReason() string {
+func (x *UserOnlineReply) GetReason() string {
 	if x != nil {
 		return x.Reason
 	}
 	return ""
-}
-
-// onMatchStatus 推送载荷：匹配期每秒一次。
-type MatchStatus struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-
-	QueuedPlayers int32 `protobuf:"varint,1,opt,name=queued_players,json=queuedPlayers,proto3" json:"queued_players,omitempty"`
-	WaitedSeconds int32 `protobuf:"varint,2,opt,name=waited_seconds,json=waitedSeconds,proto3" json:"waited_seconds,omitempty"`
-}
-
-func (x *MatchStatus) Reset() {
-	*x = MatchStatus{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_game_protos_game_proto_msgTypes[39]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
-}
-
-func (x *MatchStatus) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*MatchStatus) ProtoMessage() {}
-
-func (x *MatchStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_game_protos_game_proto_msgTypes[39]
-	if protoimpl.UnsafeEnabled && x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use MatchStatus.ProtoReflect.Descriptor instead.
-func (*MatchStatus) Descriptor() ([]byte, []int) {
-	return file_game_protos_game_proto_rawDescGZIP(), []int{39}
-}
-
-func (x *MatchStatus) GetQueuedPlayers() int32 {
-	if x != nil {
-		return x.QueuedPlayers
-	}
-	return 0
-}
-
-func (x *MatchStatus) GetWaitedSeconds() int32 {
-	if x != nil {
-		return x.WaitedSeconds
-	}
-	return 0
-}
-
-// onMatchEnded 推送载荷：一局结束的权威信号。
-type MatchEnded struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-
-	MatchId         string        `protobuf:"bytes,1,opt,name=match_id,json=matchId,proto3" json:"match_id,omitempty"`
-	WinnerSlot      int32         `protobuf:"varint,2,opt,name=winner_slot,json=winnerSlot,proto3" json:"winner_slot,omitempty"`
-	Slots           []*SlotResult `protobuf:"bytes,3,rep,name=slots,proto3" json:"slots,omitempty"`
-	DurationSeconds int32         `protobuf:"varint,4,opt,name=duration_seconds,json=durationSeconds,proto3" json:"duration_seconds,omitempty"`
-}
-
-func (x *MatchEnded) Reset() {
-	*x = MatchEnded{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_game_protos_game_proto_msgTypes[40]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
-}
-
-func (x *MatchEnded) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*MatchEnded) ProtoMessage() {}
-
-func (x *MatchEnded) ProtoReflect() protoreflect.Message {
-	mi := &file_game_protos_game_proto_msgTypes[40]
-	if protoimpl.UnsafeEnabled && x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use MatchEnded.ProtoReflect.Descriptor instead.
-func (*MatchEnded) Descriptor() ([]byte, []int) {
-	return file_game_protos_game_proto_rawDescGZIP(), []int{40}
-}
-
-func (x *MatchEnded) GetMatchId() string {
-	if x != nil {
-		return x.MatchId
-	}
-	return ""
-}
-
-func (x *MatchEnded) GetWinnerSlot() int32 {
-	if x != nil {
-		return x.WinnerSlot
-	}
-	return 0
-}
-
-func (x *MatchEnded) GetSlots() []*SlotResult {
-	if x != nil {
-		return x.Slots
-	}
-	return nil
-}
-
-func (x *MatchEnded) GetDurationSeconds() int32 {
-	if x != nil {
-		return x.DurationSeconds
-	}
-	return 0
 }
 
 // AddBotsMsg 是 gm → match 的 RPC（route "match.match.addbots"）：往匹配队列里
@@ -2585,7 +1236,7 @@ type AddBotsMsg struct {
 func (x *AddBotsMsg) Reset() {
 	*x = AddBotsMsg{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_game_protos_game_proto_msgTypes[41]
+		mi := &file_game_protos_game_proto_msgTypes[19]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -2598,7 +1249,7 @@ func (x *AddBotsMsg) String() string {
 func (*AddBotsMsg) ProtoMessage() {}
 
 func (x *AddBotsMsg) ProtoReflect() protoreflect.Message {
-	mi := &file_game_protos_game_proto_msgTypes[41]
+	mi := &file_game_protos_game_proto_msgTypes[19]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2611,7 +1262,7 @@ func (x *AddBotsMsg) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AddBotsMsg.ProtoReflect.Descriptor instead.
 func (*AddBotsMsg) Descriptor() ([]byte, []int) {
-	return file_game_protos_game_proto_rawDescGZIP(), []int{41}
+	return file_game_protos_game_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *AddBotsMsg) GetCount() int32 {
@@ -2643,7 +1294,7 @@ type AddBotsReply struct {
 func (x *AddBotsReply) Reset() {
 	*x = AddBotsReply{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_game_protos_game_proto_msgTypes[42]
+		mi := &file_game_protos_game_proto_msgTypes[20]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -2656,7 +1307,7 @@ func (x *AddBotsReply) String() string {
 func (*AddBotsReply) ProtoMessage() {}
 
 func (x *AddBotsReply) ProtoReflect() protoreflect.Message {
-	mi := &file_game_protos_game_proto_msgTypes[42]
+	mi := &file_game_protos_game_proto_msgTypes[20]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2669,7 +1320,7 @@ func (x *AddBotsReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AddBotsReply.ProtoReflect.Descriptor instead.
 func (*AddBotsReply) Descriptor() ([]byte, []int) {
-	return file_game_protos_game_proto_rawDescGZIP(), []int{42}
+	return file_game_protos_game_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *AddBotsReply) GetOk() bool {
@@ -2708,7 +1359,7 @@ type GrantCoinsMsg struct {
 func (x *GrantCoinsMsg) Reset() {
 	*x = GrantCoinsMsg{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_game_protos_game_proto_msgTypes[43]
+		mi := &file_game_protos_game_proto_msgTypes[21]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -2721,7 +1372,7 @@ func (x *GrantCoinsMsg) String() string {
 func (*GrantCoinsMsg) ProtoMessage() {}
 
 func (x *GrantCoinsMsg) ProtoReflect() protoreflect.Message {
-	mi := &file_game_protos_game_proto_msgTypes[43]
+	mi := &file_game_protos_game_proto_msgTypes[21]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2734,7 +1385,7 @@ func (x *GrantCoinsMsg) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GrantCoinsMsg.ProtoReflect.Descriptor instead.
 func (*GrantCoinsMsg) Descriptor() ([]byte, []int) {
-	return file_game_protos_game_proto_rawDescGZIP(), []int{43}
+	return file_game_protos_game_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *GrantCoinsMsg) GetAccountId() string {
@@ -2773,7 +1424,7 @@ type GrantCoinsReply struct {
 func (x *GrantCoinsReply) Reset() {
 	*x = GrantCoinsReply{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_game_protos_game_proto_msgTypes[44]
+		mi := &file_game_protos_game_proto_msgTypes[22]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -2786,7 +1437,7 @@ func (x *GrantCoinsReply) String() string {
 func (*GrantCoinsReply) ProtoMessage() {}
 
 func (x *GrantCoinsReply) ProtoReflect() protoreflect.Message {
-	mi := &file_game_protos_game_proto_msgTypes[44]
+	mi := &file_game_protos_game_proto_msgTypes[22]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2799,7 +1450,7 @@ func (x *GrantCoinsReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GrantCoinsReply.ProtoReflect.Descriptor instead.
 func (*GrantCoinsReply) Descriptor() ([]byte, []int) {
-	return file_game_protos_game_proto_rawDescGZIP(), []int{44}
+	return file_game_protos_game_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *GrantCoinsReply) GetOk() bool {
@@ -2827,119 +1478,7 @@ var File_game_protos_game_proto protoreflect.FileDescriptor
 
 var file_game_protos_game_proto_rawDesc = []byte{
 	0x0a, 0x16, 0x67, 0x61, 0x6d, 0x65, 0x2f, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x73, 0x2f, 0x67, 0x61,
-	0x6d, 0x65, 0x2e, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x12, 0x04, 0x67, 0x61, 0x6d, 0x65, 0x22, 0x93,
-	0x01, 0x0a, 0x0a, 0x43, 0x6f, 0x6d, 0x6d, 0x61, 0x6e, 0x64, 0x4d, 0x73, 0x67, 0x12, 0x12, 0x0a,
-	0x04, 0x6d, 0x6f, 0x76, 0x65, 0x18, 0x01, 0x20, 0x03, 0x28, 0x02, 0x52, 0x04, 0x6d, 0x6f, 0x76,
-	0x65, 0x12, 0x10, 0x0a, 0x03, 0x79, 0x61, 0x77, 0x18, 0x02, 0x20, 0x01, 0x28, 0x02, 0x52, 0x03,
-	0x79, 0x61, 0x77, 0x12, 0x12, 0x0a, 0x04, 0x6a, 0x75, 0x6d, 0x70, 0x18, 0x03, 0x20, 0x01, 0x28,
-	0x08, 0x52, 0x04, 0x6a, 0x75, 0x6d, 0x70, 0x12, 0x14, 0x0a, 0x05, 0x73, 0x68, 0x6f, 0x6f, 0x74,
-	0x18, 0x04, 0x20, 0x01, 0x28, 0x08, 0x52, 0x05, 0x73, 0x68, 0x6f, 0x6f, 0x74, 0x12, 0x16, 0x0a,
-	0x06, 0x6f, 0x72, 0x69, 0x67, 0x69, 0x6e, 0x18, 0x05, 0x20, 0x03, 0x28, 0x02, 0x52, 0x06, 0x6f,
-	0x72, 0x69, 0x67, 0x69, 0x6e, 0x12, 0x10, 0x0a, 0x03, 0x64, 0x69, 0x72, 0x18, 0x06, 0x20, 0x03,
-	0x28, 0x02, 0x52, 0x03, 0x64, 0x69, 0x72, 0x4a, 0x04, 0x08, 0x07, 0x10, 0x08, 0x52, 0x05, 0x72,
-	0x65, 0x73, 0x65, 0x74, 0x22, 0x09, 0x0a, 0x07, 0x4a, 0x6f, 0x69, 0x6e, 0x4d, 0x73, 0x67, 0x22,
-	0x11, 0x0a, 0x0f, 0x50, 0x65, 0x6e, 0x64, 0x69, 0x6e, 0x67, 0x4d, 0x61, 0x74, 0x63, 0x68, 0x4d,
-	0x73, 0x67, 0x22, 0x44, 0x0a, 0x11, 0x50, 0x65, 0x6e, 0x64, 0x69, 0x6e, 0x67, 0x4d, 0x61, 0x74,
-	0x63, 0x68, 0x52, 0x65, 0x70, 0x6c, 0x79, 0x12, 0x14, 0x0a, 0x05, 0x66, 0x6f, 0x75, 0x6e, 0x64,
-	0x18, 0x01, 0x20, 0x01, 0x28, 0x08, 0x52, 0x05, 0x66, 0x6f, 0x75, 0x6e, 0x64, 0x12, 0x19, 0x0a,
-	0x08, 0x6d, 0x61, 0x74, 0x63, 0x68, 0x5f, 0x69, 0x64, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52,
-	0x07, 0x6d, 0x61, 0x74, 0x63, 0x68, 0x49, 0x64, 0x22, 0x11, 0x0a, 0x0f, 0x41, 0x62, 0x61, 0x6e,
-	0x64, 0x6f, 0x6e, 0x4d, 0x61, 0x74, 0x63, 0x68, 0x4d, 0x73, 0x67, 0x22, 0x3b, 0x0a, 0x11, 0x41,
-	0x62, 0x61, 0x6e, 0x64, 0x6f, 0x6e, 0x4d, 0x61, 0x74, 0x63, 0x68, 0x52, 0x65, 0x70, 0x6c, 0x79,
-	0x12, 0x0e, 0x0a, 0x02, 0x6f, 0x6b, 0x18, 0x01, 0x20, 0x01, 0x28, 0x08, 0x52, 0x02, 0x6f, 0x6b,
-	0x12, 0x16, 0x0a, 0x06, 0x72, 0x65, 0x61, 0x73, 0x6f, 0x6e, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09,
-	0x52, 0x06, 0x72, 0x65, 0x61, 0x73, 0x6f, 0x6e, 0x22, 0x45, 0x0a, 0x0b, 0x52, 0x65, 0x67, 0x69,
-	0x73, 0x74, 0x65, 0x72, 0x4d, 0x73, 0x67, 0x12, 0x1a, 0x0a, 0x08, 0x75, 0x73, 0x65, 0x72, 0x6e,
-	0x61, 0x6d, 0x65, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x08, 0x75, 0x73, 0x65, 0x72, 0x6e,
-	0x61, 0x6d, 0x65, 0x12, 0x1a, 0x0a, 0x08, 0x70, 0x61, 0x73, 0x73, 0x77, 0x6f, 0x72, 0x64, 0x18,
-	0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x08, 0x70, 0x61, 0x73, 0x73, 0x77, 0x6f, 0x72, 0x64, 0x22,
-	0x42, 0x0a, 0x08, 0x4c, 0x6f, 0x67, 0x69, 0x6e, 0x4d, 0x73, 0x67, 0x12, 0x1a, 0x0a, 0x08, 0x75,
-	0x73, 0x65, 0x72, 0x6e, 0x61, 0x6d, 0x65, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x08, 0x75,
-	0x73, 0x65, 0x72, 0x6e, 0x61, 0x6d, 0x65, 0x12, 0x1a, 0x0a, 0x08, 0x70, 0x61, 0x73, 0x73, 0x77,
-	0x6f, 0x72, 0x64, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x08, 0x70, 0x61, 0x73, 0x73, 0x77,
-	0x6f, 0x72, 0x64, 0x22, 0x21, 0x0a, 0x09, 0x52, 0x65, 0x73, 0x75, 0x6d, 0x65, 0x4d, 0x73, 0x67,
-	0x12, 0x14, 0x0a, 0x05, 0x74, 0x6f, 0x6b, 0x65, 0x6e, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52,
-	0x05, 0x74, 0x6f, 0x6b, 0x65, 0x6e, 0x22, 0x85, 0x01, 0x0a, 0x0a, 0x4c, 0x6f, 0x67, 0x69, 0x6e,
-	0x52, 0x65, 0x70, 0x6c, 0x79, 0x12, 0x0e, 0x0a, 0x02, 0x6f, 0x6b, 0x18, 0x01, 0x20, 0x01, 0x28,
-	0x08, 0x52, 0x02, 0x6f, 0x6b, 0x12, 0x14, 0x0a, 0x05, 0x74, 0x6f, 0x6b, 0x65, 0x6e, 0x18, 0x02,
-	0x20, 0x01, 0x28, 0x09, 0x52, 0x05, 0x74, 0x6f, 0x6b, 0x65, 0x6e, 0x12, 0x1a, 0x0a, 0x08, 0x75,
-	0x73, 0x65, 0x72, 0x6e, 0x61, 0x6d, 0x65, 0x18, 0x03, 0x20, 0x01, 0x28, 0x09, 0x52, 0x08, 0x75,
-	0x73, 0x65, 0x72, 0x6e, 0x61, 0x6d, 0x65, 0x12, 0x1d, 0x0a, 0x0a, 0x61, 0x63, 0x63, 0x6f, 0x75,
-	0x6e, 0x74, 0x5f, 0x69, 0x64, 0x18, 0x04, 0x20, 0x01, 0x28, 0x09, 0x52, 0x09, 0x61, 0x63, 0x63,
-	0x6f, 0x75, 0x6e, 0x74, 0x49, 0x64, 0x12, 0x16, 0x0a, 0x06, 0x72, 0x65, 0x61, 0x73, 0x6f, 0x6e,
-	0x18, 0x05, 0x20, 0x01, 0x28, 0x09, 0x52, 0x06, 0x72, 0x65, 0x61, 0x73, 0x6f, 0x6e, 0x22, 0x0f,
-	0x0a, 0x0d, 0x4c, 0x6f, 0x67, 0x69, 0x63, 0x53, 0x74, 0x61, 0x74, 0x65, 0x4d, 0x73, 0x67, 0x22,
-	0x42, 0x0a, 0x0b, 0x50, 0x75, 0x72, 0x63, 0x68, 0x61, 0x73, 0x65, 0x4d, 0x73, 0x67, 0x12, 0x17,
-	0x0a, 0x07, 0x69, 0x74, 0x65, 0x6d, 0x5f, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52,
-	0x06, 0x69, 0x74, 0x65, 0x6d, 0x49, 0x64, 0x12, 0x1a, 0x0a, 0x08, 0x71, 0x75, 0x61, 0x6e, 0x74,
-	0x69, 0x74, 0x79, 0x18, 0x02, 0x20, 0x01, 0x28, 0x05, 0x52, 0x08, 0x71, 0x75, 0x61, 0x6e, 0x74,
-	0x69, 0x74, 0x79, 0x22, 0x23, 0x0a, 0x08, 0x45, 0x71, 0x75, 0x69, 0x70, 0x4d, 0x73, 0x67, 0x12,
-	0x17, 0x0a, 0x07, 0x69, 0x74, 0x65, 0x6d, 0x5f, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09,
-	0x52, 0x06, 0x69, 0x74, 0x65, 0x6d, 0x49, 0x64, 0x22, 0x2e, 0x0a, 0x0d, 0x55, 0x73, 0x65, 0x72,
-	0x4f, 0x6e, 0x6c, 0x69, 0x6e, 0x65, 0x4d, 0x73, 0x67, 0x12, 0x1d, 0x0a, 0x0a, 0x61, 0x63, 0x63,
-	0x6f, 0x75, 0x6e, 0x74, 0x5f, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x09, 0x61,
-	0x63, 0x63, 0x6f, 0x75, 0x6e, 0x74, 0x49, 0x64, 0x22, 0x39, 0x0a, 0x0f, 0x55, 0x73, 0x65, 0x72,
-	0x4f, 0x6e, 0x6c, 0x69, 0x6e, 0x65, 0x52, 0x65, 0x70, 0x6c, 0x79, 0x12, 0x0e, 0x0a, 0x02, 0x6f,
-	0x6b, 0x18, 0x01, 0x20, 0x01, 0x28, 0x08, 0x52, 0x02, 0x6f, 0x6b, 0x12, 0x16, 0x0a, 0x06, 0x72,
-	0x65, 0x61, 0x73, 0x6f, 0x6e, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x06, 0x72, 0x65, 0x61,
-	0x73, 0x6f, 0x6e, 0x22, 0xa7, 0x01, 0x0a, 0x0d, 0x4c, 0x6f, 0x67, 0x69, 0x63, 0x53, 0x68, 0x6f,
-	0x70, 0x49, 0x74, 0x65, 0x6d, 0x12, 0x17, 0x0a, 0x07, 0x69, 0x74, 0x65, 0x6d, 0x5f, 0x69, 0x64,
-	0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x06, 0x69, 0x74, 0x65, 0x6d, 0x49, 0x64, 0x12, 0x21,
-	0x0a, 0x0c, 0x64, 0x69, 0x73, 0x70, 0x6c, 0x61, 0x79, 0x5f, 0x6e, 0x61, 0x6d, 0x65, 0x18, 0x02,
-	0x20, 0x01, 0x28, 0x09, 0x52, 0x0b, 0x64, 0x69, 0x73, 0x70, 0x6c, 0x61, 0x79, 0x4e, 0x61, 0x6d,
-	0x65, 0x12, 0x14, 0x0a, 0x05, 0x70, 0x72, 0x69, 0x63, 0x65, 0x18, 0x03, 0x20, 0x01, 0x28, 0x03,
-	0x52, 0x05, 0x70, 0x72, 0x69, 0x63, 0x65, 0x12, 0x1d, 0x0a, 0x0a, 0x65, 0x71, 0x75, 0x69, 0x70,
-	0x5f, 0x73, 0x6c, 0x6f, 0x74, 0x18, 0x04, 0x20, 0x01, 0x28, 0x09, 0x52, 0x09, 0x65, 0x71, 0x75,
-	0x69, 0x70, 0x53, 0x6c, 0x6f, 0x74, 0x12, 0x25, 0x0a, 0x0e, 0x6f, 0x77, 0x6e, 0x65, 0x64, 0x5f,
-	0x71, 0x75, 0x61, 0x6e, 0x74, 0x69, 0x74, 0x79, 0x18, 0x05, 0x20, 0x01, 0x28, 0x03, 0x52, 0x0d,
-	0x6f, 0x77, 0x6e, 0x65, 0x64, 0x51, 0x75, 0x61, 0x6e, 0x74, 0x69, 0x74, 0x79, 0x22, 0xb2, 0x01,
-	0x0a, 0x0f, 0x4c, 0x6f, 0x67, 0x69, 0x63, 0x53, 0x74, 0x61, 0x74, 0x65, 0x52, 0x65, 0x70, 0x6c,
-	0x79, 0x12, 0x0e, 0x0a, 0x02, 0x6f, 0x6b, 0x18, 0x01, 0x20, 0x01, 0x28, 0x08, 0x52, 0x02, 0x6f,
-	0x6b, 0x12, 0x16, 0x0a, 0x06, 0x72, 0x65, 0x61, 0x73, 0x6f, 0x6e, 0x18, 0x02, 0x20, 0x01, 0x28,
-	0x09, 0x52, 0x06, 0x72, 0x65, 0x61, 0x73, 0x6f, 0x6e, 0x12, 0x14, 0x0a, 0x05, 0x63, 0x6f, 0x69,
-	0x6e, 0x73, 0x18, 0x03, 0x20, 0x01, 0x28, 0x03, 0x52, 0x05, 0x63, 0x6f, 0x69, 0x6e, 0x73, 0x12,
-	0x29, 0x0a, 0x05, 0x69, 0x74, 0x65, 0x6d, 0x73, 0x18, 0x04, 0x20, 0x03, 0x28, 0x0b, 0x32, 0x13,
-	0x2e, 0x67, 0x61, 0x6d, 0x65, 0x2e, 0x4c, 0x6f, 0x67, 0x69, 0x63, 0x53, 0x68, 0x6f, 0x70, 0x49,
-	0x74, 0x65, 0x6d, 0x52, 0x05, 0x69, 0x74, 0x65, 0x6d, 0x73, 0x12, 0x36, 0x0a, 0x17, 0x65, 0x71,
-	0x75, 0x69, 0x70, 0x70, 0x65, 0x64, 0x5f, 0x70, 0x72, 0x69, 0x6d, 0x61, 0x72, 0x79, 0x5f, 0x77,
-	0x65, 0x61, 0x70, 0x6f, 0x6e, 0x18, 0x05, 0x20, 0x01, 0x28, 0x09, 0x52, 0x15, 0x65, 0x71, 0x75,
-	0x69, 0x70, 0x70, 0x65, 0x64, 0x50, 0x72, 0x69, 0x6d, 0x61, 0x72, 0x79, 0x57, 0x65, 0x61, 0x70,
-	0x6f, 0x6e, 0x22, 0x7f, 0x0a, 0x0b, 0x42, 0x69, 0x6e, 0x64, 0x47, 0x61, 0x6d, 0x65, 0x4d, 0x73,
-	0x67, 0x12, 0x10, 0x0a, 0x03, 0x75, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x03,
-	0x75, 0x69, 0x64, 0x12, 0x24, 0x0a, 0x0e, 0x67, 0x61, 0x6d, 0x65, 0x5f, 0x73, 0x65, 0x72, 0x76,
-	0x65, 0x72, 0x5f, 0x69, 0x64, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x0c, 0x67, 0x61, 0x6d,
-	0x65, 0x53, 0x65, 0x72, 0x76, 0x65, 0x72, 0x49, 0x64, 0x12, 0x19, 0x0a, 0x08, 0x6d, 0x61, 0x74,
-	0x63, 0x68, 0x5f, 0x69, 0x64, 0x18, 0x03, 0x20, 0x01, 0x28, 0x09, 0x52, 0x07, 0x6d, 0x61, 0x74,
-	0x63, 0x68, 0x49, 0x64, 0x12, 0x1d, 0x0a, 0x0a, 0x70, 0x6c, 0x61, 0x79, 0x65, 0x72, 0x5f, 0x69,
-	0x64, 0x78, 0x18, 0x04, 0x20, 0x01, 0x28, 0x05, 0x52, 0x09, 0x70, 0x6c, 0x61, 0x79, 0x65, 0x72,
-	0x49, 0x64, 0x78, 0x22, 0x25, 0x0a, 0x0d, 0x42, 0x69, 0x6e, 0x64, 0x47, 0x61, 0x6d, 0x65, 0x52,
-	0x65, 0x70, 0x6c, 0x79, 0x12, 0x14, 0x0a, 0x05, 0x66, 0x6f, 0x75, 0x6e, 0x64, 0x18, 0x01, 0x20,
-	0x01, 0x28, 0x08, 0x52, 0x05, 0x66, 0x6f, 0x75, 0x6e, 0x64, 0x22, 0x6d, 0x0a, 0x0b, 0x4d, 0x61,
-	0x74, 0x63, 0x68, 0x52, 0x65, 0x73, 0x75, 0x6c, 0x74, 0x12, 0x19, 0x0a, 0x08, 0x6d, 0x61, 0x74,
-	0x63, 0x68, 0x5f, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x07, 0x6d, 0x61, 0x74,
-	0x63, 0x68, 0x49, 0x64, 0x12, 0x24, 0x0a, 0x0e, 0x67, 0x61, 0x6d, 0x65, 0x5f, 0x73, 0x65, 0x72,
-	0x76, 0x65, 0x72, 0x5f, 0x69, 0x64, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x0c, 0x67, 0x61,
-	0x6d, 0x65, 0x53, 0x65, 0x72, 0x76, 0x65, 0x72, 0x49, 0x64, 0x12, 0x1d, 0x0a, 0x0a, 0x70, 0x6c,
-	0x61, 0x79, 0x65, 0x72, 0x5f, 0x69, 0x64, 0x78, 0x18, 0x03, 0x20, 0x01, 0x28, 0x05, 0x52, 0x09,
-	0x70, 0x6c, 0x61, 0x79, 0x65, 0x72, 0x49, 0x64, 0x78, 0x22, 0x3e, 0x0a, 0x0d, 0x43, 0x72, 0x65,
-	0x61, 0x74, 0x65, 0x47, 0x61, 0x6d, 0x65, 0x4d, 0x73, 0x67, 0x12, 0x19, 0x0a, 0x08, 0x6d, 0x61,
-	0x74, 0x63, 0x68, 0x5f, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x07, 0x6d, 0x61,
-	0x74, 0x63, 0x68, 0x49, 0x64, 0x12, 0x12, 0x0a, 0x04, 0x75, 0x69, 0x64, 0x73, 0x18, 0x02, 0x20,
-	0x03, 0x28, 0x09, 0x52, 0x04, 0x75, 0x69, 0x64, 0x73, 0x22, 0x25, 0x0a, 0x0f, 0x43, 0x72, 0x65,
-	0x61, 0x74, 0x65, 0x47, 0x61, 0x6d, 0x65, 0x52, 0x65, 0x70, 0x6c, 0x79, 0x12, 0x12, 0x0a, 0x04,
-	0x63, 0x6f, 0x64, 0x65, 0x18, 0x01, 0x20, 0x01, 0x28, 0x05, 0x52, 0x04, 0x63, 0x6f, 0x64, 0x65,
-	0x22, 0x21, 0x0a, 0x09, 0x52, 0x65, 0x6a, 0x6f, 0x69, 0x6e, 0x4d, 0x73, 0x67, 0x12, 0x14, 0x0a,
-	0x05, 0x74, 0x6f, 0x6b, 0x65, 0x6e, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x05, 0x74, 0x6f,
-	0x6b, 0x65, 0x6e, 0x22, 0x5d, 0x0a, 0x0b, 0x52, 0x65, 0x6a, 0x6f, 0x69, 0x6e, 0x52, 0x65, 0x70,
-	0x6c, 0x79, 0x12, 0x14, 0x0a, 0x05, 0x66, 0x6f, 0x75, 0x6e, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28,
-	0x08, 0x52, 0x05, 0x66, 0x6f, 0x75, 0x6e, 0x64, 0x12, 0x19, 0x0a, 0x08, 0x6d, 0x61, 0x74, 0x63,
-	0x68, 0x5f, 0x69, 0x64, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x07, 0x6d, 0x61, 0x74, 0x63,
-	0x68, 0x49, 0x64, 0x12, 0x1d, 0x0a, 0x0a, 0x70, 0x6c, 0x61, 0x79, 0x65, 0x72, 0x5f, 0x69, 0x64,
-	0x78, 0x18, 0x03, 0x20, 0x01, 0x28, 0x05, 0x52, 0x09, 0x70, 0x6c, 0x61, 0x79, 0x65, 0x72, 0x49,
-	0x64, 0x78, 0x22, 0x1c, 0x0a, 0x08, 0x4c, 0x65, 0x61, 0x76, 0x65, 0x4d, 0x73, 0x67, 0x12, 0x10,
-	0x0a, 0x03, 0x75, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x03, 0x75, 0x69, 0x64,
-	0x22, 0x1c, 0x0a, 0x0a, 0x4c, 0x65, 0x61, 0x76, 0x65, 0x52, 0x65, 0x70, 0x6c, 0x79, 0x12, 0x0e,
-	0x0a, 0x02, 0x6f, 0x6b, 0x18, 0x01, 0x20, 0x01, 0x28, 0x08, 0x52, 0x02, 0x6f, 0x6b, 0x22, 0x45,
+	0x6d, 0x65, 0x2e, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x12, 0x04, 0x67, 0x61, 0x6d, 0x65, 0x22, 0x45,
 	0x0a, 0x0b, 0x53, 0x63, 0x68, 0x65, 0x6d, 0x61, 0x46, 0x69, 0x65, 0x6c, 0x64, 0x12, 0x0e, 0x0a,
 	0x02, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28, 0x0d, 0x52, 0x02, 0x69, 0x64, 0x12, 0x12, 0x0a,
 	0x04, 0x6e, 0x61, 0x6d, 0x65, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x04, 0x6e, 0x61, 0x6d,
@@ -2976,105 +1515,90 @@ var file_game_protos_game_proto_rawDesc = []byte{
 	0x02, 0x20, 0x01, 0x28, 0x05, 0x52, 0x05, 0x6b, 0x69, 0x6c, 0x6c, 0x73, 0x12, 0x16, 0x0a, 0x06,
 	0x64, 0x65, 0x61, 0x74, 0x68, 0x73, 0x18, 0x03, 0x20, 0x01, 0x28, 0x05, 0x52, 0x06, 0x64, 0x65,
 	0x61, 0x74, 0x68, 0x73, 0x12, 0x12, 0x0a, 0x04, 0x6c, 0x65, 0x66, 0x74, 0x18, 0x04, 0x20, 0x01,
-	0x28, 0x08, 0x52, 0x04, 0x6c, 0x65, 0x66, 0x74, 0x22, 0x9f, 0x01, 0x0a, 0x0e, 0x52, 0x65, 0x63,
-	0x6f, 0x72, 0x64, 0x4d, 0x61, 0x74, 0x63, 0x68, 0x4d, 0x73, 0x67, 0x12, 0x19, 0x0a, 0x08, 0x6d,
-	0x61, 0x74, 0x63, 0x68, 0x5f, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x07, 0x6d,
-	0x61, 0x74, 0x63, 0x68, 0x49, 0x64, 0x12, 0x26, 0x0a, 0x05, 0x73, 0x6c, 0x6f, 0x74, 0x73, 0x18,
-	0x02, 0x20, 0x03, 0x28, 0x0b, 0x32, 0x10, 0x2e, 0x67, 0x61, 0x6d, 0x65, 0x2e, 0x53, 0x6c, 0x6f,
-	0x74, 0x52, 0x65, 0x73, 0x75, 0x6c, 0x74, 0x52, 0x05, 0x73, 0x6c, 0x6f, 0x74, 0x73, 0x12, 0x1f,
-	0x0a, 0x0b, 0x77, 0x69, 0x6e, 0x6e, 0x65, 0x72, 0x5f, 0x73, 0x6c, 0x6f, 0x74, 0x18, 0x03, 0x20,
-	0x01, 0x28, 0x05, 0x52, 0x0a, 0x77, 0x69, 0x6e, 0x6e, 0x65, 0x72, 0x53, 0x6c, 0x6f, 0x74, 0x12,
-	0x29, 0x0a, 0x10, 0x64, 0x75, 0x72, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x5f, 0x73, 0x65, 0x63, 0x6f,
-	0x6e, 0x64, 0x73, 0x18, 0x04, 0x20, 0x01, 0x28, 0x05, 0x52, 0x0f, 0x64, 0x75, 0x72, 0x61, 0x74,
-	0x69, 0x6f, 0x6e, 0x53, 0x65, 0x63, 0x6f, 0x6e, 0x64, 0x73, 0x22, 0x54, 0x0a, 0x10, 0x52, 0x65,
-	0x63, 0x6f, 0x72, 0x64, 0x4d, 0x61, 0x74, 0x63, 0x68, 0x52, 0x65, 0x70, 0x6c, 0x79, 0x12, 0x0e,
-	0x0a, 0x02, 0x6f, 0x6b, 0x18, 0x01, 0x20, 0x01, 0x28, 0x08, 0x52, 0x02, 0x6f, 0x6b, 0x12, 0x18,
-	0x0a, 0x07, 0x61, 0x70, 0x70, 0x6c, 0x69, 0x65, 0x64, 0x18, 0x02, 0x20, 0x01, 0x28, 0x08, 0x52,
-	0x07, 0x61, 0x70, 0x70, 0x6c, 0x69, 0x65, 0x64, 0x12, 0x16, 0x0a, 0x06, 0x72, 0x65, 0x61, 0x73,
-	0x6f, 0x6e, 0x18, 0x03, 0x20, 0x01, 0x28, 0x09, 0x52, 0x06, 0x72, 0x65, 0x61, 0x73, 0x6f, 0x6e,
-	0x22, 0xfa, 0x01, 0x0a, 0x0b, 0x4d, 0x61, 0x74, 0x63, 0x68, 0x52, 0x65, 0x63, 0x6f, 0x72, 0x64,
-	0x12, 0x19, 0x0a, 0x08, 0x6d, 0x61, 0x74, 0x63, 0x68, 0x5f, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01,
-	0x28, 0x09, 0x52, 0x07, 0x6d, 0x61, 0x74, 0x63, 0x68, 0x49, 0x64, 0x12, 0x10, 0x0a, 0x03, 0x77,
-	0x6f, 0x6e, 0x18, 0x02, 0x20, 0x01, 0x28, 0x08, 0x52, 0x03, 0x77, 0x6f, 0x6e, 0x12, 0x14, 0x0a,
-	0x05, 0x6b, 0x69, 0x6c, 0x6c, 0x73, 0x18, 0x03, 0x20, 0x01, 0x28, 0x05, 0x52, 0x05, 0x6b, 0x69,
-	0x6c, 0x6c, 0x73, 0x12, 0x16, 0x0a, 0x06, 0x64, 0x65, 0x61, 0x74, 0x68, 0x73, 0x18, 0x04, 0x20,
-	0x01, 0x28, 0x05, 0x52, 0x06, 0x64, 0x65, 0x61, 0x74, 0x68, 0x73, 0x12, 0x25, 0x0a, 0x0e, 0x6f,
-	0x70, 0x70, 0x6f, 0x6e, 0x65, 0x6e, 0x74, 0x5f, 0x6b, 0x69, 0x6c, 0x6c, 0x73, 0x18, 0x05, 0x20,
-	0x01, 0x28, 0x05, 0x52, 0x0d, 0x6f, 0x70, 0x70, 0x6f, 0x6e, 0x65, 0x6e, 0x74, 0x4b, 0x69, 0x6c,
-	0x6c, 0x73, 0x12, 0x29, 0x0a, 0x10, 0x64, 0x75, 0x72, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x5f, 0x73,
-	0x65, 0x63, 0x6f, 0x6e, 0x64, 0x73, 0x18, 0x06, 0x20, 0x01, 0x28, 0x05, 0x52, 0x0f, 0x64, 0x75,
-	0x72, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x53, 0x65, 0x63, 0x6f, 0x6e, 0x64, 0x73, 0x12, 0x23, 0x0a,
-	0x0d, 0x6f, 0x70, 0x70, 0x6f, 0x6e, 0x65, 0x6e, 0x74, 0x5f, 0x6e, 0x61, 0x6d, 0x65, 0x18, 0x07,
-	0x20, 0x01, 0x28, 0x09, 0x52, 0x0c, 0x6f, 0x70, 0x70, 0x6f, 0x6e, 0x65, 0x6e, 0x74, 0x4e, 0x61,
-	0x6d, 0x65, 0x12, 0x19, 0x0a, 0x08, 0x65, 0x6e, 0x64, 0x65, 0x64, 0x5f, 0x61, 0x74, 0x18, 0x08,
-	0x20, 0x01, 0x28, 0x03, 0x52, 0x07, 0x65, 0x6e, 0x64, 0x65, 0x64, 0x41, 0x74, 0x22, 0x12, 0x0a,
-	0x10, 0x50, 0x6c, 0x61, 0x79, 0x65, 0x72, 0x50, 0x72, 0x6f, 0x66, 0x69, 0x6c, 0x65, 0x4d, 0x73,
-	0x67, 0x22, 0xdf, 0x02, 0x0a, 0x12, 0x50, 0x6c, 0x61, 0x79, 0x65, 0x72, 0x50, 0x72, 0x6f, 0x66,
-	0x69, 0x6c, 0x65, 0x52, 0x65, 0x70, 0x6c, 0x79, 0x12, 0x0e, 0x0a, 0x02, 0x6f, 0x6b, 0x18, 0x01,
-	0x20, 0x01, 0x28, 0x08, 0x52, 0x02, 0x6f, 0x6b, 0x12, 0x16, 0x0a, 0x06, 0x72, 0x65, 0x61, 0x73,
-	0x6f, 0x6e, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x06, 0x72, 0x65, 0x61, 0x73, 0x6f, 0x6e,
-	0x12, 0x14, 0x0a, 0x05, 0x6c, 0x65, 0x76, 0x65, 0x6c, 0x18, 0x03, 0x20, 0x01, 0x28, 0x05, 0x52,
-	0x05, 0x6c, 0x65, 0x76, 0x65, 0x6c, 0x12, 0x0e, 0x0a, 0x02, 0x78, 0x70, 0x18, 0x04, 0x20, 0x01,
-	0x28, 0x03, 0x52, 0x02, 0x78, 0x70, 0x12, 0x22, 0x0a, 0x0d, 0x78, 0x70, 0x5f, 0x69, 0x6e, 0x74,
-	0x6f, 0x5f, 0x6c, 0x65, 0x76, 0x65, 0x6c, 0x18, 0x05, 0x20, 0x01, 0x28, 0x03, 0x52, 0x0b, 0x78,
-	0x70, 0x49, 0x6e, 0x74, 0x6f, 0x4c, 0x65, 0x76, 0x65, 0x6c, 0x12, 0x29, 0x0a, 0x11, 0x78, 0x70,
-	0x5f, 0x66, 0x6f, 0x72, 0x5f, 0x6e, 0x65, 0x78, 0x74, 0x5f, 0x6c, 0x65, 0x76, 0x65, 0x6c, 0x18,
-	0x06, 0x20, 0x01, 0x28, 0x03, 0x52, 0x0e, 0x78, 0x70, 0x46, 0x6f, 0x72, 0x4e, 0x65, 0x78, 0x74,
-	0x4c, 0x65, 0x76, 0x65, 0x6c, 0x12, 0x14, 0x0a, 0x05, 0x6b, 0x69, 0x6c, 0x6c, 0x73, 0x18, 0x07,
-	0x20, 0x01, 0x28, 0x05, 0x52, 0x05, 0x6b, 0x69, 0x6c, 0x6c, 0x73, 0x12, 0x16, 0x0a, 0x06, 0x64,
-	0x65, 0x61, 0x74, 0x68, 0x73, 0x18, 0x08, 0x20, 0x01, 0x28, 0x05, 0x52, 0x06, 0x64, 0x65, 0x61,
-	0x74, 0x68, 0x73, 0x12, 0x18, 0x0a, 0x07, 0x6d, 0x61, 0x74, 0x63, 0x68, 0x65, 0x73, 0x18, 0x09,
-	0x20, 0x01, 0x28, 0x05, 0x52, 0x07, 0x6d, 0x61, 0x74, 0x63, 0x68, 0x65, 0x73, 0x12, 0x12, 0x0a,
-	0x04, 0x77, 0x69, 0x6e, 0x73, 0x18, 0x0a, 0x20, 0x01, 0x28, 0x05, 0x52, 0x04, 0x77, 0x69, 0x6e,
-	0x73, 0x12, 0x16, 0x0a, 0x06, 0x6c, 0x6f, 0x73, 0x73, 0x65, 0x73, 0x18, 0x0b, 0x20, 0x01, 0x28,
-	0x05, 0x52, 0x06, 0x6c, 0x6f, 0x73, 0x73, 0x65, 0x73, 0x12, 0x38, 0x0a, 0x0e, 0x72, 0x65, 0x63,
-	0x65, 0x6e, 0x74, 0x5f, 0x6d, 0x61, 0x74, 0x63, 0x68, 0x65, 0x73, 0x18, 0x0c, 0x20, 0x03, 0x28,
-	0x0b, 0x32, 0x11, 0x2e, 0x67, 0x61, 0x6d, 0x65, 0x2e, 0x4d, 0x61, 0x74, 0x63, 0x68, 0x52, 0x65,
-	0x63, 0x6f, 0x72, 0x64, 0x52, 0x0d, 0x72, 0x65, 0x63, 0x65, 0x6e, 0x74, 0x4d, 0x61, 0x74, 0x63,
-	0x68, 0x65, 0x73, 0x22, 0x10, 0x0a, 0x0e, 0x4d, 0x61, 0x74, 0x63, 0x68, 0x43, 0x61, 0x6e, 0x63,
-	0x65, 0x6c, 0x4d, 0x73, 0x67, 0x22, 0x3a, 0x0a, 0x10, 0x4d, 0x61, 0x74, 0x63, 0x68, 0x43, 0x61,
-	0x6e, 0x63, 0x65, 0x6c, 0x52, 0x65, 0x70, 0x6c, 0x79, 0x12, 0x0e, 0x0a, 0x02, 0x6f, 0x6b, 0x18,
-	0x01, 0x20, 0x01, 0x28, 0x08, 0x52, 0x02, 0x6f, 0x6b, 0x12, 0x16, 0x0a, 0x06, 0x72, 0x65, 0x61,
-	0x73, 0x6f, 0x6e, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x06, 0x72, 0x65, 0x61, 0x73, 0x6f,
-	0x6e, 0x22, 0x5b, 0x0a, 0x0b, 0x4d, 0x61, 0x74, 0x63, 0x68, 0x53, 0x74, 0x61, 0x74, 0x75, 0x73,
-	0x12, 0x25, 0x0a, 0x0e, 0x71, 0x75, 0x65, 0x75, 0x65, 0x64, 0x5f, 0x70, 0x6c, 0x61, 0x79, 0x65,
-	0x72, 0x73, 0x18, 0x01, 0x20, 0x01, 0x28, 0x05, 0x52, 0x0d, 0x71, 0x75, 0x65, 0x75, 0x65, 0x64,
-	0x50, 0x6c, 0x61, 0x79, 0x65, 0x72, 0x73, 0x12, 0x25, 0x0a, 0x0e, 0x77, 0x61, 0x69, 0x74, 0x65,
-	0x64, 0x5f, 0x73, 0x65, 0x63, 0x6f, 0x6e, 0x64, 0x73, 0x18, 0x02, 0x20, 0x01, 0x28, 0x05, 0x52,
-	0x0d, 0x77, 0x61, 0x69, 0x74, 0x65, 0x64, 0x53, 0x65, 0x63, 0x6f, 0x6e, 0x64, 0x73, 0x22, 0x9b,
-	0x01, 0x0a, 0x0a, 0x4d, 0x61, 0x74, 0x63, 0x68, 0x45, 0x6e, 0x64, 0x65, 0x64, 0x12, 0x19, 0x0a,
-	0x08, 0x6d, 0x61, 0x74, 0x63, 0x68, 0x5f, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52,
-	0x07, 0x6d, 0x61, 0x74, 0x63, 0x68, 0x49, 0x64, 0x12, 0x1f, 0x0a, 0x0b, 0x77, 0x69, 0x6e, 0x6e,
-	0x65, 0x72, 0x5f, 0x73, 0x6c, 0x6f, 0x74, 0x18, 0x02, 0x20, 0x01, 0x28, 0x05, 0x52, 0x0a, 0x77,
-	0x69, 0x6e, 0x6e, 0x65, 0x72, 0x53, 0x6c, 0x6f, 0x74, 0x12, 0x26, 0x0a, 0x05, 0x73, 0x6c, 0x6f,
-	0x74, 0x73, 0x18, 0x03, 0x20, 0x03, 0x28, 0x0b, 0x32, 0x10, 0x2e, 0x67, 0x61, 0x6d, 0x65, 0x2e,
-	0x53, 0x6c, 0x6f, 0x74, 0x52, 0x65, 0x73, 0x75, 0x6c, 0x74, 0x52, 0x05, 0x73, 0x6c, 0x6f, 0x74,
-	0x73, 0x12, 0x29, 0x0a, 0x10, 0x64, 0x75, 0x72, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x5f, 0x73, 0x65,
-	0x63, 0x6f, 0x6e, 0x64, 0x73, 0x18, 0x04, 0x20, 0x01, 0x28, 0x05, 0x52, 0x0f, 0x64, 0x75, 0x72,
-	0x61, 0x74, 0x69, 0x6f, 0x6e, 0x53, 0x65, 0x63, 0x6f, 0x6e, 0x64, 0x73, 0x22, 0x3f, 0x0a, 0x0a,
-	0x41, 0x64, 0x64, 0x42, 0x6f, 0x74, 0x73, 0x4d, 0x73, 0x67, 0x12, 0x14, 0x0a, 0x05, 0x63, 0x6f,
-	0x75, 0x6e, 0x74, 0x18, 0x01, 0x20, 0x01, 0x28, 0x05, 0x52, 0x05, 0x63, 0x6f, 0x75, 0x6e, 0x74,
-	0x12, 0x1b, 0x0a, 0x09, 0x61, 0x64, 0x6d, 0x69, 0x6e, 0x5f, 0x6b, 0x65, 0x79, 0x18, 0x02, 0x20,
-	0x01, 0x28, 0x09, 0x52, 0x08, 0x61, 0x64, 0x6d, 0x69, 0x6e, 0x4b, 0x65, 0x79, 0x22, 0x52, 0x0a,
-	0x0c, 0x41, 0x64, 0x64, 0x42, 0x6f, 0x74, 0x73, 0x52, 0x65, 0x70, 0x6c, 0x79, 0x12, 0x0e, 0x0a,
-	0x02, 0x6f, 0x6b, 0x18, 0x01, 0x20, 0x01, 0x28, 0x08, 0x52, 0x02, 0x6f, 0x6b, 0x12, 0x1a, 0x0a,
-	0x08, 0x65, 0x6e, 0x71, 0x75, 0x65, 0x75, 0x65, 0x64, 0x18, 0x02, 0x20, 0x01, 0x28, 0x05, 0x52,
-	0x08, 0x65, 0x6e, 0x71, 0x75, 0x65, 0x75, 0x65, 0x64, 0x12, 0x16, 0x0a, 0x06, 0x72, 0x65, 0x61,
-	0x73, 0x6f, 0x6e, 0x18, 0x03, 0x20, 0x01, 0x28, 0x09, 0x52, 0x06, 0x72, 0x65, 0x61, 0x73, 0x6f,
-	0x6e, 0x22, 0x61, 0x0a, 0x0d, 0x47, 0x72, 0x61, 0x6e, 0x74, 0x43, 0x6f, 0x69, 0x6e, 0x73, 0x4d,
-	0x73, 0x67, 0x12, 0x1d, 0x0a, 0x0a, 0x61, 0x63, 0x63, 0x6f, 0x75, 0x6e, 0x74, 0x5f, 0x69, 0x64,
-	0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x09, 0x61, 0x63, 0x63, 0x6f, 0x75, 0x6e, 0x74, 0x49,
-	0x64, 0x12, 0x14, 0x0a, 0x05, 0x64, 0x65, 0x6c, 0x74, 0x61, 0x18, 0x02, 0x20, 0x01, 0x28, 0x03,
-	0x52, 0x05, 0x64, 0x65, 0x6c, 0x74, 0x61, 0x12, 0x1b, 0x0a, 0x09, 0x61, 0x64, 0x6d, 0x69, 0x6e,
-	0x5f, 0x6b, 0x65, 0x79, 0x18, 0x03, 0x20, 0x01, 0x28, 0x09, 0x52, 0x08, 0x61, 0x64, 0x6d, 0x69,
-	0x6e, 0x4b, 0x65, 0x79, 0x22, 0x4f, 0x0a, 0x0f, 0x47, 0x72, 0x61, 0x6e, 0x74, 0x43, 0x6f, 0x69,
-	0x6e, 0x73, 0x52, 0x65, 0x70, 0x6c, 0x79, 0x12, 0x0e, 0x0a, 0x02, 0x6f, 0x6b, 0x18, 0x01, 0x20,
-	0x01, 0x28, 0x08, 0x52, 0x02, 0x6f, 0x6b, 0x12, 0x14, 0x0a, 0x05, 0x63, 0x6f, 0x69, 0x6e, 0x73,
-	0x18, 0x02, 0x20, 0x01, 0x28, 0x03, 0x52, 0x05, 0x63, 0x6f, 0x69, 0x6e, 0x73, 0x12, 0x16, 0x0a,
-	0x06, 0x72, 0x65, 0x61, 0x73, 0x6f, 0x6e, 0x18, 0x03, 0x20, 0x01, 0x28, 0x09, 0x52, 0x06, 0x72,
-	0x65, 0x61, 0x73, 0x6f, 0x6e, 0x42, 0x14, 0x5a, 0x12, 0x6a, 0x6f, 0x6c, 0x74, 0x67, 0x6f, 0x2f,
-	0x67, 0x61, 0x6d, 0x65, 0x2f, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x73, 0x62, 0x06, 0x70, 0x72, 0x6f,
-	0x74, 0x6f, 0x33,
+	0x28, 0x08, 0x52, 0x04, 0x6c, 0x65, 0x66, 0x74, 0x22, 0x9b, 0x01, 0x0a, 0x0a, 0x4d, 0x61, 0x74,
+	0x63, 0x68, 0x45, 0x6e, 0x64, 0x65, 0x64, 0x12, 0x19, 0x0a, 0x08, 0x6d, 0x61, 0x74, 0x63, 0x68,
+	0x5f, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x07, 0x6d, 0x61, 0x74, 0x63, 0x68,
+	0x49, 0x64, 0x12, 0x1f, 0x0a, 0x0b, 0x77, 0x69, 0x6e, 0x6e, 0x65, 0x72, 0x5f, 0x73, 0x6c, 0x6f,
+	0x74, 0x18, 0x02, 0x20, 0x01, 0x28, 0x05, 0x52, 0x0a, 0x77, 0x69, 0x6e, 0x6e, 0x65, 0x72, 0x53,
+	0x6c, 0x6f, 0x74, 0x12, 0x26, 0x0a, 0x05, 0x73, 0x6c, 0x6f, 0x74, 0x73, 0x18, 0x03, 0x20, 0x03,
+	0x28, 0x0b, 0x32, 0x10, 0x2e, 0x67, 0x61, 0x6d, 0x65, 0x2e, 0x53, 0x6c, 0x6f, 0x74, 0x52, 0x65,
+	0x73, 0x75, 0x6c, 0x74, 0x52, 0x05, 0x73, 0x6c, 0x6f, 0x74, 0x73, 0x12, 0x29, 0x0a, 0x10, 0x64,
+	0x75, 0x72, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x5f, 0x73, 0x65, 0x63, 0x6f, 0x6e, 0x64, 0x73, 0x18,
+	0x04, 0x20, 0x01, 0x28, 0x05, 0x52, 0x0f, 0x64, 0x75, 0x72, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x53,
+	0x65, 0x63, 0x6f, 0x6e, 0x64, 0x73, 0x22, 0x7f, 0x0a, 0x0b, 0x42, 0x69, 0x6e, 0x64, 0x47, 0x61,
+	0x6d, 0x65, 0x4d, 0x73, 0x67, 0x12, 0x10, 0x0a, 0x03, 0x75, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01,
+	0x28, 0x09, 0x52, 0x03, 0x75, 0x69, 0x64, 0x12, 0x24, 0x0a, 0x0e, 0x67, 0x61, 0x6d, 0x65, 0x5f,
+	0x73, 0x65, 0x72, 0x76, 0x65, 0x72, 0x5f, 0x69, 0x64, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52,
+	0x0c, 0x67, 0x61, 0x6d, 0x65, 0x53, 0x65, 0x72, 0x76, 0x65, 0x72, 0x49, 0x64, 0x12, 0x19, 0x0a,
+	0x08, 0x6d, 0x61, 0x74, 0x63, 0x68, 0x5f, 0x69, 0x64, 0x18, 0x03, 0x20, 0x01, 0x28, 0x09, 0x52,
+	0x07, 0x6d, 0x61, 0x74, 0x63, 0x68, 0x49, 0x64, 0x12, 0x1d, 0x0a, 0x0a, 0x70, 0x6c, 0x61, 0x79,
+	0x65, 0x72, 0x5f, 0x69, 0x64, 0x78, 0x18, 0x04, 0x20, 0x01, 0x28, 0x05, 0x52, 0x09, 0x70, 0x6c,
+	0x61, 0x79, 0x65, 0x72, 0x49, 0x64, 0x78, 0x22, 0x25, 0x0a, 0x0d, 0x42, 0x69, 0x6e, 0x64, 0x47,
+	0x61, 0x6d, 0x65, 0x52, 0x65, 0x70, 0x6c, 0x79, 0x12, 0x14, 0x0a, 0x05, 0x66, 0x6f, 0x75, 0x6e,
+	0x64, 0x18, 0x01, 0x20, 0x01, 0x28, 0x08, 0x52, 0x05, 0x66, 0x6f, 0x75, 0x6e, 0x64, 0x22, 0x3e,
+	0x0a, 0x0d, 0x43, 0x72, 0x65, 0x61, 0x74, 0x65, 0x47, 0x61, 0x6d, 0x65, 0x4d, 0x73, 0x67, 0x12,
+	0x19, 0x0a, 0x08, 0x6d, 0x61, 0x74, 0x63, 0x68, 0x5f, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28,
+	0x09, 0x52, 0x07, 0x6d, 0x61, 0x74, 0x63, 0x68, 0x49, 0x64, 0x12, 0x12, 0x0a, 0x04, 0x75, 0x69,
+	0x64, 0x73, 0x18, 0x02, 0x20, 0x03, 0x28, 0x09, 0x52, 0x04, 0x75, 0x69, 0x64, 0x73, 0x22, 0x25,
+	0x0a, 0x0f, 0x43, 0x72, 0x65, 0x61, 0x74, 0x65, 0x47, 0x61, 0x6d, 0x65, 0x52, 0x65, 0x70, 0x6c,
+	0x79, 0x12, 0x12, 0x0a, 0x04, 0x63, 0x6f, 0x64, 0x65, 0x18, 0x01, 0x20, 0x01, 0x28, 0x05, 0x52,
+	0x04, 0x63, 0x6f, 0x64, 0x65, 0x22, 0x21, 0x0a, 0x09, 0x52, 0x65, 0x6a, 0x6f, 0x69, 0x6e, 0x4d,
+	0x73, 0x67, 0x12, 0x14, 0x0a, 0x05, 0x74, 0x6f, 0x6b, 0x65, 0x6e, 0x18, 0x01, 0x20, 0x01, 0x28,
+	0x09, 0x52, 0x05, 0x74, 0x6f, 0x6b, 0x65, 0x6e, 0x22, 0x5d, 0x0a, 0x0b, 0x52, 0x65, 0x6a, 0x6f,
+	0x69, 0x6e, 0x52, 0x65, 0x70, 0x6c, 0x79, 0x12, 0x14, 0x0a, 0x05, 0x66, 0x6f, 0x75, 0x6e, 0x64,
+	0x18, 0x01, 0x20, 0x01, 0x28, 0x08, 0x52, 0x05, 0x66, 0x6f, 0x75, 0x6e, 0x64, 0x12, 0x19, 0x0a,
+	0x08, 0x6d, 0x61, 0x74, 0x63, 0x68, 0x5f, 0x69, 0x64, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52,
+	0x07, 0x6d, 0x61, 0x74, 0x63, 0x68, 0x49, 0x64, 0x12, 0x1d, 0x0a, 0x0a, 0x70, 0x6c, 0x61, 0x79,
+	0x65, 0x72, 0x5f, 0x69, 0x64, 0x78, 0x18, 0x03, 0x20, 0x01, 0x28, 0x05, 0x52, 0x09, 0x70, 0x6c,
+	0x61, 0x79, 0x65, 0x72, 0x49, 0x64, 0x78, 0x22, 0x1c, 0x0a, 0x08, 0x4c, 0x65, 0x61, 0x76, 0x65,
+	0x4d, 0x73, 0x67, 0x12, 0x10, 0x0a, 0x03, 0x75, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09,
+	0x52, 0x03, 0x75, 0x69, 0x64, 0x22, 0x1c, 0x0a, 0x0a, 0x4c, 0x65, 0x61, 0x76, 0x65, 0x52, 0x65,
+	0x70, 0x6c, 0x79, 0x12, 0x0e, 0x0a, 0x02, 0x6f, 0x6b, 0x18, 0x01, 0x20, 0x01, 0x28, 0x08, 0x52,
+	0x02, 0x6f, 0x6b, 0x22, 0x9f, 0x01, 0x0a, 0x0e, 0x52, 0x65, 0x63, 0x6f, 0x72, 0x64, 0x4d, 0x61,
+	0x74, 0x63, 0x68, 0x4d, 0x73, 0x67, 0x12, 0x19, 0x0a, 0x08, 0x6d, 0x61, 0x74, 0x63, 0x68, 0x5f,
+	0x69, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x07, 0x6d, 0x61, 0x74, 0x63, 0x68, 0x49,
+	0x64, 0x12, 0x26, 0x0a, 0x05, 0x73, 0x6c, 0x6f, 0x74, 0x73, 0x18, 0x02, 0x20, 0x03, 0x28, 0x0b,
+	0x32, 0x10, 0x2e, 0x67, 0x61, 0x6d, 0x65, 0x2e, 0x53, 0x6c, 0x6f, 0x74, 0x52, 0x65, 0x73, 0x75,
+	0x6c, 0x74, 0x52, 0x05, 0x73, 0x6c, 0x6f, 0x74, 0x73, 0x12, 0x1f, 0x0a, 0x0b, 0x77, 0x69, 0x6e,
+	0x6e, 0x65, 0x72, 0x5f, 0x73, 0x6c, 0x6f, 0x74, 0x18, 0x03, 0x20, 0x01, 0x28, 0x05, 0x52, 0x0a,
+	0x77, 0x69, 0x6e, 0x6e, 0x65, 0x72, 0x53, 0x6c, 0x6f, 0x74, 0x12, 0x29, 0x0a, 0x10, 0x64, 0x75,
+	0x72, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x5f, 0x73, 0x65, 0x63, 0x6f, 0x6e, 0x64, 0x73, 0x18, 0x04,
+	0x20, 0x01, 0x28, 0x05, 0x52, 0x0f, 0x64, 0x75, 0x72, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x53, 0x65,
+	0x63, 0x6f, 0x6e, 0x64, 0x73, 0x22, 0x54, 0x0a, 0x10, 0x52, 0x65, 0x63, 0x6f, 0x72, 0x64, 0x4d,
+	0x61, 0x74, 0x63, 0x68, 0x52, 0x65, 0x70, 0x6c, 0x79, 0x12, 0x0e, 0x0a, 0x02, 0x6f, 0x6b, 0x18,
+	0x01, 0x20, 0x01, 0x28, 0x08, 0x52, 0x02, 0x6f, 0x6b, 0x12, 0x18, 0x0a, 0x07, 0x61, 0x70, 0x70,
+	0x6c, 0x69, 0x65, 0x64, 0x18, 0x02, 0x20, 0x01, 0x28, 0x08, 0x52, 0x07, 0x61, 0x70, 0x70, 0x6c,
+	0x69, 0x65, 0x64, 0x12, 0x16, 0x0a, 0x06, 0x72, 0x65, 0x61, 0x73, 0x6f, 0x6e, 0x18, 0x03, 0x20,
+	0x01, 0x28, 0x09, 0x52, 0x06, 0x72, 0x65, 0x61, 0x73, 0x6f, 0x6e, 0x22, 0x2e, 0x0a, 0x0d, 0x55,
+	0x73, 0x65, 0x72, 0x4f, 0x6e, 0x6c, 0x69, 0x6e, 0x65, 0x4d, 0x73, 0x67, 0x12, 0x1d, 0x0a, 0x0a,
+	0x61, 0x63, 0x63, 0x6f, 0x75, 0x6e, 0x74, 0x5f, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09,
+	0x52, 0x09, 0x61, 0x63, 0x63, 0x6f, 0x75, 0x6e, 0x74, 0x49, 0x64, 0x22, 0x39, 0x0a, 0x0f, 0x55,
+	0x73, 0x65, 0x72, 0x4f, 0x6e, 0x6c, 0x69, 0x6e, 0x65, 0x52, 0x65, 0x70, 0x6c, 0x79, 0x12, 0x0e,
+	0x0a, 0x02, 0x6f, 0x6b, 0x18, 0x01, 0x20, 0x01, 0x28, 0x08, 0x52, 0x02, 0x6f, 0x6b, 0x12, 0x16,
+	0x0a, 0x06, 0x72, 0x65, 0x61, 0x73, 0x6f, 0x6e, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x06,
+	0x72, 0x65, 0x61, 0x73, 0x6f, 0x6e, 0x22, 0x3f, 0x0a, 0x0a, 0x41, 0x64, 0x64, 0x42, 0x6f, 0x74,
+	0x73, 0x4d, 0x73, 0x67, 0x12, 0x14, 0x0a, 0x05, 0x63, 0x6f, 0x75, 0x6e, 0x74, 0x18, 0x01, 0x20,
+	0x01, 0x28, 0x05, 0x52, 0x05, 0x63, 0x6f, 0x75, 0x6e, 0x74, 0x12, 0x1b, 0x0a, 0x09, 0x61, 0x64,
+	0x6d, 0x69, 0x6e, 0x5f, 0x6b, 0x65, 0x79, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x08, 0x61,
+	0x64, 0x6d, 0x69, 0x6e, 0x4b, 0x65, 0x79, 0x22, 0x52, 0x0a, 0x0c, 0x41, 0x64, 0x64, 0x42, 0x6f,
+	0x74, 0x73, 0x52, 0x65, 0x70, 0x6c, 0x79, 0x12, 0x0e, 0x0a, 0x02, 0x6f, 0x6b, 0x18, 0x01, 0x20,
+	0x01, 0x28, 0x08, 0x52, 0x02, 0x6f, 0x6b, 0x12, 0x1a, 0x0a, 0x08, 0x65, 0x6e, 0x71, 0x75, 0x65,
+	0x75, 0x65, 0x64, 0x18, 0x02, 0x20, 0x01, 0x28, 0x05, 0x52, 0x08, 0x65, 0x6e, 0x71, 0x75, 0x65,
+	0x75, 0x65, 0x64, 0x12, 0x16, 0x0a, 0x06, 0x72, 0x65, 0x61, 0x73, 0x6f, 0x6e, 0x18, 0x03, 0x20,
+	0x01, 0x28, 0x09, 0x52, 0x06, 0x72, 0x65, 0x61, 0x73, 0x6f, 0x6e, 0x22, 0x61, 0x0a, 0x0d, 0x47,
+	0x72, 0x61, 0x6e, 0x74, 0x43, 0x6f, 0x69, 0x6e, 0x73, 0x4d, 0x73, 0x67, 0x12, 0x1d, 0x0a, 0x0a,
+	0x61, 0x63, 0x63, 0x6f, 0x75, 0x6e, 0x74, 0x5f, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09,
+	0x52, 0x09, 0x61, 0x63, 0x63, 0x6f, 0x75, 0x6e, 0x74, 0x49, 0x64, 0x12, 0x14, 0x0a, 0x05, 0x64,
+	0x65, 0x6c, 0x74, 0x61, 0x18, 0x02, 0x20, 0x01, 0x28, 0x03, 0x52, 0x05, 0x64, 0x65, 0x6c, 0x74,
+	0x61, 0x12, 0x1b, 0x0a, 0x09, 0x61, 0x64, 0x6d, 0x69, 0x6e, 0x5f, 0x6b, 0x65, 0x79, 0x18, 0x03,
+	0x20, 0x01, 0x28, 0x09, 0x52, 0x08, 0x61, 0x64, 0x6d, 0x69, 0x6e, 0x4b, 0x65, 0x79, 0x22, 0x4f,
+	0x0a, 0x0f, 0x47, 0x72, 0x61, 0x6e, 0x74, 0x43, 0x6f, 0x69, 0x6e, 0x73, 0x52, 0x65, 0x70, 0x6c,
+	0x79, 0x12, 0x0e, 0x0a, 0x02, 0x6f, 0x6b, 0x18, 0x01, 0x20, 0x01, 0x28, 0x08, 0x52, 0x02, 0x6f,
+	0x6b, 0x12, 0x14, 0x0a, 0x05, 0x63, 0x6f, 0x69, 0x6e, 0x73, 0x18, 0x02, 0x20, 0x01, 0x28, 0x03,
+	0x52, 0x05, 0x63, 0x6f, 0x69, 0x6e, 0x73, 0x12, 0x16, 0x0a, 0x06, 0x72, 0x65, 0x61, 0x73, 0x6f,
+	0x6e, 0x18, 0x03, 0x20, 0x01, 0x28, 0x09, 0x52, 0x06, 0x72, 0x65, 0x61, 0x73, 0x6f, 0x6e, 0x42,
+	0x14, 0x5a, 0x12, 0x6a, 0x6f, 0x6c, 0x74, 0x67, 0x6f, 0x2f, 0x67, 0x61, 0x6d, 0x65, 0x2f, 0x70,
+	0x72, 0x6f, 0x74, 0x6f, 0x73, 0x62, 0x06, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x33,
 }
 
 var (
@@ -3089,68 +1613,44 @@ func file_game_protos_game_proto_rawDescGZIP() []byte {
 	return file_game_protos_game_proto_rawDescData
 }
 
-var file_game_protos_game_proto_msgTypes = make([]protoimpl.MessageInfo, 45)
+var file_game_protos_game_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
 var file_game_protos_game_proto_goTypes = []any{
-	(*CommandMsg)(nil),         // 0: game.CommandMsg
-	(*JoinMsg)(nil),            // 1: game.JoinMsg
-	(*PendingMatchMsg)(nil),    // 2: game.PendingMatchMsg
-	(*PendingMatchReply)(nil),  // 3: game.PendingMatchReply
-	(*AbandonMatchMsg)(nil),    // 4: game.AbandonMatchMsg
-	(*AbandonMatchReply)(nil),  // 5: game.AbandonMatchReply
-	(*RegisterMsg)(nil),        // 6: game.RegisterMsg
-	(*LoginMsg)(nil),           // 7: game.LoginMsg
-	(*ResumeMsg)(nil),          // 8: game.ResumeMsg
-	(*LoginReply)(nil),         // 9: game.LoginReply
-	(*LogicStateMsg)(nil),      // 10: game.LogicStateMsg
-	(*PurchaseMsg)(nil),        // 11: game.PurchaseMsg
-	(*EquipMsg)(nil),           // 12: game.EquipMsg
-	(*UserOnlineMsg)(nil),      // 13: game.UserOnlineMsg
-	(*UserOnlineReply)(nil),    // 14: game.UserOnlineReply
-	(*LogicShopItem)(nil),      // 15: game.LogicShopItem
-	(*LogicStateReply)(nil),    // 16: game.LogicStateReply
-	(*BindGameMsg)(nil),        // 17: game.BindGameMsg
-	(*BindGameReply)(nil),      // 18: game.BindGameReply
-	(*MatchResult)(nil),        // 19: game.MatchResult
-	(*CreateGameMsg)(nil),      // 20: game.CreateGameMsg
-	(*CreateGameReply)(nil),    // 21: game.CreateGameReply
-	(*RejoinMsg)(nil),          // 22: game.RejoinMsg
-	(*RejoinReply)(nil),        // 23: game.RejoinReply
-	(*LeaveMsg)(nil),           // 24: game.LeaveMsg
-	(*LeaveReply)(nil),         // 25: game.LeaveReply
-	(*SchemaField)(nil),        // 26: game.SchemaField
-	(*Schema)(nil),             // 27: game.Schema
-	(*AttrValue)(nil),          // 28: game.AttrValue
-	(*EntityDelta)(nil),        // 29: game.EntityDelta
-	(*Frame)(nil),              // 30: game.Frame
-	(*SlotResult)(nil),         // 31: game.SlotResult
-	(*RecordMatchMsg)(nil),     // 32: game.RecordMatchMsg
-	(*RecordMatchReply)(nil),   // 33: game.RecordMatchReply
-	(*MatchRecord)(nil),        // 34: game.MatchRecord
-	(*PlayerProfileMsg)(nil),   // 35: game.PlayerProfileMsg
-	(*PlayerProfileReply)(nil), // 36: game.PlayerProfileReply
-	(*MatchCancelMsg)(nil),     // 37: game.MatchCancelMsg
-	(*MatchCancelReply)(nil),   // 38: game.MatchCancelReply
-	(*MatchStatus)(nil),        // 39: game.MatchStatus
-	(*MatchEnded)(nil),         // 40: game.MatchEnded
-	(*AddBotsMsg)(nil),         // 41: game.AddBotsMsg
-	(*AddBotsReply)(nil),       // 42: game.AddBotsReply
-	(*GrantCoinsMsg)(nil),      // 43: game.GrantCoinsMsg
-	(*GrantCoinsReply)(nil),    // 44: game.GrantCoinsReply
+	(*SchemaField)(nil),      // 0: game.SchemaField
+	(*Schema)(nil),           // 1: game.Schema
+	(*AttrValue)(nil),        // 2: game.AttrValue
+	(*EntityDelta)(nil),      // 3: game.EntityDelta
+	(*Frame)(nil),            // 4: game.Frame
+	(*SlotResult)(nil),       // 5: game.SlotResult
+	(*MatchEnded)(nil),       // 6: game.MatchEnded
+	(*BindGameMsg)(nil),      // 7: game.BindGameMsg
+	(*BindGameReply)(nil),    // 8: game.BindGameReply
+	(*CreateGameMsg)(nil),    // 9: game.CreateGameMsg
+	(*CreateGameReply)(nil),  // 10: game.CreateGameReply
+	(*RejoinMsg)(nil),        // 11: game.RejoinMsg
+	(*RejoinReply)(nil),      // 12: game.RejoinReply
+	(*LeaveMsg)(nil),         // 13: game.LeaveMsg
+	(*LeaveReply)(nil),       // 14: game.LeaveReply
+	(*RecordMatchMsg)(nil),   // 15: game.RecordMatchMsg
+	(*RecordMatchReply)(nil), // 16: game.RecordMatchReply
+	(*UserOnlineMsg)(nil),    // 17: game.UserOnlineMsg
+	(*UserOnlineReply)(nil),  // 18: game.UserOnlineReply
+	(*AddBotsMsg)(nil),       // 19: game.AddBotsMsg
+	(*AddBotsReply)(nil),     // 20: game.AddBotsReply
+	(*GrantCoinsMsg)(nil),    // 21: game.GrantCoinsMsg
+	(*GrantCoinsReply)(nil),  // 22: game.GrantCoinsReply
 }
 var file_game_protos_game_proto_depIdxs = []int32{
-	15, // 0: game.LogicStateReply.items:type_name -> game.LogicShopItem
-	26, // 1: game.Schema.fields:type_name -> game.SchemaField
-	28, // 2: game.EntityDelta.set:type_name -> game.AttrValue
-	29, // 3: game.Frame.entities:type_name -> game.EntityDelta
-	27, // 4: game.Frame.schema:type_name -> game.Schema
-	31, // 5: game.RecordMatchMsg.slots:type_name -> game.SlotResult
-	34, // 6: game.PlayerProfileReply.recent_matches:type_name -> game.MatchRecord
-	31, // 7: game.MatchEnded.slots:type_name -> game.SlotResult
-	8,  // [8:8] is the sub-list for method output_type
-	8,  // [8:8] is the sub-list for method input_type
-	8,  // [8:8] is the sub-list for extension type_name
-	8,  // [8:8] is the sub-list for extension extendee
-	0,  // [0:8] is the sub-list for field type_name
+	0, // 0: game.Schema.fields:type_name -> game.SchemaField
+	2, // 1: game.EntityDelta.set:type_name -> game.AttrValue
+	3, // 2: game.Frame.entities:type_name -> game.EntityDelta
+	1, // 3: game.Frame.schema:type_name -> game.Schema
+	5, // 4: game.MatchEnded.slots:type_name -> game.SlotResult
+	5, // 5: game.RecordMatchMsg.slots:type_name -> game.SlotResult
+	6, // [6:6] is the sub-list for method output_type
+	6, // [6:6] is the sub-list for method input_type
+	6, // [6:6] is the sub-list for extension type_name
+	6, // [6:6] is the sub-list for extension extendee
+	0, // [0:6] is the sub-list for field type_name
 }
 
 func init() { file_game_protos_game_proto_init() }
@@ -3160,318 +1660,6 @@ func file_game_protos_game_proto_init() {
 	}
 	if !protoimpl.UnsafeEnabled {
 		file_game_protos_game_proto_msgTypes[0].Exporter = func(v any, i int) any {
-			switch v := v.(*CommandMsg); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_game_protos_game_proto_msgTypes[1].Exporter = func(v any, i int) any {
-			switch v := v.(*JoinMsg); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_game_protos_game_proto_msgTypes[2].Exporter = func(v any, i int) any {
-			switch v := v.(*PendingMatchMsg); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_game_protos_game_proto_msgTypes[3].Exporter = func(v any, i int) any {
-			switch v := v.(*PendingMatchReply); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_game_protos_game_proto_msgTypes[4].Exporter = func(v any, i int) any {
-			switch v := v.(*AbandonMatchMsg); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_game_protos_game_proto_msgTypes[5].Exporter = func(v any, i int) any {
-			switch v := v.(*AbandonMatchReply); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_game_protos_game_proto_msgTypes[6].Exporter = func(v any, i int) any {
-			switch v := v.(*RegisterMsg); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_game_protos_game_proto_msgTypes[7].Exporter = func(v any, i int) any {
-			switch v := v.(*LoginMsg); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_game_protos_game_proto_msgTypes[8].Exporter = func(v any, i int) any {
-			switch v := v.(*ResumeMsg); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_game_protos_game_proto_msgTypes[9].Exporter = func(v any, i int) any {
-			switch v := v.(*LoginReply); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_game_protos_game_proto_msgTypes[10].Exporter = func(v any, i int) any {
-			switch v := v.(*LogicStateMsg); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_game_protos_game_proto_msgTypes[11].Exporter = func(v any, i int) any {
-			switch v := v.(*PurchaseMsg); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_game_protos_game_proto_msgTypes[12].Exporter = func(v any, i int) any {
-			switch v := v.(*EquipMsg); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_game_protos_game_proto_msgTypes[13].Exporter = func(v any, i int) any {
-			switch v := v.(*UserOnlineMsg); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_game_protos_game_proto_msgTypes[14].Exporter = func(v any, i int) any {
-			switch v := v.(*UserOnlineReply); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_game_protos_game_proto_msgTypes[15].Exporter = func(v any, i int) any {
-			switch v := v.(*LogicShopItem); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_game_protos_game_proto_msgTypes[16].Exporter = func(v any, i int) any {
-			switch v := v.(*LogicStateReply); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_game_protos_game_proto_msgTypes[17].Exporter = func(v any, i int) any {
-			switch v := v.(*BindGameMsg); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_game_protos_game_proto_msgTypes[18].Exporter = func(v any, i int) any {
-			switch v := v.(*BindGameReply); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_game_protos_game_proto_msgTypes[19].Exporter = func(v any, i int) any {
-			switch v := v.(*MatchResult); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_game_protos_game_proto_msgTypes[20].Exporter = func(v any, i int) any {
-			switch v := v.(*CreateGameMsg); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_game_protos_game_proto_msgTypes[21].Exporter = func(v any, i int) any {
-			switch v := v.(*CreateGameReply); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_game_protos_game_proto_msgTypes[22].Exporter = func(v any, i int) any {
-			switch v := v.(*RejoinMsg); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_game_protos_game_proto_msgTypes[23].Exporter = func(v any, i int) any {
-			switch v := v.(*RejoinReply); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_game_protos_game_proto_msgTypes[24].Exporter = func(v any, i int) any {
-			switch v := v.(*LeaveMsg); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_game_protos_game_proto_msgTypes[25].Exporter = func(v any, i int) any {
-			switch v := v.(*LeaveReply); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_game_protos_game_proto_msgTypes[26].Exporter = func(v any, i int) any {
 			switch v := v.(*SchemaField); i {
 			case 0:
 				return &v.state
@@ -3483,7 +1671,7 @@ func file_game_protos_game_proto_init() {
 				return nil
 			}
 		}
-		file_game_protos_game_proto_msgTypes[27].Exporter = func(v any, i int) any {
+		file_game_protos_game_proto_msgTypes[1].Exporter = func(v any, i int) any {
 			switch v := v.(*Schema); i {
 			case 0:
 				return &v.state
@@ -3495,7 +1683,7 @@ func file_game_protos_game_proto_init() {
 				return nil
 			}
 		}
-		file_game_protos_game_proto_msgTypes[28].Exporter = func(v any, i int) any {
+		file_game_protos_game_proto_msgTypes[2].Exporter = func(v any, i int) any {
 			switch v := v.(*AttrValue); i {
 			case 0:
 				return &v.state
@@ -3507,7 +1695,7 @@ func file_game_protos_game_proto_init() {
 				return nil
 			}
 		}
-		file_game_protos_game_proto_msgTypes[29].Exporter = func(v any, i int) any {
+		file_game_protos_game_proto_msgTypes[3].Exporter = func(v any, i int) any {
 			switch v := v.(*EntityDelta); i {
 			case 0:
 				return &v.state
@@ -3519,7 +1707,7 @@ func file_game_protos_game_proto_init() {
 				return nil
 			}
 		}
-		file_game_protos_game_proto_msgTypes[30].Exporter = func(v any, i int) any {
+		file_game_protos_game_proto_msgTypes[4].Exporter = func(v any, i int) any {
 			switch v := v.(*Frame); i {
 			case 0:
 				return &v.state
@@ -3531,7 +1719,7 @@ func file_game_protos_game_proto_init() {
 				return nil
 			}
 		}
-		file_game_protos_game_proto_msgTypes[31].Exporter = func(v any, i int) any {
+		file_game_protos_game_proto_msgTypes[5].Exporter = func(v any, i int) any {
 			switch v := v.(*SlotResult); i {
 			case 0:
 				return &v.state
@@ -3543,103 +1731,7 @@ func file_game_protos_game_proto_init() {
 				return nil
 			}
 		}
-		file_game_protos_game_proto_msgTypes[32].Exporter = func(v any, i int) any {
-			switch v := v.(*RecordMatchMsg); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_game_protos_game_proto_msgTypes[33].Exporter = func(v any, i int) any {
-			switch v := v.(*RecordMatchReply); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_game_protos_game_proto_msgTypes[34].Exporter = func(v any, i int) any {
-			switch v := v.(*MatchRecord); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_game_protos_game_proto_msgTypes[35].Exporter = func(v any, i int) any {
-			switch v := v.(*PlayerProfileMsg); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_game_protos_game_proto_msgTypes[36].Exporter = func(v any, i int) any {
-			switch v := v.(*PlayerProfileReply); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_game_protos_game_proto_msgTypes[37].Exporter = func(v any, i int) any {
-			switch v := v.(*MatchCancelMsg); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_game_protos_game_proto_msgTypes[38].Exporter = func(v any, i int) any {
-			switch v := v.(*MatchCancelReply); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_game_protos_game_proto_msgTypes[39].Exporter = func(v any, i int) any {
-			switch v := v.(*MatchStatus); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_game_protos_game_proto_msgTypes[40].Exporter = func(v any, i int) any {
+		file_game_protos_game_proto_msgTypes[6].Exporter = func(v any, i int) any {
 			switch v := v.(*MatchEnded); i {
 			case 0:
 				return &v.state
@@ -3651,7 +1743,151 @@ func file_game_protos_game_proto_init() {
 				return nil
 			}
 		}
-		file_game_protos_game_proto_msgTypes[41].Exporter = func(v any, i int) any {
+		file_game_protos_game_proto_msgTypes[7].Exporter = func(v any, i int) any {
+			switch v := v.(*BindGameMsg); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_game_protos_game_proto_msgTypes[8].Exporter = func(v any, i int) any {
+			switch v := v.(*BindGameReply); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_game_protos_game_proto_msgTypes[9].Exporter = func(v any, i int) any {
+			switch v := v.(*CreateGameMsg); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_game_protos_game_proto_msgTypes[10].Exporter = func(v any, i int) any {
+			switch v := v.(*CreateGameReply); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_game_protos_game_proto_msgTypes[11].Exporter = func(v any, i int) any {
+			switch v := v.(*RejoinMsg); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_game_protos_game_proto_msgTypes[12].Exporter = func(v any, i int) any {
+			switch v := v.(*RejoinReply); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_game_protos_game_proto_msgTypes[13].Exporter = func(v any, i int) any {
+			switch v := v.(*LeaveMsg); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_game_protos_game_proto_msgTypes[14].Exporter = func(v any, i int) any {
+			switch v := v.(*LeaveReply); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_game_protos_game_proto_msgTypes[15].Exporter = func(v any, i int) any {
+			switch v := v.(*RecordMatchMsg); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_game_protos_game_proto_msgTypes[16].Exporter = func(v any, i int) any {
+			switch v := v.(*RecordMatchReply); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_game_protos_game_proto_msgTypes[17].Exporter = func(v any, i int) any {
+			switch v := v.(*UserOnlineMsg); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_game_protos_game_proto_msgTypes[18].Exporter = func(v any, i int) any {
+			switch v := v.(*UserOnlineReply); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_game_protos_game_proto_msgTypes[19].Exporter = func(v any, i int) any {
 			switch v := v.(*AddBotsMsg); i {
 			case 0:
 				return &v.state
@@ -3663,7 +1899,7 @@ func file_game_protos_game_proto_init() {
 				return nil
 			}
 		}
-		file_game_protos_game_proto_msgTypes[42].Exporter = func(v any, i int) any {
+		file_game_protos_game_proto_msgTypes[20].Exporter = func(v any, i int) any {
 			switch v := v.(*AddBotsReply); i {
 			case 0:
 				return &v.state
@@ -3675,7 +1911,7 @@ func file_game_protos_game_proto_init() {
 				return nil
 			}
 		}
-		file_game_protos_game_proto_msgTypes[43].Exporter = func(v any, i int) any {
+		file_game_protos_game_proto_msgTypes[21].Exporter = func(v any, i int) any {
 			switch v := v.(*GrantCoinsMsg); i {
 			case 0:
 				return &v.state
@@ -3687,7 +1923,7 @@ func file_game_protos_game_proto_init() {
 				return nil
 			}
 		}
-		file_game_protos_game_proto_msgTypes[44].Exporter = func(v any, i int) any {
+		file_game_protos_game_proto_msgTypes[22].Exporter = func(v any, i int) any {
 			switch v := v.(*GrantCoinsReply); i {
 			case 0:
 				return &v.state
@@ -3706,7 +1942,7 @@ func file_game_protos_game_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: file_game_protos_game_proto_rawDesc,
 			NumEnums:      0,
-			NumMessages:   45,
+			NumMessages:   23,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

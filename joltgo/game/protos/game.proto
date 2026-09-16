@@ -1,20 +1,26 @@
-// 游戏协议消息（wire 契约）。gate / account / logic / match / game 等服务与
-// Godot 客户端都遵守。
-// 线上 route 一律是三段式 `server.service.method`（pitaya 的路由格式）：
-//   - 客户端 → gate → account：account.account.register / account.account.login /
-//     account.account.resume（Request/Response，不是 Notify/Push —— 见 docs/API.md）
-//   - 客户端 → gate → logic：logic.logic.state / logic.logic.purchase /
-//     logic.logic.equip（Request/Response）
-//   - 客户端 → gate → match：match.match.join（JoinMsg，Notify）
-//   - 客户端 → gate → match：match.match.pending（PendingMatchMsg）/ match.match.abandon
-//     （AbandonMatchMsg）（Request/Response：进大厅时问「我有没有没打完的局」、
-//     以及放弃那场对局 —— 放弃只是把该玩家从实例里释放出来，实例照常打完）
-//   - match → 客户端：onMatched（MatchResult，Push —— 推送用 route 名，不是三段式）
-//   - match → game（RPC）：game.game.create（CreateGameMsg）/ game.game.rejoin（RejoinMsg）
+// game 的协议定义：game 推给客户端的消息 + 服务内部消息。
+//
+// 归属规则（与 gate/protos/gate.proto、match/protos/match.proto 一致，三份文件
+// 之间**没有 import 关系**）：
+//   - 客户端主动请求 → gate/protos/gate.proto
+//   - match 推给客户端的 → match/protos/match.proto
+//   - game 推给客户端的、以及服务之间的内部消息 → 本文件
+//
+// 内部消息留在这里是因为它们的双方（game ↔ logic / gate、gm → game）不涉及客户端；
+// 其中 SlotResult 同时被下发的 MatchEnded 与上报的 RecordMatchMsg 使用，两个消息
+// 都在本文件，所以零 import。
+//
+// 内部 RPC 的 route 一览（都是三段式，用 RegisterRemote 注册）：
+//   - match → game：game.game.create（CreateGameMsg）/ game.game.rejoin（RejoinMsg）
 //     / game.game.leave（LeaveMsg，放弃对局时把玩家从实例里摘出来）
-//   - match → gate（RPC）：gate.gate.bindgame（BindGameMsg）
-//   - 客户端 → gate → game：game.game.cmd（CommandMsg）/ game.game.resync（空，Notify）
-//   - game → 客户端：onFrame（Frame，Push）
+//   - match → gate：gate.gate.bindgame（BindGameMsg）
+//   - game → logic：logic.logic.recordmatch（RecordMatchMsg，战绩上报）
+//   - account → logic：logic.logic.online（UserOnlineMsg）
+//   - gm → match：match.match.addbots（AddBotsMsg）
+//   - gm → logic：logic.logic.grantcoins（GrantCoinsMsg）
+//
+// 这些 route 客户端**发不到**：gate 只转发 gate/protos/gate.proto 里定义过的 route
+// （见 joltgo/gate/routes.go 的 allowedRoutes）。
 //
 // 同步不走手写快照，走通用「实体-属性」增量：属性表（Schema）在 full 帧里下发一次，
 // 之后所有帧都是 (实体, 属性, 终值) 的 op。新增属性不需要改动本文件的字段定义。
@@ -27,170 +33,7 @@ package game;
 
 option go_package = "joltgo/game/protos";
 
-// CommandMsg 是一帧的上行命令：把输入与射击合并成一条消息发送（帧是最小发送单位）。
-// shoot 是边沿触发，未触发时为 false。
-message CommandMsg {
-  repeated float move = 1;   // [wx, wz]，世界空间水平期望速度（m/s）
-  float yaw = 2;             // 水平朝向（弧度，绕 Y 轴）
-  bool jump = 3;             // 跳跃边沿触发（服务端下一 tick 消费）
-  bool shoot = 4;            // 射击边沿触发
-  repeated float origin = 5; // [x, y, z] 枪口位置（shoot 为 true 时有效）
-  repeated float dir = 6;    // [x, y, z] 射击方向（服务端会归一化）
-  reserved 7;                // 曾是 bool reset（场景重置），功能已删除，字段号不再复用
-  reserved "reset";
-}
-
-// JoinMsg 是加入匹配的请求。身份来自会话绑定（account 服务在登录时做的），
-// 这里不再携带任何凭证 —— 字段清空后 route 与 handler 签名都不变。
-message JoinMsg {}
-
-// PendingMatchMsg 是「我有没有没打完的局」的查询请求（route "match.match.pending"）。
-// 客户端登录成功、刚进大厅时问一次：命中就弹「回到对局 / 放弃对局」的询问框。
-// 身份来自会话，payload 为空。
-message PendingMatchMsg {}
-
-// PendingMatchReply 是 match.match.pending 的应答。
-// found=false 时 match_id 无意义（空串）。
-message PendingMatchReply {
-  bool found = 1;
-  string match_id = 2;
-}
-
-// AbandonMatchMsg 是「放弃那场没打完的局」的请求（route "match.match.abandon"）。
-// 语义：**只把当前玩家从对局里释放出来**（不再收帧、不再参与结算），对局实例本身
-// 照常推进 —— 对手还在打，他的那一局不因为有人放弃而中断。身份来自会话。
-message AbandonMatchMsg {}
-
-// AbandonMatchReply 是 match.match.abandon 的应答。
-// reason：released | not_found | unauthenticated | internal。
-message AbandonMatchReply {
-  bool ok = 1;
-  string reason = 2;
-}
-
-// RegisterMsg 是注册请求。用户名 3-16 位 [a-zA-Z0-9_]，密码 6-64 位。
-message RegisterMsg {
-  string username = 1;
-  string password = 2;
-}
-
-// LoginMsg 是登录请求。
-message LoginMsg {
-  string username = 1;
-  string password = 2;
-}
-
-// ResumeMsg 是凭证恢复请求：客户端持有 token，换回会话。
-message ResumeMsg {
-  string token = 1;
-}
-
-// LoginReply 是 register / login / resume 的统一应答，客户端用同一段代码处理。
-// ok=false 时 reason 是机器可读的原因码（bad_credentials / name_taken /
-// bad_username / bad_password / rate_limited / token_invalid / internal）。
-message LoginReply {
-  bool ok = 1;
-  string token = 2;      // ok=true 时有效
-  string username = 3;   // 保留用户输入的原始大小写，供 UI 显示
-  string account_id = 4; // 十进制字符串，仅供诊断
-  string reason = 5;     // ok=false 时的原因码
-}
-
-message LogicStateMsg {}
-
-message PurchaseMsg {
-  string item_id = 1;
-  int32 quantity = 2;
-}
-
-message EquipMsg {
-  string item_id = 1;
-}
-
-message UserOnlineMsg {
-  string account_id = 1;
-}
-
-message UserOnlineReply {
-  bool ok = 1;
-  string reason = 2;
-}
-
-message LogicShopItem {
-  string item_id = 1;
-  string display_name = 2;
-  int64 price = 3;
-  string equip_slot = 4;
-  int64 owned_quantity = 5;
-}
-
-message LogicStateReply {
-  bool ok = 1;
-  string reason = 2;
-  int64 coins = 3;
-  repeated LogicShopItem items = 4;
-  string equipped_primary_weapon = 5;
-}
-
-// BindGameMsg 是 match → gate 的 RPC 请求（route "gate.gate.bindgame"）：请玩家
-// 所属的 gate 把对局归属写进它自己的会话数据（gate 据 gameServerId 定点路由
-// game.*）。game_server_id 为空表示回滚（清掉归属）。
-message BindGameMsg {
-  string uid = 1;
-  string game_server_id = 2;
-  string match_id = 3;
-  int32 player_idx = 4;
-}
-
-// BindGameReply 是 gate.gate.bindgame 的应答。found=false 表示该 gate 上没有
-// 这个会话（玩家已掉线）。
-message BindGameReply {
-  bool found = 1;
-}
-
-// MatchResult 是匹配成功结果（match → 客户端 push route "onMatched"）。
-message MatchResult {
-  string match_id = 1;       // 对局 id
-  string game_server_id = 2; // 分配到的 game 节点 id
-  int32 player_idx = 3;      // 本客户端在局内的玩家槽位（0/1）
-}
-
-// CreateGameMsg 是 match → game 创建对局的 RPC 请求（route "game.create"）。
-// uids 按槽位顺序（下标即 player_idx），1 个 = 单人兜底局。
-message CreateGameMsg {
-  string match_id = 1;
-  repeated string uids = 2;
-}
-
-// CreateGameReply 是 game.create 的 RPC 应答（0 = 成功）。
-message CreateGameReply {
-  int32 code = 1;
-}
-
-// RejoinMsg 是 match → game 的回局查询（route "game.rejoin"）：问这个 game 节点
-// 是否托管着该 token 的存量实例。
-message RejoinMsg {
-  string token = 1;
-}
-
-// RejoinReply 是 game.rejoin 的应答。
-message RejoinReply {
-  bool found = 1;
-  string match_id = 2;
-  int32 player_idx = 3; // 原本的玩家槽位（0/1）
-}
-
-// LeaveMsg 是 match → game 的 RPC（route "game.game.leave"）：请托管该实例的 game
-// 节点把这个玩家从对局里释放出来（见 AbandonMatchMsg 的语义）。uid 是会话 UID。
-message LeaveMsg {
-  string uid = 1;
-}
-
-// LeaveReply 是 game.leave 的应答。ok=false 表示这个 game 节点上没有该 uid 的实例
-// （已经离场、或本来就不在这个节点上）。
-message LeaveReply {
-  bool ok = 1;
-}
+// ---- game 推给客户端的：onFrame ----
 
 // SchemaField 是一个同步属性的声明。
 message SchemaField {
@@ -231,6 +74,8 @@ message Frame {
   Schema schema = 4;
 }
 
+// ---- game 推给客户端的：onMatchEnded ----
+
 // 单个槽位的结算数据。下标即 player_idx；uid 为空串表示该槽位没有真实玩家。
 message SlotResult {
   string uid = 1;
@@ -242,6 +87,73 @@ message SlotResult {
   // uid=="" 且 left=false 才是「这个槽位压根没人」，那种局不入账。
   bool left = 4;
 }
+
+// onMatchEnded 推送载荷：一局结束的权威信号。
+message MatchEnded {
+  string match_id = 1;
+  int32 winner_slot = 2;
+  repeated SlotResult slots = 3;
+  int32 duration_seconds = 4;
+}
+
+// ---- 服务内部：match → gate ----
+
+// BindGameMsg 是 match → gate 的 RPC 请求（route "gate.gate.bindgame"）：请玩家
+// 所属的 gate 把对局归属写进它自己的会话数据（gate 据 gameServerId 定点路由
+// game.*）。game_server_id 为空表示回滚（清掉归属）。
+message BindGameMsg {
+  string uid = 1;
+  string game_server_id = 2;
+  string match_id = 3;
+  int32 player_idx = 4;
+}
+
+// BindGameReply 是 gate.gate.bindgame 的应答。found=false 表示该 gate 上没有
+// 这个会话（玩家已掉线）。
+message BindGameReply {
+  bool found = 1;
+}
+
+// ---- 服务内部：match → game ----
+
+// CreateGameMsg 是 match → game 创建对局的 RPC 请求（route "game.create"）。
+// uids 按槽位顺序（下标即 player_idx），1 个 = 单人兜底局。
+message CreateGameMsg {
+  string match_id = 1;
+  repeated string uids = 2;
+}
+
+// CreateGameReply 是 game.create 的 RPC 应答（0 = 成功）。
+message CreateGameReply {
+  int32 code = 1;
+}
+
+// RejoinMsg 是 match → game 的回局查询（route "game.rejoin"）：问这个 game 节点
+// 是否托管着该 token 的存量实例。
+message RejoinMsg {
+  string token = 1;
+}
+
+// RejoinReply 是 game.rejoin 的应答。
+message RejoinReply {
+  bool found = 1;
+  string match_id = 2;
+  int32 player_idx = 3; // 原本的玩家槽位（0/1）
+}
+
+// LeaveMsg 是 match → game 的 RPC（route "game.game.leave"）：请托管该实例的 game
+// 节点把这个玩家从对局里释放出来（见 AbandonMatchMsg 的语义）。uid 是会话 UID。
+message LeaveMsg {
+  string uid = 1;
+}
+
+// LeaveReply 是 game.leave 的应答。ok=false 表示这个 game 节点上没有该 uid 的实例
+// （已经离场、或本来就不在这个节点上）。
+message LeaveReply {
+  bool ok = 1;
+}
+
+// ---- 服务内部：game → logic ----
 
 // game → logic：一局分出胜负时的结算上报（remote route logic.logic.recordmatch）。
 message RecordMatchMsg {
@@ -257,55 +169,18 @@ message RecordMatchReply {
   string reason = 3;
 }
 
-// 历史里的单场战绩（下发结构，与持久化结构分开）。
-message MatchRecord {
-  string match_id = 1;
-  bool won = 2;
-  int32 kills = 3;
-  int32 deaths = 4;
-  int32 opponent_kills = 5;
-  int32 duration_seconds = 6;
-  string opponent_name = 7;
-  int64 ended_at = 8;
+// ---- 服务内部：account → logic ----
+
+message UserOnlineMsg {
+  string account_id = 1;
 }
 
-message PlayerProfileMsg {}
-
-message PlayerProfileReply {
+message UserOnlineReply {
   bool ok = 1;
   string reason = 2;
-  int32 level = 3;
-  int64 xp = 4;
-  int64 xp_into_level = 5;
-  int64 xp_for_next_level = 6;
-  int32 kills = 7;
-  int32 deaths = 8;
-  int32 matches = 9;
-  int32 wins = 10;
-  int32 losses = 11;
-  repeated MatchRecord recent_matches = 12;
 }
 
-message MatchCancelMsg {}
-
-message MatchCancelReply {
-  bool ok = 1;
-  string reason = 2; // cancelled | already_matched | not_queued | unauthenticated
-}
-
-// onMatchStatus 推送载荷：匹配期每秒一次。
-message MatchStatus {
-  int32 queued_players = 1;
-  int32 waited_seconds = 2;
-}
-
-// onMatchEnded 推送载荷：一局结束的权威信号。
-message MatchEnded {
-  string match_id = 1;
-  int32 winner_slot = 2;
-  repeated SlotResult slots = 3;
-  int32 duration_seconds = 4;
-}
+// ---- 服务内部：gm → match / logic ----
 
 // AddBotsMsg 是 gm → match 的 RPC（route "match.match.addbots"）：往匹配队列里
 // 塞 N 个机器人凑人数。

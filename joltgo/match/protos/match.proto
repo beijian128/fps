@@ -1,0 +1,24 @@
+// match 推给客户端的消息。
+//
+// 归属规则：**推送按发送方** —— 谁发的就定义在谁的 proto 里。客户端主动请求在
+// gate/protos/gate.proto，game 推的在 game/protos/game.proto。三份文件之间
+// **没有 import 关系**（各自的类型自包含）。
+
+syntax = "proto3";
+
+package match;
+
+option go_package = "joltgo/match/protos";
+
+// MatchResult 是匹配成功结果（match → 客户端 push route "onMatched"）。
+message MatchResult {
+  string match_id = 1;       // 对局 id
+  string game_server_id = 2; // 分配到的 game 节点 id
+  int32 player_idx = 3;      // 本客户端在局内的玩家槽位（0/1）
+}
+
+// onMatchStatus 推送载荷：匹配期每秒一次。
+message MatchStatus {
+  int32 queued_players = 1;
+  int32 waited_seconds = 2;
+}

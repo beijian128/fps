@@ -1,0 +1,168 @@
+// 客户端主动请求与对应响应（C/S 契约的客户端上行部分）。
+//
+// 这个文件是 gate 转发白名单的**唯一来源**：gate 只转发这里定义过的 route
+// （见 joltgo/gate/routes.go 的 allowedRoutes）。服务端主动推送不在这里 ——
+// 它们按发送方归到 match/protos/match.proto 与 game/protos/game.proto。
+//
+// 线上 route 一律三段式 `server.service.method`（pitaya 的路由格式）：
+//   - 客户端 → gate → account：account.account.register / account.account.login /
+//     account.account.resume（Request/Response，不是 Notify/Push —— 见 docs/API.md）
+//   - 客户端 → gate → logic：logic.logic.state / logic.logic.purchase /
+//     logic.logic.equip / logic.logic.profile（Request/Response）
+//   - 客户端 → gate → match：match.match.join（Notify）/ match.match.pending /
+//     match.match.abandon / match.match.cancel（Request/Response —— pending 是进大厅时
+//     问「我有没有没打完的局」，abandon 是放弃那场对局，放弃只把该玩家从实例里释放出来、
+//     实例照常打完）
+//   - 客户端 → gate → game：game.game.cmd（Notify）/ game.game.resync（Notify，空 payload）
+//
+// 注：gate.sys.kick 用的是 pitaya 内置的 KickMsg / KickAnswer
+// （third_party/pitaya/pkg/protos），不在本文件定义范围内 —— 它同样走 C/S 通道，
+// 只是方向是服务端 → 客户端。
+//
+// 序列化用 pitaya 的 protobuf serializer。
+
+syntax = "proto3";
+
+package gate;
+
+option go_package = "joltgo/gate/protos";
+
+// ---- 账号：account.account.register / login / resume ----
+
+// RegisterMsg 是注册请求。用户名 3-16 位 [a-zA-Z0-9_]，密码 6-64 位。
+message RegisterMsg {
+  string username = 1;
+  string password = 2;
+}
+
+// LoginMsg 是登录请求。
+message LoginMsg {
+  string username = 1;
+  string password = 2;
+}
+
+// ResumeMsg 是凭证恢复请求：客户端持有 token，换回会话。
+message ResumeMsg {
+  string token = 1;
+}
+
+// LoginReply 是 register / login / resume 的统一应答，客户端用同一段代码处理。
+// ok=false 时 reason 是机器可读的原因码（bad_credentials / name_taken /
+// bad_username / bad_password / rate_limited / token_invalid / internal）。
+message LoginReply {
+  bool ok = 1;
+  string token = 2;      // ok=true 时有效
+  string username = 3;   // 保留用户输入的原始大小写，供 UI 显示
+  string account_id = 4; // 十进制字符串，仅供诊断
+  string reason = 5;     // ok=false 时的原因码
+}
+
+// ---- 局外：logic.logic.state / purchase / equip / profile ----
+
+message LogicStateMsg {}
+
+message PurchaseMsg {
+  string item_id = 1;
+  int32 quantity = 2;
+}
+
+message EquipMsg {
+  string item_id = 1;
+}
+
+message LogicShopItem {
+  string item_id = 1;
+  string display_name = 2;
+  int64 price = 3;
+  string equip_slot = 4;
+  int64 owned_quantity = 5;
+}
+
+message LogicStateReply {
+  bool ok = 1;
+  string reason = 2;
+  int64 coins = 3;
+  repeated LogicShopItem items = 4;
+  string equipped_primary_weapon = 5;
+}
+
+// 历史里的单场战绩（下发结构，与持久化结构分开）。
+message MatchRecord {
+  string match_id = 1;
+  bool won = 2;
+  int32 kills = 3;
+  int32 deaths = 4;
+  int32 opponent_kills = 5;
+  int32 duration_seconds = 6;
+  string opponent_name = 7;
+  int64 ended_at = 8;
+}
+
+message PlayerProfileMsg {}
+
+message PlayerProfileReply {
+  bool ok = 1;
+  string reason = 2;
+  int32 level = 3;
+  int64 xp = 4;
+  int64 xp_into_level = 5;
+  int64 xp_for_next_level = 6;
+  int32 kills = 7;
+  int32 deaths = 8;
+  int32 matches = 9;
+  int32 wins = 10;
+  int32 losses = 11;
+  repeated MatchRecord recent_matches = 12;
+}
+
+// ---- 匹配：match.match.join / pending / abandon / cancel ----
+
+// JoinMsg 是加入匹配的请求。身份来自会话绑定（account 服务在登录时做的），
+// 这里不再携带任何凭证 —— 字段清空后 route 与 handler 签名都不变。
+message JoinMsg {}
+
+// PendingMatchMsg 是「我有没有没打完的局」的查询请求（route "match.match.pending"）。
+// 客户端登录成功、刚进大厅时问一次：命中就弹「回到对局 / 放弃对局」的询问框。
+// 身份来自会话，payload 为空。
+message PendingMatchMsg {}
+
+// PendingMatchReply 是 match.match.pending 的应答。
+// found=false 时 match_id 无意义（空串）。
+message PendingMatchReply {
+  bool found = 1;
+  string match_id = 2;
+}
+
+// AbandonMatchMsg 是「放弃那场没打完的局」的请求（route "match.match.abandon"）。
+// 语义：**只把当前玩家从对局里释放出来**（不再收帧、不再参与结算），对局实例本身
+// 照常推进 —— 对手还在打，他的那一局不因为有人放弃而中断。身份来自会话。
+message AbandonMatchMsg {}
+
+// AbandonMatchReply 是 match.match.abandon 的应答。
+// reason：released | not_found | unauthenticated | internal。
+message AbandonMatchReply {
+  bool ok = 1;
+  string reason = 2;
+}
+
+message MatchCancelMsg {}
+
+message MatchCancelReply {
+  bool ok = 1;
+  string reason = 2; // cancelled | already_matched | not_queued | unauthenticated
+}
+
+// ---- 对局上行：game.game.cmd ----
+
+// CommandMsg 是一帧的上行命令：把输入与射击合并成一条消息发送（帧是最小发送单位）。
+// shoot 是边沿触发，未触发时为 false。
+message CommandMsg {
+  repeated float move = 1;   // [wx, wz]，世界空间水平期望速度（m/s）
+  float yaw = 2;             // 水平朝向（弧度，绕 Y 轴）
+  bool jump = 3;             // 跳跃边沿触发（服务端下一 tick 消费）
+  bool shoot = 4;            // 射击边沿触发
+  repeated float origin = 5; // [x, y, z] 枪口位置（shoot 为 true 时有效）
+  repeated float dir = 6;    // [x, y, z] 射击方向（服务端会归一化）
+  reserved 7;                // 曾是 bool reset（场景重置），功能已删除，字段号不再复用
+  reserved "reset";
+}
